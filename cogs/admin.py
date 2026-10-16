@@ -680,7 +680,11 @@ class Admin(commands.Cog):
         if ctx.author.id != ctx.guild.owner_id and ctx.author.id != PRIMARY_OWNER_ID:
             return await ctx.send("⛔ مالك السيرفر فقط يمكنه تعيين الرتبة.")
         g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute("UPDATE settings SET admin_role_id = ? WHERE guild_id = ?", (role.id, ctx.guild.id))
+        g_cur.execute(
+            "INSERT INTO settings (guild_id, admin_role_id) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET admin_role_id = excluded.admin_role_id",
+            (ctx.guild.id, role.id)
+        )
         g_conn.commit()
         g_conn.close()
         await ctx.send(f"✅ تم اعتماد رتبة {role.mention} كمسؤول للبوت.")

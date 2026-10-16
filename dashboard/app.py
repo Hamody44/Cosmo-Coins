@@ -379,16 +379,21 @@ def manage(guild_id):
                 delivery_log = request.form.get("delivery_log") or None
                 balance_log = request.form.get("balance_log") or None
                 exchange_success_log = request.form.get("exchange_success_log") or None
+                ticket_log = request.form.get("ticket_log") or None
 
                 cur.execute("""
-                    UPDATE settings 
-                    SET exchange_enabled = ?, 
-                        transfer_log = ?, 
-                        delivery_log = ?, 
-                        balance_log = ?, 
-                        exchange_success_log = ? 
-                    WHERE guild_id = ?
-                """, (exchange_enabled, transfer_log, delivery_log, balance_log, exchange_success_log, guild_id))
+                    INSERT INTO settings (
+                        guild_id, exchange_enabled, transfer_log, delivery_log,
+                        balance_log, exchange_success_log, ticket_log
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        exchange_enabled = excluded.exchange_enabled,
+                        transfer_log = excluded.transfer_log,
+                        delivery_log = excluded.delivery_log,
+                        balance_log = excluded.balance_log,
+                        exchange_success_log = excluded.exchange_success_log,
+                        ticket_log = excluded.ticket_log
+                """, (guild_id, exchange_enabled, transfer_log, delivery_log, balance_log, exchange_success_log, ticket_log))
                 conn.commit()
                 flash("تم حفظ إعدادات السيرفر وجميع اللوجات بنجاح!", "success")
                 conn.close()
@@ -484,7 +489,7 @@ def manage(guild_id):
 
         # 3. قراءة الإعدادات الحالية
         cur.execute("""
-            SELECT spending_balance, exchange_enabled, transfer_log, delivery_log, balance_log, exchange_success_log 
+            SELECT spending_balance, exchange_enabled, transfer_log, delivery_log, balance_log, exchange_success_log, ticket_log
             FROM settings WHERE guild_id = ?
         """, (guild_id,))
         s_row = cur.fetchone()
@@ -495,6 +500,7 @@ def manage(guild_id):
         delivery_log = str(s_row[3] or "") if s_row else ""
         balance_log = str(s_row[4] or "") if s_row else ""
         exchange_success_log = str(s_row[5] or "") if s_row else ""
+        ticket_log = str(s_row[6] or "") if s_row else ""
 
         settings_data = {
             "spending_balance": spending_balance,
@@ -502,7 +508,8 @@ def manage(guild_id):
             "transfer_log": transfer_log,
             "delivery_log": delivery_log,
             "balance_log": balance_log,
-            "exchange_success_log": exchange_success_log
+            "exchange_success_log": exchange_success_log,
+            "ticket_log": ticket_log,
         }
 
         # 4. قراءة العملات

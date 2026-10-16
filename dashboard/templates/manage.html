@@ -124,6 +124,17 @@
                     </select>
                 </div>
 
+                <div class="mb-4">
+                    <label class="form-label text-white fw-semibold">🎫 روم أرشيف التذاكر (خاص بهذا السيرفر)</label>
+                    <select name="ticket_log" class="form-select">
+                        <option value="">-- بدون روم محددة --</option>
+                        {% for ch in channels %}
+                            <option value="{{ ch.id }}" {% if settings.ticket_log|string == ch.id|string %}selected{% endif %}># {{ ch.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <small class="text-muted-custom">عند حذف تذكرة، يرسل البوت سجلها إلى هذه القناة داخل هذا السيرفر فقط.</small>
+                </div>
+
                 <button type="submit" class="btn btn-primary w-100 fw-bold">حفظ إعدادات الرومات</button>
             </form>
         </div>

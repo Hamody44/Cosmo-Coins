@@ -4,6 +4,30 @@ import io
 import datetime
 from database import get_guild_db, is_bot_admin, PRIMARY_OWNER_ID
 
+def can_manage_ticket_member(guild, member, admin_role_id=None) -> bool:
+    """صلاحيات إدارة التذاكر لا تعتمد على اشتراك Premium."""
+    if not guild or not member:
+        return False
+    if member.id in (guild.owner_id, PRIMARY_OWNER_ID):
+        return True
+    permissions = getattr(member, "guild_permissions", None)
+    if permissions and (permissions.administrator or permissions.manage_guild):
+        return True
+    if admin_role_id:
+        role = guild.get_role(admin_role_id)
+        if role and role in getattr(member, "roles", ()):
+            return True
+    return False
+
+def can_manage_tickets(ctx: commands.Context) -> bool:
+    if not ctx.guild or not ctx.author:
+        return False
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (ctx.guild.id,))
+    row = g_cur.fetchone()
+    g_conn.close()
+    return can_manage_ticket_member(ctx.guild, ctx.author, row[0] if row else None) or is_bot_admin(ctx)
+
 # واجهة أزرار التحكم داخل التذكرة (إغلاق / حذف)
 class TicketControlView(discord.ui.View):
     def __init__(self):
@@ -32,11 +56,9 @@ class TicketControlView(discord.ui.View):
         # التحقق من الصلاحيات: صاحب التكت أو الإدارة
         g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
         admin_row = g_cur.fetchone()
-        has_admin = interaction.user.id in [interaction.guild.owner_id, PRIMARY_OWNER_ID]
-        if admin_row and admin_row[0]:
-            role = interaction.guild.get_role(admin_row[0])
-            if role and role in interaction.user.roles:
-                has_admin = True
+        has_admin = can_manage_ticket_member(
+            interaction.guild, interaction.user, admin_row[0] if admin_row else None
+        )
 
         if not has_admin and interaction.user.id != owner_id:
             g_conn.close()
@@ -76,11 +98,9 @@ class TicketControlView(discord.ui.View):
         g_conn, g_cur = get_guild_db(interaction.guild.id)
         g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
         admin_row = g_cur.fetchone()
-        has_admin = interaction.user.id in [interaction.guild.owner_id, PRIMARY_OWNER_ID]
-        if admin_row and admin_row[0]:
-            role = interaction.guild.get_role(admin_row[0])
-            if role and role in interaction.user.roles:
-                has_admin = True
+        has_admin = can_manage_ticket_member(
+            interaction.guild, interaction.user, admin_row[0] if admin_row else None
+        )
 
         if not has_admin:
             g_conn.close()
@@ -234,8 +254,8 @@ class Tickets(commands.Cog):
 
     @commands.hybrid_command(name="setup_ticket", aliases=["انشاء_تكت"], description="إنشاء رسالة وزر فتح التذاكر في هذا الروم")
     async def setup_ticket(self, ctx: commands.Context):
-        if not is_bot_admin(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية لاستخدام هذا الأمر.")
+        if not can_manage_tickets(ctx):
+            return await ctx.send("⛔ مالك السيرفر أو مسؤول التذاكر فقط يمكنه إعداد النظام.")
 
         embed = discord.Embed(
             title="🎫 نظام الدعم الفني والمساعدة",
@@ -251,8 +271,8 @@ class Tickets(commands.Cog):
 
     @commands.hybrid_command(name="set_ticket_log", aliases=["لوج_التكت"], description="تحديد روم إرسال سجلات وتفريغ التذاكر بعد حذفها")
     async def set_ticket_log(self, ctx: commands.Context, channel: discord.TextChannel):
-        if not is_bot_admin(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية لاستخدام هذا الأمر.")
+        if not can_manage_tickets(ctx):
+            return await ctx.send("⛔ مالك السيرفر أو مسؤول التذاكر فقط يمكنه ضبط قناة اللوج.")
 
         g_conn, g_cur = get_guild_db(ctx.guild.id)
         g_cur.execute(
@@ -273,7 +293,7 @@ class Tickets(commands.Cog):
         if not row:
             return await ctx.send("❌ هذا الروم ليس تذكرة مسجلة في النظام.")
 
-        if not is_bot_admin(ctx) and ctx.author.id != row[0]:
+        if not can_manage_tickets(ctx) and ctx.author.id != row[0]:
             return await ctx.send("⛔ ليس لديك صلاحية لتغيير اسم هذه التذكرة.")
 
         cleaned_name = new_name.strip().replace(" ", "-")[:32]
@@ -295,7 +315,7 @@ class Tickets(commands.Cog):
             g_conn.close()
             return await ctx.send("⚠️ هذه التذكرة مغلقة بالفعل.")
 
-        if not is_bot_admin(ctx) and ctx.author.id != owner_id:
+        if not can_manage_tickets(ctx) and ctx.author.id != owner_id:
             g_conn.close()
             return await ctx.send("⛔ فقط صاحب التذكرة أو الإدارة يمكنهم إغلاقها.")
 
@@ -316,8 +336,8 @@ class Tickets(commands.Cog):
 
     @commands.hybrid_command(name="delete", aliases=["حذف_التكت"], description="حذف التذكرة وحفظ سجل محادثاتها في روم اللوج")
     async def delete_ticket(self, ctx: commands.Context):
-        if not is_bot_admin(ctx):
-            return await ctx.send("⛔ المسؤولون فقط يمكنهم حذف التذكرة نهائياً.")
+        if not can_manage_tickets(ctx):
+            return await ctx.send("⛔ مالك السيرفر أو مسؤول التذاكر فقط يمكنه حذف التذكرة نهائياً.")
 
         g_conn, g_cur = get_guild_db(ctx.guild.id)
         g_cur.execute("SELECT user_id, opened_at, closed_by FROM tickets WHERE channel_id = ?", (ctx.channel.id,))

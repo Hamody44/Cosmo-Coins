@@ -74,6 +74,51 @@ class DashboardSecurityTests(unittest.TestCase):
         self.assertEqual(query["scope"], ["bot applications.commands"])
         self.assertNotIn("guild_id", query)
 
+    @patch("dashboard.app.user_can_manage_guild", return_value=True)
+    @patch("dashboard.app.get_bot_guild_ids", return_value={123})
+    @patch("dashboard.app.get_guild_db")
+    def test_manage_saves_ticket_log_for_this_guild(self, get_db, _bot_guilds, _permission_check):
+        class Cursor:
+            def __init__(self):
+                self.statements = []
+            def execute(self, sql, params=()):
+                self.statements.append((sql, params))
+            def fetchone(self):
+                return None
+
+        class Connection:
+            def __init__(self):
+                self.committed = False
+                self.closed = False
+            def commit(self):
+                self.committed = True
+            def close(self):
+                self.closed = True
+
+        cursor = Cursor()
+        connection = Connection()
+        get_db.return_value = (connection, cursor)
+        with self.client.session_transaction() as session:
+            session["user"] = {"id": "456", "username": "test"}
+            session["access_token"] = "test-token"
+            session["csrf_token"] = "valid-csrf"
+
+        response = self.client.post("/manage/123", data={
+            "csrf_token": "valid-csrf",
+            "action": "save_settings",
+            "ticket_log": "789",
+        })
+
+        self.assertEqual(response.status_code, 302)
+        save_sql, save_params = next(
+            (sql, params) for sql, params in cursor.statements if "INSERT INTO settings" in sql
+        )
+        self.assertIn("ticket_log", save_sql)
+        self.assertIn("ON CONFLICT(guild_id) DO UPDATE", save_sql)
+        self.assertEqual(save_params, (123, 0, None, None, None, None, "789"))
+        self.assertTrue(connection.committed)
+        self.assertTrue(connection.closed)
+
 
 if __name__ == "__main__":
     unittest.main()
