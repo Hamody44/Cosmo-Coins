@@ -6,6 +6,8 @@ import re
 import math
 import random
 import io
+import threading
+from contextlib import closing
 import discord
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -16,7 +18,9 @@ if not os.path.exists("guilds_data"):
     os.makedirs("guilds_data")
 
 # قاعدة البيانات المركزية العامة
-global_conn = sqlite3.connect("global_cosmo.db", check_same_thread=False)
+GLOBAL_DB_PATH = os.path.abspath("global_cosmo.db")
+_balance_lock = threading.RLock()
+global_conn = sqlite3.connect(GLOBAL_DB_PATH, check_same_thread=False, timeout=10)
 global_cursor = global_conn.cursor()
 
 global_cursor.execute('''CREATE TABLE IF NOT EXISTS balances (
@@ -257,14 +261,116 @@ def is_blacklisted(member: discord.Member) -> bool:
     return False
 
 def get_balance(user_id):
-    global_cursor.execute("SELECT balance FROM balances WHERE user_id = ?", (user_id,))
-    row = global_cursor.fetchone()
-    return row[0] if row else 0
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        row = conn.execute("SELECT balance FROM balances WHERE user_id = ?", (user_id,)).fetchone()
+        return row[0] if row else 0
 
 def update_balance(user_id, amount):
-    bal = get_balance(user_id) + amount
-    global_cursor.execute("INSERT OR REPLACE INTO balances (user_id, balance) VALUES (?, ?)", (user_id, bal))
-    global_conn.commit()
+    amount = int(amount)
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (user_id,))
+        cur = conn.execute(
+            "UPDATE balances SET balance = balance + ? WHERE user_id = ? AND balance + ? >= 0",
+            (amount, user_id, amount),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            raise ValueError("رصيد غير كافٍ لإتمام الخصم.")
+        conn.commit()
+        return conn.execute("SELECT balance FROM balances WHERE user_id = ?", (user_id,)).fetchone()[0]
+
+def debit_balance(user_id, amount: int) -> bool:
+    amount = int(amount)
+    if amount <= 0:
+        raise ValueError("يجب أن يكون مبلغ الخصم موجباً.")
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE balances SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+            (amount, user_id, amount),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+def transfer_balance(sender_id: int, receiver_id: int, amount: int, timestamp: str) -> bool:
+    amount = int(amount)
+    if amount <= 0 or sender_id == receiver_id:
+        return False
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (sender_id,))
+        cur = conn.execute(
+            "UPDATE balances SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+            (amount, sender_id, amount),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return False
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (receiver_id,))
+        conn.execute("UPDATE balances SET balance = balance + ? WHERE user_id = ?", (amount, receiver_id))
+        conn.execute(
+            "INSERT INTO transfer_logs (sender_id, receiver_id, amount, timestamp) VALUES (?, ?, ?, ?)",
+            (sender_id, receiver_id, amount, timestamp),
+        )
+        conn.commit()
+        return True
+
+def create_exchange_request(guild_id: int, user_id: int, amount: int, currency: str,
+                            received_amount: float, note: str, timestamp: str):
+    amount = int(amount)
+    if amount <= 0:
+        return None
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE balances SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+            (amount, user_id, amount),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        cur = conn.execute(
+            "INSERT INTO exchange_logs (guild_id, user_id, cosmo_amount, target_currency, received_amount, note, status, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'قيد الانتظار', ?)",
+            (guild_id, user_id, amount, currency, received_amount, note, timestamp),
+        )
+        request_id = cur.lastrowid
+        conn.commit()
+        return request_id
+
+def accept_exchange_request(request_id: int) -> bool:
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE exchange_logs SET status = 'تم القبول' WHERE id = ? AND status = 'قيد الانتظار'",
+            (request_id,),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+def deny_exchange_request(request_id: int):
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT user_id, cosmo_amount FROM exchange_logs WHERE id = ? AND status = 'قيد الانتظار'",
+            (request_id,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        cur = conn.execute(
+            "UPDATE exchange_logs SET status = 'مرفوض' WHERE id = ? AND status = 'قيد الانتظار'",
+            (request_id,),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        user_id, amount = row
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (user_id,))
+        conn.execute("UPDATE balances SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        conn.commit()
+        return row
 
 def parse_amount(amount_str: str) -> int:
     amount_str = str(amount_str).strip().lower()

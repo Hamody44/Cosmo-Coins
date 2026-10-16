@@ -48,6 +48,13 @@ def run_tunnel():
             print(f"❌ فشل تحميل أداة النفق: {e}")
             return
 
+    try:
+        # ملفات المستودع قد تُستنسخ دون بت التنفيذ؛ اضبطه قبل تشغيل الأداة.
+        os.chmod(binary_path, os.stat(binary_path).st_mode | stat.S_IXUSR)
+    except OSError as e:
+        print(f"❌ تعذر ضبط صلاحية تشغيل cloudflared: {e}")
+        return
+
     # تشغيل النفق
     try:
         print("🚀 جاري بدء تشغيل Cloudflare Tunnel...")

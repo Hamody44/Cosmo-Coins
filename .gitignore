@@ -1,0 +1,20 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.config/ngrok/ngrok.yml
+
+# Runtime databases and generated backups
+global_cosmo.db
+global_cosmo_backup.db
+guilds_data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python artifacts and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/

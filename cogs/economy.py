@@ -4,9 +4,10 @@ import random
 import asyncio
 from datetime import datetime
 from database import (
-    get_balance, update_balance, parse_amount, generate_captcha_image,
-    is_blacklisted, is_bot_admin, global_cursor, global_conn, get_guild_db,
-    send_global_action_log
+    get_balance, parse_amount, generate_captcha_image,
+    is_blacklisted, is_bot_admin, global_cursor, get_guild_db, PRIMARY_OWNER_ID,
+    send_global_action_log, transfer_balance, create_exchange_request,
+    accept_exchange_request, deny_exchange_request
 )
 
 class Economy(commands.Cog):
@@ -48,13 +49,15 @@ class Economy(commands.Cog):
         try:
             reply = await self.bot.wait_for("message", timeout=20.0, check=check)
             if reply.content.strip() == captcha_code:
-                update_balance(ctx.author.id, -parsed_amount)
-                update_balance(member.id, parsed_amount)
-                
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                global_cursor.execute("INSERT INTO transfer_logs (sender_id, receiver_id, amount, timestamp) VALUES (?, ?, ?, ?)",
-                                      (ctx.author.id, member.id, parsed_amount, now))
-                global_conn.commit()
+                if not transfer_balance(ctx.author.id, member.id, parsed_amount, now):
+                    await ctx.send("❌ لم يعد رصيدك كافياً لإتمام التحويل؛ لم يُخصم أي مبلغ.")
+                    try:
+                        await msg.delete()
+                        await reply.delete()
+                    except Exception:
+                        pass
+                    return
 
                 await ctx.send(f"✅ تم تحويل `{parsed_amount:,}` Cosmo إلى {member.mention}.")
                 try:
@@ -221,15 +224,10 @@ class Economy(commands.Cog):
         if not req_channel:
             return await ctx.send("❌ روم استقبال طلبات التبديل العام غير متاح حالياً.")
 
-        update_balance(ctx.author.id, -parsed_amount)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        global_cursor.execute(
-            "INSERT INTO exchange_logs (guild_id, user_id, cosmo_amount, target_currency, received_amount, note, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, 'قيد الانتظار', ?)",
-            (ctx.guild.id, ctx.author.id, parsed_amount, currency_name, total_received, note, now)
-        )
-        req_id = global_cursor.lastrowid
-        global_conn.commit()
+        req_id = create_exchange_request(ctx.guild.id, ctx.author.id, parsed_amount, currency_name, total_received, note, now)
+        if req_id is None:
+            return await ctx.send("❌ لم يعد رصيدك كافياً لإتمام الطلب؛ لم يُخصم أي مبلغ.")
 
         invite_link = None
         try:
@@ -263,20 +261,24 @@ class Economy(commands.Cog):
         embed.add_field(name="📝 الوصف والملاحظات", value=f"```{note}```", inline=False)
         embed.set_footer(text=f"للقبول: /accept_exchange {req_id} | للرفض: /deny_exchange {req_id}")
 
-        await req_channel.send(embed=embed)
+        try:
+            await req_channel.send(embed=embed)
+        except discord.HTTPException:
+            deny_exchange_request(req_id)
+            return await ctx.send("❌ تعذر إرسال الطلب للإدارة؛ أُعيد رصيدك تلقائياً.")
         await ctx.send(f"✅ تم إرسال طلب التبديل برقم `{req_id}` إلى الإدارة بنجاح.")
 
     @commands.hybrid_command(name="accept_exchange", aliases=["قبول_التبديل"], description="قبول طلب التبديل")
     async def accept_exchange(self, ctx: commands.Context, req_id: int):
-        if not is_bot_admin(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية.")
         global_cursor.execute("SELECT user_id, cosmo_amount, target_currency, received_amount, status, guild_id FROM exchange_logs WHERE id = ?", (req_id,))
         row = global_cursor.fetchone()
         if not row or row[4] != "قيد الانتظار":
             return await ctx.send("❌ الطلب غير موجود أو تمت معالجته مسبقاً.")
 
-        global_cursor.execute("UPDATE exchange_logs SET status = 'تم القبول' WHERE id = ?", (req_id,))
-        global_conn.commit()
+        if ctx.author.id != PRIMARY_OWNER_ID and (not ctx.guild or ctx.guild.id != row[5] or not is_bot_admin(ctx)):
+            return await ctx.send("⛔ يجب أن تكون مسؤولاً في السيرفر الذي يخصه طلب التبديل.")
+        if not accept_exchange_request(req_id):
+            return await ctx.send("❌ تمت معالجة هذا الطلب بالفعل؛ لم يُنفذ القبول مرة أخرى.")
 
         await ctx.send(f"✅ تم قبول طلب التبديل #{req_id}.")
 
@@ -294,22 +296,22 @@ class Economy(commands.Cog):
 
     @commands.hybrid_command(name="deny_exchange", aliases=["رفض_التبديل"], description="رفض طلب التبديل مع ذكر السبب")
     async def deny_exchange(self, ctx: commands.Context, req_id: int, *, reason: str = "غير محدد"):
-        if not is_bot_admin(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية.")
-        global_cursor.execute("SELECT user_id, cosmo_amount, target_currency, status FROM exchange_logs WHERE id = ?", (req_id,))
+        global_cursor.execute("SELECT user_id, cosmo_amount, target_currency, status, guild_id FROM exchange_logs WHERE id = ?", (req_id,))
         row = global_cursor.fetchone()
         if not row or row[3] != "قيد الانتظار":
             return await ctx.send("❌ الطلب غير صالح أو تمت معالجته.")
 
-        update_balance(row[0], row[1])
-        global_cursor.execute("UPDATE exchange_logs SET status = 'مرفوض' WHERE id = ?", (req_id,))
-        global_conn.commit()
+        if ctx.author.id != PRIMARY_OWNER_ID and (not ctx.guild or ctx.guild.id != row[4] or not is_bot_admin(ctx)):
+            return await ctx.send("⛔ يجب أن تكون مسؤولاً في السيرفر الذي يخصه طلب التبديل.")
+        refunded = deny_exchange_request(req_id)
+        if not refunded:
+            return await ctx.send("❌ تمت معالجة هذا الطلب بالفعل؛ لم يُرد الرصيد مرة أخرى.")
 
         await ctx.send(f"🛑 تم رفض الطلب #{req_id} وإعادة الرصيد.")
         try:
-            user = await self.bot.fetch_user(row[0])
+            user = await self.bot.fetch_user(refunded[0])
             if user:
-                await user.send(f"❌ تم رفض طلب التبديل #{req_id} وإعادة `{row[1]:,}` Cosmo لحسابك.\n**السبب:** `{reason}`")
+                await user.send(f"❌ تم رفض طلب التبديل #{req_id} وإعادة `{refunded[1]:,}` Cosmo لحسابك.\n**السبب:** `{reason}`")
         except:
             pass
 

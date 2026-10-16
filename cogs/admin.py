@@ -10,7 +10,7 @@ from datetime import datetime
 from database import (
     check_is_owner, is_bot_admin, is_guild_premium, parse_duration,
     parse_amount, get_guild_db, global_cursor, global_conn, PRIMARY_OWNER_ID,
-    deduct_server_spending, update_balance, is_blacklisted, get_server_spending_balance,
+    deduct_server_spending, update_balance, debit_balance, is_blacklisted, get_server_spending_balance,
     send_global_action_log
 )
 
@@ -249,7 +249,8 @@ class Admin(commands.Cog):
         if parsed_amount <= 0:
             return await ctx.send("❌ المبلغ يجب أن يكون رقماً موجباً.")
         
-        update_balance(member.id, -parsed_amount)
+        if not debit_balance(member.id, parsed_amount):
+            return await ctx.send("❌ رصيد العضو أقل من المبلغ المطلوب خصمه.")
         await ctx.send(f"✅ تم خصم `{parsed_amount:,}` Cosmo من رصيد {member.mention}.")
 
     @commands.hybrid_command(name="server_budget", aliases=["ميزانية_السيرفر"], description="عرض ميزانية الصرف المتبقية للسيرفر")

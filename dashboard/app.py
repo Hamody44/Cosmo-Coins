@@ -1,11 +1,16 @@
 import os
 import sqlite3
 import sys
+import secrets
+import hmac
+import ipaddress
+import socket
+from urllib.parse import urlencode, urlsplit
 from datetime import timedelta, datetime
 import time
 import requests
 import base64
-from flask import Flask, redirect, request, session, render_template, url_for, flash
+from flask import Flask, redirect, request, session, render_template, url_for, flash, abort
 from dotenv import load_dotenv
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,7 +20,10 @@ if project_root not in sys.path:
 
 # استيراد الدوال والأدوات المتاحة من database.py
 import database
-from database import get_guild_db, PRIMARY_OWNER_ID, update_balance, get_balance, parse_amount
+from database import (
+    get_guild_db, PRIMARY_OWNER_ID, get_balance, parse_amount,
+    create_exchange_request, deny_exchange_request,
+)
 
 load_dotenv(os.path.join(project_root, ".env"))
 
@@ -23,9 +31,17 @@ template_dir = os.path.join(current_dir, "templates")
 static_dir = os.path.join(current_dir, "static")
 app = Flask(__name__, template_folder=template_dir, static_folder=static_dir)
 
-# جلسة دائمة لمدة 30 يوماً
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "cosmo_fixed_dashboard_secret_key_2026")
+# جلسة دائمة لمدة 30 يوماً. لا تستخدم مفتاحاً ثابتاً/افتراضياً معروفاً.
+app.secret_key = os.getenv("FLASK_SECRET_KEY")
+if not app.secret_key or len(app.secret_key) < 32:
+    app.secret_key = secrets.token_urlsafe(48)
+    print("[SECURITY] FLASK_SECRET_KEY غير مضبوط أو ضعيف؛ استُخدم مفتاح مؤقت عشوائي. اضبط مفتاحاً ثابتاً بطول 32 محرفاً على الأقل.")
 app.permanent_session_lifetime = timedelta(days=30)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "true").lower() == "true",
+)
 
 CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
@@ -90,9 +106,14 @@ def get_discord_username(user_id):
 
 def get_redirect_uri():
     configured_url = os.getenv("DASHBOARD_URL")
-    if configured_url:
-        return f"{configured_url.rstrip('/')}/callback"
-    return "https://domain-glaring-unpledged.ngrok-free.dev/callback"
+    if not configured_url:
+        raise RuntimeError("يجب ضبط DASHBOARD_URL إلى عنوان لوحة التحكم العام قبل استخدام تسجيل الدخول.")
+    parsed = urlsplit(configured_url)
+    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+        raise RuntimeError("قيمة DASHBOARD_URL غير صالحة.")
+    if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1"}:
+        raise RuntimeError("يجب أن يستخدم DASHBOARD_URL بروتوكول HTTPS خارج التطوير المحلي.")
+    return f"{configured_url.rstrip('/')}/callback"
 
 def get_global_db():
     db_path = os.path.join(project_root, "global_cosmo.db")
@@ -114,6 +135,74 @@ def get_bot_guild_ids():
         print(f"Error fetching bot guilds: {e}")
     return set()
 
+def csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+@app.context_processor
+def inject_csrf_token():
+    return {"csrf_token": csrf_token}
+
+@app.before_request
+def enforce_csrf_for_posts():
+    if request.method == "POST":
+        expected = session.get("csrf_token", "")
+        supplied = request.form.get("csrf_token", "")
+        if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+            abort(400, description="رمز حماية النموذج غير صالح أو منتهي.")
+
+def user_can_manage_guild(access_token: str, guild_id: int) -> bool:
+    """تحقق من صلاحيات OAuth الفعلية، لا من رقم السيرفر المرسل في URL فقط."""
+    try:
+        response = requests.get(
+            f"{DISCORD_API_BASE}/users/@me/guilds",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=5,
+        )
+        guilds = response.json() if response.status_code == 200 else None
+        if not isinstance(guilds, list):
+            return False
+        for guild in guilds:
+            if int(guild.get("id", 0)) != int(guild_id):
+                continue
+            permissions = int(guild.get("permissions", 0))
+            return bool(guild.get("owner") or (permissions & 0x20) or (permissions & 0x8))
+    except (requests.RequestException, ValueError, TypeError):
+        return False
+    return False
+
+def fetch_public_image(url: str, max_bytes: int = 8 * 1024 * 1024):
+    """جلب صورة HTTPS عامة فقط مع منع عناوين الشبكات الخاصة والتحويلات."""
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        if parsed.scheme != "https" or not host or parsed.username or parsed.password:
+            return None
+        addresses = {item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
+        if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+            return None
+        response = requests.get(url, timeout=(3, 5), allow_redirects=False, stream=True)
+        if response.status_code != 200:
+            response.close()
+            return None
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+        if content_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+            response.close()
+            return None
+        data = bytearray()
+        for chunk in response.iter_content(64 * 1024):
+            data.extend(chunk)
+            if len(data) > max_bytes:
+                response.close()
+                return None
+        response.close()
+        return content_type, bytes(data)
+    except (ValueError, OSError, requests.RequestException):
+        return None
+
 @app.before_request
 def make_session_permanent():
     session.permanent = True
@@ -130,11 +219,16 @@ def index():
 @app.route("/login")
 def login():
     redirect_uri = get_redirect_uri()
-    discord_auth_url = (
-        f"https://discord.com/oauth2/authorize?client_id={CLIENT_ID}"
-        f"&response_type=code&redirect_uri={redirect_uri}&scope=identify+guilds"
-        f"&prompt=consent"
-    )
+    state = secrets.token_urlsafe(32)
+    session["oauth_state"] = state
+    discord_auth_url = "https://discord.com/oauth2/authorize?" + urlencode({
+        "client_id": CLIENT_ID or "",
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": "identify guilds",
+        "prompt": "consent",
+        "state": state,
+    })
     return redirect(discord_auth_url)
 
 @app.route("/logout")
@@ -144,6 +238,10 @@ def logout():
 
 @app.route("/callback")
 def callback():
+    expected_state = session.pop("oauth_state", None)
+    supplied_state = request.args.get("state", "")
+    if not expected_state or not supplied_state or not hmac.compare_digest(expected_state, supplied_state):
+        abort(400, description="فشل التحقق من جلسة تسجيل الدخول؛ أعد المحاولة.")
     code = request.args.get("code")
     if not code:
         return redirect(url_for("index"))
@@ -157,7 +255,7 @@ def callback():
         "redirect_uri": redirect_uri
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    r = requests.post(f"{DISCORD_API_BASE}/oauth2/token", data=data, headers=headers)
+    r = requests.post(f"{DISCORD_API_BASE}/oauth2/token", data=data, headers=headers, timeout=8)
     token_data = r.json()
     access_token = token_data.get("access_token")
 
@@ -166,7 +264,11 @@ def callback():
 
     session["access_token"] = access_token
     auth_headers = {"Authorization": f"Bearer {access_token}"}
-    user_res = requests.get(f"{DISCORD_API_BASE}/users/@me", headers=auth_headers).json()
+    user_response = requests.get(f"{DISCORD_API_BASE}/users/@me", headers=auth_headers, timeout=8)
+    if user_response.status_code != 200:
+        session.clear()
+        abort(400, description="تعذر التحقق من حساب Discord.")
+    user_res = user_response.json()
     session["user"] = user_res
 
     return redirect(url_for("servers"))
@@ -208,6 +310,10 @@ def manage(guild_id):
     token = session.get("access_token")
     if not user or not token:
         return redirect(url_for("login"))
+    if not user_can_manage_guild(token, guild_id):
+        abort(403, description="لا تملك صلاحية إدارة هذا السيرفر.")
+    if guild_id not in get_bot_guild_ids():
+        abort(404, description="البوت غير موجود في هذا السيرفر.")
 
     try:
         conn, cur = get_guild_db(guild_id)
@@ -325,28 +431,26 @@ def manage(guild_id):
                     cur.execute("UPDATE premium_info SET custom_name = ? WHERE guild_id = ?", (new_nick[:32], guild_id))
 
                 if banner_link:
-                    try:
-                        b_resp = requests.get(banner_link, timeout=5)
-                        if b_resp.status_code == 200:
-                            content_type = b_resp.headers.get("Content-Type", "image/png").split(";")[0]
-                            b64_str = base64.b64encode(b_resp.content).decode("utf-8")
-                            patch_payload["banner"] = f"data:{content_type};base64,{b64_str}"
-                    except Exception as ex:
-                        print(f"Error encoding banner: {ex}")
-                    cur.execute("UPDATE premium_info SET custom_banner_url = ? WHERE guild_id = ?", (banner_link, guild_id))
-                    banner_url = banner_link
+                    fetched = fetch_public_image(banner_link)
+                    if fetched:
+                        content_type, image_bytes = fetched
+                        b64_str = base64.b64encode(image_bytes).decode("utf-8")
+                        patch_payload["banner"] = f"data:{content_type};base64,{b64_str}"
+                        cur.execute("UPDATE premium_info SET custom_banner_url = ? WHERE guild_id = ?", (banner_link, guild_id))
+                        banner_url = banner_link
+                    else:
+                        flash("تعذر استخدام رابط البنر: يجب أن يكون HTTPS لصورة عامة صالحة وألا يتجاوز 8MB.", "warning")
 
                 if avatar_link:
-                    try:
-                        a_resp = requests.get(avatar_link, timeout=5)
-                        if a_resp.status_code == 200:
-                            content_type = a_resp.headers.get("Content-Type", "image/png").split(";")[0]
-                            b64_str = base64.b64encode(a_resp.content).decode("utf-8")
-                            patch_payload["avatar"] = f"data:{content_type};base64,{b64_str}"
-                    except Exception as ex:
-                        print(f"Error encoding avatar: {ex}")
-                    cur.execute("UPDATE premium_info SET custom_avatar_url = ? WHERE guild_id = ?", (avatar_link, guild_id))
-                    avatar_url = avatar_link
+                    fetched = fetch_public_image(avatar_link)
+                    if fetched:
+                        content_type, image_bytes = fetched
+                        b64_str = base64.b64encode(image_bytes).decode("utf-8")
+                        patch_payload["avatar"] = f"data:{content_type};base64,{b64_str}"
+                        cur.execute("UPDATE premium_info SET custom_avatar_url = ? WHERE guild_id = ?", (avatar_link, guild_id))
+                        avatar_url = avatar_link
+                    else:
+                        flash("تعذر استخدام رابط الصورة: يجب أن يكون HTTPS لصورة عامة صالحة وألا يتجاوز 8MB.", "warning")
 
                 if patch_payload:
                     try:
@@ -630,15 +734,12 @@ def profile():
 
         req_channel_id = global_req_row[0]
 
-        update_balance(user_id, -parsed_amount)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        g_cur.execute(
-            "INSERT INTO exchange_logs (guild_id, user_id, cosmo_amount, target_currency, received_amount, note, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, 'قيد الانتظار', ?)",
-            (gid, user_id, parsed_amount, currency_name, total_received, note, now_str)
-        )
-        req_id = g_cur.lastrowid
-        g_conn.commit()
+        req_id = create_exchange_request(gid, user_id, parsed_amount, currency_name, total_received, note, now_str)
+        if req_id is None:
+            g_conn.close()
+            flash("❌ لم يعد رصيدك كافياً لإتمام الطلب؛ لم يُخصم أي مبلغ.", "danger")
+            return redirect(url_for("profile"))
         g_conn.close()
 
         bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
@@ -677,14 +778,21 @@ def profile():
         }
 
         try:
-            requests.post(
+            send_result = requests.post(
                 f"{DISCORD_API_BASE}/channels/{req_channel_id}/messages",
                 headers=bot_headers,
                 json={"embeds": [embed]},
                 timeout=5
             )
+            if not 200 <= send_result.status_code < 300:
+                deny_exchange_request(req_id)
+                flash("❌ تعذر إرسال الطلب للإدارة؛ أُعيد رصيدك تلقائياً.", "danger")
+                return redirect(url_for("profile"))
         except Exception as ex:
             print(f"[DEBUG] Send exchange request error: {ex}")
+            deny_exchange_request(req_id)
+            flash("❌ تعذر إرسال الطلب للإدارة؛ أُعيد رصيدك تلقائياً.", "danger")
+            return redirect(url_for("profile"))
 
         flash(f"✅ تم إرسال طلب التبديل برقم `{req_id}` إلى الإدارة بنجاح.", "success")
         return redirect(url_for("profile"))

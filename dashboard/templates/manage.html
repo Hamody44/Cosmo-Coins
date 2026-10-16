@@ -37,6 +37,7 @@
     <hr class="border-secondary">
     <h5 class="text-white fw-bold mb-3">🎨 تخصيص هوية البوت في السيرفر (بريميوم)</h5>
     <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="update_bot_identity">
         <div class="row g-3">
             <div class="col-md-4">
@@ -71,6 +72,7 @@
         <div class="card p-4 mb-4">
             <h5 class="text-white fw-bold mb-3">⚙️ قفل التبديل ورومات لوجات السيرفر</h5>
             <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="save_settings">
                 
                 <div class="form-check form-switch mb-4">
@@ -155,6 +157,7 @@
                             </td>
                             <td>
                                 <form method="POST" style="display:inline;">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                     <input type="hidden" name="action" value="toggle_currency">
                                     <input type="hidden" name="currency_name" value="{{ curr[0] }}">
                                     <input type="hidden" name="status" value="{{ 0 if curr[2] == 1 else 1 }}">
@@ -180,6 +183,7 @@
             
             <!-- نموذج إضافة رد تلقائي جديد -->
             <form method="POST" class="mb-4 p-3 bg-dark rounded border border-secondary">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="add_reply">
                 <div class="row g-2">
                     <div class="col-md-5">
@@ -213,6 +217,7 @@
                             <td class="text-white">{{ content }}</td>
                             <td class="text-center">
                                 <form method="POST" onsubmit="return confirm('هل أنت متأكد من حذف هذا الرد التلقائي؟');">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                     <input type="hidden" name="action" value="delete_reply">
                                     <input type="hidden" name="trigger" value="{{ word }}">
                                     <button type="submit" class="btn btn-sm btn-outline-danger">🗑️</button>

@@ -57,6 +57,7 @@
 
             {% if guilds|length > 0 %}
             <form method="POST" id="exchangeForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <!-- 1. اختيار السيرفر المستلم -->
                 <div class="mb-3">
                     <label class="form-label text-white fw-semibold">1. اختر سيرفر الاستلام (السيرفرات المفعلة للبريميوم فقط)</label>
