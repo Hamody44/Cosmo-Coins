@@ -15,8 +15,8 @@ from PIL import Image, ImageDraw, ImageOps
 
 active_roulettes = {}
 
-def can_manage_giveaway(ctx: commands.Context) -> bool:
-    """مالك السيرفر يستطيع بدء الجيف والبوكس حتى دون بريميوم؛ بقية الصلاحيات كما هي."""
+def can_manage_server_games(ctx: commands.Context) -> bool:
+    """مالك السيرفر يستطيع بدء ألعاب الجوائز حتى دون بريميوم؛ بقية الصلاحيات كما هي."""
     if not ctx.guild:
         return False
     return ctx.author.id == ctx.guild.owner_id or is_bot_admin(ctx)
@@ -415,7 +415,7 @@ class Games(commands.Cog):
 
     @commands.hybrid_command(name="giveaway", aliases=["سحب", "جيف_اواي"], description="بدء سحب جيف أواي على عملات Cosmo بالريأكشن 🎉")
     async def giveaway(self, ctx: commands.Context, amount: str, duration: str, winners_count: int, *, condition: str = None):
-        if not can_manage_giveaway(ctx):
+        if not can_manage_server_games(ctx):
             return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
         try:
             parsed_amount = parse_amount(amount)
@@ -456,7 +456,7 @@ class Games(commands.Cog):
 
     @commands.hybrid_command(name="box", aliases=["بوكس"], description="إنشاء بوكس سريع لأول شخص يضغط على الزر")
     async def box(self, ctx: commands.Context, amount: str, *, condition: str = None):
-        if not can_manage_giveaway(ctx):
+        if not can_manage_server_games(ctx):
             return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
         try:
             parsed_amount = parse_amount(amount)
@@ -480,8 +480,8 @@ class Games(commands.Cog):
 
     @commands.hybrid_command(name="roulette", aliases=["روليت"], description="بدء لعبة الروليت التنافسية مع العجلة الرسومية")
     async def roulette(self, ctx: commands.Context, amount: str, *, condition: str = None):
-        if not is_bot_admin(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+        if not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذه اللعبة متاحة لمالك السيرفر أو لمسؤول البوت المخوّل.")
         if ctx.guild.id in active_roulettes:
             return await ctx.send("⚠️ هناك لعبة روليت جارية بالفعل!")
 
