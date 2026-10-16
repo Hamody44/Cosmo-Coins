@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex align-items-center mb-4">
+    <a href="/servers" class="btn btn-outline-secondary me-3">➔ رجوع</a>
+    <h2 class="text-white fw-bold mb-0">إعدادات سيرفر: <span class="text-info">{{ guild.name }}</span></h2>
+</div>
+
+<!-- عرض تنبيهات العمليات -->
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for category, msg in messages %}
+      <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+        {{ msg }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+      </div>
+    {% endfor %}
+  {% endif %}
+{% endwith %}
+
+<!-- بطاقة البريميوم وتخصيص البوت -->
+<div class="card p-4 mb-4 border-warning">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+        <div>
+            <h4 class="text-warning fw-bold mb-1">⭐ حالة اشتراك البريميوم</h4>
+            <p class="text-muted-custom mb-0">{{ premium_expiry }}</p>
+        </div>
+        <div>
+            {% if is_premium %}
+                <span class="badge bg-success fs-6 px-3 py-2">مفعّل وجاهز 🔥</span>
+            {% else %}
+                <span class="badge bg-secondary fs-6 px-3 py-2">غير مفعل</span>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if is_premium %}
+    <hr class="border-secondary">
+    <h5 class="text-white fw-bold mb-3">🎨 تخصيص هوية البوت في السيرفر (بريميوم)</h5>
+    <form method="POST">
+        <input type="hidden" name="action" value="update_bot_identity">
+        <div class="row g-3">
+            <div class="col-md-4">
+                <label class="form-label text-white fw-semibold">اسم البوت المستعار (Nickname)</label>
+                <input type="text" name="bot_nick" class="form-control" value="{{ bot_nick }}" placeholder="اكتب اسم البوت الجديد...">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label text-white fw-semibold">رابط صورة البوت (Avatar URL)</label>
+                <input type="url" name="avatar_url" class="form-control" value="{{ avatar_url }}" placeholder="https://i.imgur.com/...png">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label text-white fw-semibold">رابط بنر البوت (Banner URL)</label>
+                <input type="url" name="banner_url" class="form-control" value="{{ banner_url }}" placeholder="https://i.imgur.com/...png">
+            </div>
+        </div>
+        <button type="submit" class="btn btn-warning mt-3 fw-bold">حفظ مظهر وهوية البوت</button>
+    </form>
+    {% endif %}
+</div>
+
+<div class="row g-4">
+    <!-- إعدادات التبديل ورومات لوجات السيرفر -->
+    <div class="col-lg-5">
+        <div class="card p-4 mb-4">
+            <h5 class="text-white fw-bold mb-3">🪙 ميزانية السيرفر المتاحة</h5>
+            <div class="p-3 bg-dark rounded border border-secondary">
+                <span class="fs-3 text-success fw-bold">{{ "{:,}".format(settings.spending_balance) }}</span>
+                <span class="text-muted-custom">Cosmo</span>
+            </div>
+        </div>
+
+        <div class="card p-4 mb-4">
+            <h5 class="text-white fw-bold mb-3">⚙️ قفل التبديل ورومات لوجات السيرفر</h5>
+            <form method="POST">
+                <input type="hidden" name="action" value="save_settings">
+                
+                <div class="form-check form-switch mb-4">
+                    <input class="form-check-input" type="checkbox" name="exchange_enabled" id="exchangeSwitch" {% if settings.exchange_enabled == 1 %}checked{% endif %}>
+                    <label class="form-check-label text-white fw-semibold" for="exchangeSwitch">تفعيل التبديل في السيرفر</label>
+                </div>
+
+                <!-- 1. لوج التحويلات -->
+                <div class="mb-3">
+                    <label class="form-label text-white fw-semibold">🔄 روم لوج التحويلات (Transfer Log)</label>
+                    <select name="transfer_log" class="form-select">
+                        <option value="">-- بدون روم محددة --</option>
+                        {% for ch in channels %}
+                            <option value="{{ ch.id }}" {% if settings.transfer_log|string == ch.id|string %}selected{% endif %}># {{ ch.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- 2. لوج التسليمات والإثباتات -->
+                <div class="mb-3">
+                    <label class="form-label text-white fw-semibold">📦 روم لوج التسليمات (Delivery Log)</label>
+                    <select name="delivery_log" class="form-select">
+                        <option value="">-- بدون روم محددة --</option>
+                        {% for ch in channels %}
+                            <option value="{{ ch.id }}" {% if settings.delivery_log|string == ch.id|string %}selected{% endif %}># {{ ch.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- 3. لوج شحن وخصم الرصيد -->
+                <div class="mb-3">
+                    <label class="form-label text-white fw-semibold">🪙 روم لوج الرصيد (Balance Log)</label>
+                    <select name="balance_log" class="form-select">
+                        <option value="">-- بدون روم محددة --</option>
+                        {% for ch in channels %}
+                            <option value="{{ ch.id }}" {% if settings.balance_log|string == ch.id|string %}selected{% endif %}># {{ ch.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- 4. لوج نجاح التبديل -->
+                <div class="mb-4">
+                    <label class="form-label text-white fw-semibold">🎉 روم لوج نجاح التبديل (Success Log)</label>
+                    <select name="exchange_success_log" class="form-select">
+                        <option value="">-- بدون روم محددة --</option>
+                        {% for ch in channels %}
+                            <option value="{{ ch.id }}" {% if settings.exchange_success_log|string == ch.id|string %}selected{% endif %}># {{ ch.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <button type="submit" class="btn btn-primary w-100 fw-bold">حفظ إعدادات الرومات</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- العملات المسجلة والردود التلقائية -->
+    <div class="col-lg-7">
+        <div class="card p-4 mb-4">
+            <h5 class="text-white fw-bold mb-3">💱 عملات السيرفر وقفل التبديل الفردي</h5>
+            <div class="table-responsive">
+                <table class="table table-custom align-middle">
+                    <thead>
+                        <tr>
+                            <th>العملة</th>
+                            <th>سعر التحويل</th>
+                            <th>الحالة</th>
+                            <th>تحكم</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for curr in currencies %}
+                        <tr>
+                            <td class="fw-bold">{{ curr[0] }}</td>
+                            <td>{{ curr[1] }} Cosmo</td>
+                            <td>
+                                {% if curr[2] == 1 %}
+                                    <span class="badge bg-success">متاح للتبديل</span>
+                                {% else %}
+                                    <span class="badge bg-danger">معطل</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <form method="POST" style="display:inline;">
+                                    <input type="hidden" name="action" value="toggle_currency">
+                                    <input type="hidden" name="currency_name" value="{{ curr[0] }}">
+                                    <input type="hidden" name="status" value="{{ 0 if curr[2] == 1 else 1 }}">
+                                    <button class="btn btn-sm {% if curr[2] == 1 %}btn-outline-danger{% else %}btn-outline-success{% endif %}">
+                                        {{ "إيقاف" if curr[2] == 1 else "تشغيل" }}
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="4" class="text-center text-muted-custom py-3">لا توجد عملات مضافة بعد عبر أمر <code>/add_exchange_currency</code>.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- الردود التلقائية (إضافة وعرض وحذف) -->
+        <div class="card p-4">
+            <h5 class="text-white fw-bold mb-3">💬 الردود التلقائية المسجلة ({{ replies|length }})</h5>
+            
+            <!-- نموذج إضافة رد تلقائي جديد -->
+            <form method="POST" class="mb-4 p-3 bg-dark rounded border border-secondary">
+                <input type="hidden" name="action" value="add_reply">
+                <div class="row g-2">
+                    <div class="col-md-5">
+                        <label class="form-label text-muted-custom small mb-1">الكلمة المستهدفة</label>
+                        <input type="text" name="trigger" class="form-control" placeholder="مثال: متجر" required>
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label text-muted-custom small mb-1">الرد التلقائي</label>
+                        <input type="text" name="reply" class="form-control" placeholder="اكتب نص الرد هنا..." required>
+                    </div>
+                    <div class="col-md-2 d-flex align-items-end">
+                        <button type="submit" class="btn btn-success w-100 fw-bold">إضافة</button>
+                    </div>
+                </div>
+            </form>
+
+            <!-- جدول الردود التلقائية الحالية -->
+            <div class="table-responsive">
+                <table class="table table-custom align-middle">
+                    <thead>
+                        <tr>
+                            <th>الكلمة</th>
+                            <th>الرد</th>
+                            <th class="text-center" style="width: 80px;">حذف</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for word, content in replies %}
+                        <tr>
+                            <td><span class="badge bg-secondary fs-6">{{ word }}</span></td>
+                            <td class="text-white">{{ content }}</td>
+                            <td class="text-center">
+                                <form method="POST" onsubmit="return confirm('هل أنت متأكد من حذف هذا الرد التلقائي؟');">
+                                    <input type="hidden" name="action" value="delete_reply">
+                                    <input type="hidden" name="trigger" value="{{ word }}">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger">🗑️</button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="3" class="text-center text-muted-custom py-3">لا توجد ردود تلقائية مسجلة.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
