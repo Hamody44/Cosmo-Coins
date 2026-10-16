@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="text-center py-5">
+    <h1 class="display-4 fw-bold">لوحة تحكم بوت Cosmo</h1>
+    <p class="lead text-secondary">إدارة الاقتصاد، الميزانية، التذاكر، والردود التلقائية لسيرفراتك بكل سهولة.</p>
+    {% if not user %}
+        <a href="/login" class="btn btn-discord btn-lg mt-3">سجل دخولك لبدء الإدارة</a>
+    {% else %}
+        <a href="/servers" class="btn btn-success btn-lg mt-3">الانتقال إلى سيرفراتك</a>
+    {% endif %}
+</div>
+{% endblock %}
