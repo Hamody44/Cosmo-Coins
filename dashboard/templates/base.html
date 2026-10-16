@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cosmo Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #0b0e17;
+            color: #f1f5f9;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+        }
+        .navbar {
+            background-color: #151b2b;
+            border-bottom: 1px solid #232c45;
+        }
+        .card {
+            background-color: #151b2b;
+            border: 1px solid #232c45;
+            border-radius: 14px;
+            color: #f1f5f9;
+        }
+        .card-header {
+            background-color: #1a2236;
+            border-bottom: 1px solid #232c45;
+            color: #ffffff;
+            font-weight: bold;
+        }
+        .text-muted-custom {
+            color: #94a3b8 !important;
+        }
+        .form-control, .form-select {
+            background-color: #0b0e17;
+            border: 1px solid #334155;
+            color: #ffffff !important;
+        }
+        .form-control:focus, .form-select:focus {
+            background-color: #0b0e17;
+            border-color: #3b82f6;
+            color: #ffffff;
+        }
+        .btn-discord {
+            background-color: #5865F2;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        .btn-discord:hover {
+            background-color: #4752c4;
+            color: #ffffff;
+        }
+        .table-custom {
+            color: #ffffff;
+            border-color: #232c45;
+        }
+        .table-custom th {
+            background-color: #1a2236;
+            color: #ffffff;
+        }
+        .table-custom td {
+            background-color: #151b2b;
+            color: #e2e8f0;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg px-4 mb-4">
+        <a class="navbar-brand text-light fw-bold fs-4" href="/">🪙 Cosmo Panel</a>
+        <div class="ms-auto d-flex align-items-center gap-2">
+            {% if user %}
+                <a href="/profile" class="btn btn-outline-info btn-sm">👤 الملف الشخصي</a>
+                <a href="/servers" class="btn btn-outline-light btn-sm">🏛️ السيرفرات</a>
+                <a href="/logout" class="btn btn-danger btn-sm">خروج</a>
+            {% else %}
+                <a href="/login" class="btn btn-discord btn-sm">تسجيل الدخول بديسكورد</a>
+            {% endif %}
+        </div>
+    </nav>
+    <div class="container pb-5">
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>
