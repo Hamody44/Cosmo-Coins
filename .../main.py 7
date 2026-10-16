@@ -1,0 +1,2225 @@
+import discord
+from discord.ext import commands, tasks
+import sqlite3
+import random
+import io
+import os
+import json
+import asyncio
+import re
+import time
+import math
+import shutil
+import string
+from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+from dotenv import load_dotenv
+
+# تحميل المتغيرات من ملف .env
+load_dotenv()
+
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.reactions = True
+
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+PRIMARY_OWNER_ID = 988840428591808584
+COSMO_GUILD_ID = 1540014549179039867
+
+active_roulettes = {}
+
+if not os.path.exists("guilds_data"):
+    os.makedirs("guilds_data")
+
+# ----------------- 1. قاعدة البيانات العامة (Global Database) -----------------
+global_conn = sqlite3.connect("global_cosmo.db", check_same_thread=False)
+global_cursor = global_conn.cursor()
+
+global_cursor.execute('''CREATE TABLE IF NOT EXISTS balances (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER DEFAULT 0
+)''')
+
+global_cursor.execute('''CREATE TABLE IF NOT EXISTS transfer_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_id INTEGER,
+    receiver_id INTEGER,
+    amount INTEGER,
+    timestamp TEXT
+)''')
+
+global_cursor.execute('''CREATE TABLE IF NOT EXISTS exchange_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    user_id INTEGER,
+    cosmo_amount INTEGER,
+    target_currency TEXT,
+    received_amount REAL,
+    note TEXT,
+    status TEXT,
+    timestamp TEXT
+)''')
+
+global_cursor.execute('''CREATE TABLE IF NOT EXISTS premium_codes (
+    code TEXT PRIMARY KEY,
+    duration_seconds INTEGER,
+    created_at INTEGER,
+    is_used INTEGER DEFAULT 0,
+    used_guild_id INTEGER
+)''')
+
+global_cursor.execute('''CREATE TABLE IF NOT EXISTS global_settings (
+    key TEXT PRIMARY KEY,
+    value INTEGER
+)''')
+global_conn.commit()
+
+# ----------------- 2. إدارة قواعد بيانات السيرفرات المنفصلة -----------------
+def get_guild_db(guild_id: int):
+    db_path = f"guilds_data/guild_{guild_id}.db"
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    cur = conn.cursor()
+
+    cur.execute('''CREATE TABLE IF NOT EXISTS settings (
+        guild_id INTEGER PRIMARY KEY,
+        transfer_log INTEGER,
+        exchange_request_log INTEGER,
+        exchange_success_log INTEGER,
+        delivery_log INTEGER,
+        balance_log INTEGER,
+        admin_role_id INTEGER,
+        blacklist_role_id INTEGER,
+        exchange_enabled INTEGER DEFAULT 1,
+        double_event_end INTEGER DEFAULT 0,
+        spending_balance INTEGER DEFAULT 0
+    )''')
+
+    cur.execute('''CREATE TABLE IF NOT EXISTS premium_info (
+        guild_id INTEGER PRIMARY KEY,
+        activated_at INTEGER DEFAULT 0,
+        premium_end INTEGER DEFAULT 0,
+        custom_name TEXT,
+        custom_avatar_url TEXT
+    )''')
+
+    cur.execute('''CREATE TABLE IF NOT EXISTS exchange_currencies (
+        currency_name TEXT PRIMARY KEY,
+        exchange_rate REAL,
+        is_active INTEGER DEFAULT 1,
+        min_received REAL DEFAULT 0
+    )''')
+
+    cur.execute('''CREATE TABLE IF NOT EXISTS command_aliases (
+        original_command TEXT,
+        alias TEXT PRIMARY KEY
+    )''')
+
+    cur.execute('''CREATE TABLE IF NOT EXISTS bot_whitelist (
+        bot_id INTEGER,
+        channel_id INTEGER,
+        PRIMARY KEY (bot_id, channel_id)
+    )''')
+
+    cur.execute('''CREATE TABLE IF NOT EXISTS active_giveaways (
+        message_id INTEGER PRIMARY KEY,
+        channel_id INTEGER,
+        amount INTEGER,
+        end_timestamp INTEGER,
+        winners_count INTEGER,
+        condition TEXT,
+        participants_json TEXT,
+        is_finished INTEGER DEFAULT 0
+    )''')
+
+    cur.execute('''CREATE TABLE IF NOT EXISTS boost_system_config (
+        guild_id INTEGER PRIMARY KEY,
+        is_enabled INTEGER DEFAULT 0,
+        single_boost_reward INTEGER DEFAULT 0,
+        double_boost_reward INTEGER DEFAULT 0,
+        boost_log_channel INTEGER DEFAULT 0
+    )''')
+
+    cur.execute('''CREATE TABLE IF NOT EXISTS active_boost_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        boost_type INTEGER,
+        weekly_reward INTEGER,
+        payments_remaining INTEGER,
+        next_payment_timestamp INTEGER,
+        is_fake INTEGER DEFAULT 0
+    )''')
+
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN delivery_log INTEGER")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    conn.commit()
+    return conn, cur
+
+# ----------------- ترحيل البيانات القديمة تلقائياً لسيرفر كوزمو -----------------
+def migrate_existing_data():
+    old_db = "cosmo_bot.db"
+    if not os.path.exists(old_db):
+        return
+
+    try:
+        old_conn = sqlite3.connect(old_db)
+        old_cur = old_conn.cursor()
+
+        try:
+            old_cur.execute("SELECT user_id, balance FROM balances")
+            for r in old_cur.fetchall():
+                global_cursor.execute("INSERT OR REPLACE INTO balances (user_id, balance) VALUES (?, ?)", r)
+            
+            old_cur.execute("SELECT sender_id, receiver_id, amount, timestamp FROM transfer_logs")
+            for r in old_cur.fetchall():
+                global_cursor.execute("INSERT INTO transfer_logs (sender_id, receiver_id, amount, timestamp) VALUES (?, ?, ?, ?)", r)
+
+            old_cur.execute("SELECT id, user_id, cosmo_amount, target_currency, received_amount, note, status, timestamp FROM exchange_logs")
+            for r in old_cur.fetchall():
+                global_cursor.execute("INSERT INTO exchange_logs (id, guild_id, user_id, cosmo_amount, target_currency, received_amount, note, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                      (r[0], COSMO_GUILD_ID, r[1], r[2], r[3], r[4], r[5], r[6], r[7]))
+
+            old_cur.execute("SELECT code, duration_seconds, created_at, is_used, used_guild_id FROM premium_codes")
+            for r in old_cur.fetchall():
+                global_cursor.execute("INSERT OR REPLACE INTO premium_codes (code, duration_seconds, created_at, is_used, used_guild_id) VALUES (?, ?, ?, ?, ?)", r)
+            
+            global_conn.commit()
+        except Exception as e:
+            print(f"Global migration note: {e}")
+
+        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+        try:
+            old_cur.execute("SELECT * FROM settings LIMIT 1")
+            s = old_cur.fetchone()
+            if s:
+                g_cur.execute("INSERT OR REPLACE INTO settings (guild_id, transfer_log, exchange_request_log, exchange_success_log, balance_log, admin_role_id, blacklist_role_id, exchange_enabled, double_event_end, spending_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              (COSMO_GUILD_ID, s[1], s[2], s[3], s[4], s[5], s[6], s[7] if len(s)>7 else 1, s[8] if len(s)>8 else 0, s[10] if len(s)>10 else 0))
+                if len(s) > 9 and s[9]:
+                    g_cur.execute("INSERT OR REPLACE INTO premium_info (guild_id, activated_at, premium_end) VALUES (?, ?, ?)",
+                                  (COSMO_GUILD_ID, int(time.time()), s[9]))
+
+            old_cur.execute("SELECT currency_name, exchange_rate, is_active, min_received FROM exchange_currencies")
+            for r in old_cur.fetchall():
+                g_cur.execute("INSERT OR REPLACE INTO exchange_currencies (currency_name, exchange_rate, is_active, min_received) VALUES (?, ?, ?, ?)", r)
+
+            old_cur.execute("SELECT bot_id, channel_id FROM bot_whitelist")
+            for r in old_cur.fetchall():
+                g_cur.execute("INSERT OR REPLACE INTO bot_whitelist (bot_id, channel_id) VALUES (?, ?)", r)
+
+            g_conn.commit()
+        except Exception as e:
+            print(f"Cosmo Guild migration note: {e}")
+        finally:
+            g_conn.close()
+
+        old_conn.close()
+        shutil.move(old_db, f"cosmo_bot_old_migrated_{int(time.time())}.db")
+    except Exception as e:
+        print(f"Migration error: {e}")
+
+migrate_existing_data()
+
+# ----------------- وظائف مساعدة -----------------
+async def check_is_owner(ctx_or_user):
+    user = ctx_or_user.author if hasattr(ctx_or_user, "author") else ctx_or_user
+    if user.id == PRIMARY_OWNER_ID:
+        return True
+    try:
+        return await bot.is_owner(user)
+    except:
+        return False
+
+def is_guild_premium(guild_id: int) -> bool:
+    g_conn, g_cur = get_guild_db(guild_id)
+    g_cur.execute("SELECT premium_end FROM premium_info WHERE guild_id = ?", (guild_id,))
+    row = g_cur.fetchone()
+    g_conn.close()
+    if row and row[0]:
+        return int(time.time()) < row[0]
+    return False
+
+def is_bot_admin(ctx):
+    if ctx.author.id == PRIMARY_OWNER_ID:
+        return True
+
+    if not is_guild_premium(ctx.guild.id):
+        return False
+
+    if ctx.author.id == ctx.guild.owner_id:
+        return True
+
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("SELECT 1 FROM bot_whitelist WHERE bot_id = ? AND channel_id = ?", (ctx.author.id, ctx.channel.id))
+    if g_cur.fetchone():
+        g_conn.close()
+        return True
+
+    g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (ctx.guild.id,))
+    row = g_cur.fetchone()
+    g_conn.close()
+    if row and row[0]:
+        role = ctx.guild.get_role(row[0])
+        if role and role in ctx.author.roles:
+            return True
+    return False
+
+def get_server_spending_balance(guild_id: int) -> int:
+    g_conn, g_cur = get_guild_db(guild_id)
+    g_cur.execute("SELECT spending_balance FROM settings WHERE guild_id = ?", (guild_id,))
+    row = g_cur.fetchone()
+    g_conn.close()
+    return row[0] if row and row[0] else 0
+
+def deduct_server_spending(guild_id: int, amount: int) -> tuple[bool, str]:
+    g_conn, g_cur = get_guild_db(guild_id)
+    g_cur.execute("SELECT spending_balance FROM settings WHERE guild_id = ?", (guild_id,))
+    row = g_cur.fetchone()
+    current_pool = row[0] if row and row[0] else 0
+
+    if current_pool < amount:
+        g_conn.close()
+        return False, f"⛔ ميزانية السيرفر المتاحة للصرف غير كافية! المطلوب: `{amount:,}` Cosmo، والمتبقي: `{current_pool:,}` Cosmo."
+
+    new_pool = current_pool - amount
+    g_cur.execute("UPDATE settings SET spending_balance = ? WHERE guild_id = ?", (new_pool, guild_id))
+    g_conn.commit()
+    g_conn.close()
+    return True, f"🪙 المتبقي من ميزانية السيرفر: `{new_pool:,}` Cosmo."
+
+def refund_server_spending(guild_id: int, amount: int):
+    g_conn, g_cur = get_guild_db(guild_id)
+    g_cur.execute("UPDATE settings SET spending_balance = spending_balance + ? WHERE guild_id = ?", (amount, guild_id))
+    g_conn.commit()
+    g_conn.close()
+
+def is_blacklisted(member: discord.Member) -> bool:
+    if not member or not hasattr(member, "guild") or not member.guild:
+        return False
+    g_conn, g_cur = get_guild_db(member.guild.id)
+    g_cur.execute("SELECT blacklist_role_id FROM settings WHERE guild_id = ?", (member.guild.id,))
+    row = g_cur.fetchone()
+    g_conn.close()
+    if row and row[0]:
+        role = member.guild.get_role(row[0])
+        if role and role in member.roles:
+            return True
+    return False
+
+def get_balance(user_id):
+    global_cursor.execute("SELECT balance FROM balances WHERE user_id = ?", (user_id,))
+    row = global_cursor.fetchone()
+    return row[0] if row else 0
+
+def update_balance(user_id, amount):
+    bal = get_balance(user_id) + amount
+    global_cursor.execute("INSERT OR REPLACE INTO balances (user_id, balance) VALUES (?, ?)", (user_id, bal))
+    global_conn.commit()
+
+def parse_amount(amount_str: str) -> int:
+    amount_str = str(amount_str).strip().lower()
+    multipliers = {'k': 1_000, 'm': 1_000_000, 'b': 1_000_000_000}
+    if amount_str[-1] in multipliers:
+        unit = amount_str[-1]
+        number = float(amount_str[:-1])
+        return int(number * multipliers[unit])
+    return int(float(amount_str))
+
+def parse_duration(time_str: str) -> int:
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    match = re.match(r"^(\d+)([smhd])$", time_str.lower())
+    if not match:
+        return None
+    val, unit = match.groups()
+    return int(val) * units[unit]
+
+def clean_display_name(name: str) -> str:
+    cleaned = "".join([c for c in name if c.isprintable()]).strip()
+    return cleaned[:10] if cleaned else "Player"
+
+def get_unicode_font(size: int):
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "DejaVuSans.ttf",
+        "arial.ttf"
+    ]
+    for p in font_paths:
+        try:
+            return ImageFont.truetype(p, size)
+        except:
+            continue
+    return ImageFont.load_default()
+
+def generate_captcha_image(text):
+    base_img = Image.new('RGB', (120, 40), color=(25, 25, 30))
+    draw = ImageDraw.Draw(base_img)
+    spaced_text = " ".join(text)
+    draw.text((20, 12), spaced_text, fill=(255, 255, 255))
+    big_img = base_img.resize((300, 100), resample=Image.NEAREST)
+    draw_big = ImageDraw.Draw(big_img)
+    for _ in range(5):
+        draw_big.line([random.randint(0, 300), random.randint(0, 100), random.randint(0, 300), random.randint(0, 100)], fill=(90, 90, 110), width=2)
+    buf = io.BytesIO()
+    big_img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
+
+async def generate_roulette_wheel_image(guild: discord.Guild, participants: list, selected_index: int):
+    size = 600
+    image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    center = size // 2
+    radius = 260
+
+    num_parts = len(participants)
+    angle_per_part = 360 / num_parts
+    palette = [(107, 142, 100), (155, 110, 155), (150, 150, 140), (145, 115, 85), (90, 130, 140), (170, 130, 100)]
+    font = get_unicode_font(18)
+
+    for i in range(num_parts):
+        start_angle = i * angle_per_part
+        end_angle = (i + 1) * angle_per_part
+        color = palette[i % len(palette)]
+        draw.pieslice([center - radius, center - radius, center + radius, center + radius], start=start_angle, end=end_angle, fill=color, outline=(255, 255, 255), width=2)
+        
+        mid_angle = math.radians((start_angle + end_angle) / 2)
+        text_dist = radius * 0.65
+        tx = center + text_dist * math.cos(mid_angle)
+        ty = center + text_dist * math.sin(mid_angle)
+        name_str = clean_display_name(participants[i].display_name)
+        draw.text((tx - 24, ty - 10), name_str, fill=(255, 255, 255), font=font)
+
+    inner_radius = 80
+    if guild.icon:
+        try:
+            icon_bytes = await guild.icon.read()
+            icon_img = Image.open(io.BytesIO(icon_bytes)).convert("RGBA")
+            icon_img = icon_img.resize((inner_radius * 2, inner_radius * 2))
+            mask = Image.new('L', (inner_radius * 2, inner_radius * 2), 0)
+            mask_draw = ImageDraw.Draw(mask)
+            mask_draw.ellipse((0, 0, inner_radius * 2, inner_radius * 2), fill=255)
+            output_icon = ImageOps.fit(icon_img, mask.size, centering=(0.5, 0.5))
+            output_icon.putalpha(mask)
+            image.paste(output_icon, (center - inner_radius, center - inner_radius), output_icon)
+        except:
+            draw.ellipse([center - inner_radius, center - inner_radius, center + inner_radius, center + inner_radius], fill=(35, 30, 50), outline=(255, 255, 255), width=4)
+    else:
+        draw.ellipse([center - inner_radius, center - inner_radius, center + inner_radius, center + inner_radius], fill=(35, 30, 50), outline=(255, 255, 255), width=4)
+
+    target_angle = math.radians((selected_index * angle_per_part) + (angle_per_part / 2))
+    ptr_x = center + (radius + 20) * math.cos(target_angle)
+    ptr_y = center + (radius + 20) * math.sin(target_angle)
+    draw.polygon([(ptr_x, ptr_y), (ptr_x + 25 * math.cos(target_angle + 0.4), ptr_y + 25 * math.sin(target_angle + 0.4)), (ptr_x + 25 * math.cos(target_angle - 0.4), ptr_y + 25 * math.sin(target_angle - 0.4))], fill=(255, 255, 255), outline=(0, 0, 0))
+
+    buf = io.BytesIO()
+    image.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
+
+# ----------------- النسخ الاحتياطي التلقائي اليومي للخاص -----------------
+@tasks.loop(hours=24)
+async def auto_backup_task():
+    try:
+        shutil.copyfile("global_cosmo.db", "global_cosmo_backup.db")
+        owner = bot.get_user(PRIMARY_OWNER_ID) or await bot.fetch_user(PRIMARY_OWNER_ID)
+        if owner:
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            file = discord.File("global_cosmo_backup.db", filename=f"global_cosmo_backup_{int(time.time())}.db")
+            await owner.send(f"📦 **النسخة الاحتياطية اليومية التلقائية لقاعدة البيانات العامة (الأرصدة والسجلات):**\nالتاريخ: `{now_str}`", file=file)
+    except Exception as e:
+        print(f"Auto backup error: {e}")
+
+# مهمة مراقبة انتهاء البريميوم واستعادة الهوية
+@tasks.loop(minutes=1)
+async def check_premium_expiry_task():
+    now = int(time.time())
+    for guild in bot.guilds:
+        g_conn, g_cur = get_guild_db(guild.id)
+        g_cur.execute("SELECT premium_end FROM premium_info WHERE premium_end > 0 AND premium_end <= ?", (now,))
+        row = g_cur.fetchone()
+        if row:
+            g_cur.execute("UPDATE premium_info SET premium_end = 0 WHERE guild_id = ?", (guild.id,))
+            g_conn.commit()
+            if guild.me:
+                try:
+                    await guild.me.edit(nick=None)
+                except:
+                    pass
+                try:
+                    await guild.me.edit(avatar=None)
+                except:
+                    pass
+        g_conn.close()
+
+# ----------------- مهمة تسليم دفعات البوست الأسبوعية (مع احتساب الوقت الضائع) -----------------
+@tasks.loop(minutes=15)
+async def process_boost_weekly_payments():
+    now = int(time.time())
+    for guild in bot.guilds:
+        g_conn, g_cur = get_guild_db(guild.id)
+        g_cur.execute("SELECT id, user_id, boost_type, weekly_reward, payments_remaining, next_payment_timestamp, is_fake FROM active_boost_subscriptions WHERE next_payment_timestamp <= ?", (now,))
+        due_payments = g_cur.fetchall()
+
+        for sub in due_payments:
+            sub_id, u_id, b_type, reward, remaining, next_pay_ts, is_fake = sub
+            member = guild.get_member(u_id)
+
+            if not is_fake and (not member or not member.premium_since):
+                g_cur.execute("DELETE FROM active_boost_subscriptions WHERE id = ?", (sub_id,))
+                g_conn.commit()
+                continue
+
+            weeks_passed = ((now - next_pay_ts) // (7 * 86400)) + 1
+            payments_to_give = min(weeks_passed, remaining)
+
+            total_due_reward = payments_to_give * reward
+            update_balance(u_id, total_due_reward)
+
+            new_remaining = remaining - payments_to_give
+
+            if new_remaining <= 0:
+                g_cur.execute("DELETE FROM active_boost_subscriptions WHERE id = ?", (sub_id,))
+            else:
+                updated_next_pay = next_pay_ts + (payments_to_give * 7 * 86400)
+                if updated_next_pay <= now:
+                    updated_next_pay = now + (7 * 86400)
+                g_cur.execute("UPDATE active_boost_subscriptions SET payments_remaining = ?, next_payment_timestamp = ? WHERE id = ?", (new_remaining, updated_next_pay, sub_id))
+            g_conn.commit()
+
+            type_str = "دبل بوست 🚀🚀" if b_type == 2 else "بوست 🚀"
+            missed_text = f" (شملت {payments_to_give} دفعة مستحقة)" if payments_to_give > 1 else ""
+
+            if member:
+                try:
+                    await member.send(
+                        f"💎 **دفعة بوست جديدة:** تم تسليم `{total_due_reward:,}` Cosmo لدعمك السيرفر بـ {type_str}{missed_text}!\n"
+                        f"(الدفعات المتبقية: `{new_remaining}`)."
+                    )
+                except:
+                    pass
+
+            g_cur.execute("SELECT boost_log_channel FROM boost_system_config WHERE guild_id = ?", (guild.id,))
+            log_row = g_cur.fetchone()
+            if log_row and log_row[0]:
+                log_chan = guild.get_channel(log_row[0])
+                if log_chan:
+                    await log_chan.send(
+                        f"💎 تم تسليم دفعة البوست للعضو <@{u_id}> بقيمة `{total_due_reward:,}` Cosmo لدعمه بـ {type_str}{missed_text} (المتبقي: `{new_remaining}`)."
+                    )
+
+        g_conn.close()
+
+# ----------------- استئناف سحوبات الجيف أواي النشطة بعد إعادة التشغيل -----------------
+async def finish_giveaway(guild: discord.Guild, channel: discord.TextChannel, msg_id: int, amount: int, winners_count: int, condition: str, participants: list):
+    g_conn, g_cur = get_guild_db(guild.id)
+    g_cur.execute("UPDATE active_giveaways SET is_finished = 1 WHERE message_id = ?", (msg_id,))
+    g_conn.commit()
+    g_conn.close()
+
+    valid_participants = [uid for uid in participants if guild.get_member(uid) and not is_blacklisted(guild.get_member(uid))]
+    if not valid_participants:
+        refund_server_spending(guild.id, amount * winners_count)
+        return await channel.send(f"⚠️ انتهى السحب على `{amount:,}` Cosmo، ولكن لم يشترك أحد (أُعيدت الميزانية للسيرفر).")
+
+    winners_ids = random.sample(valid_participants, min(len(valid_participants), winners_count))
+    winners = [guild.get_member(uid) for uid in winners_ids]
+    winners_mentions = ", ".join([w.mention for w in winners])
+
+    if len(winners) < winners_count:
+        refund_amount = (winners_count - len(winners)) * amount
+        refund_server_spending(guild.id, refund_amount)
+
+    if not condition:
+        for winner in winners:
+            update_balance(winner.id, amount)
+            try:
+                await winner.send(f"🎉 مبروك! فزت بـ `{amount:,}` Cosmo في السحب وتم تسليمها تلقائياً.")
+            except:
+                pass
+        await channel.send(f"🎊 مبارك للفائزين: {winners_mentions}!\nتم تسليم `{amount:,}` Cosmo تلقائياً لكل فائز.")
+    else:
+        await channel.send(f"🎊 الفائزون بالقرعة: {winners_mentions}!\n⚠️ **الشرط:** `{condition}`\nفي انتظار مراجعة الإدارة للتسليم.")
+        for winner in winners:
+            claim_view = ClaimVerificationView(winner, amount, "جائزة الجيف أواي")
+            await channel.send(f"تحقق من شرط العضو {winner.mention}:", view=claim_view)
+
+async def monitor_giveaway(guild_id: int, channel_id: int, msg_id: int, amount: int, duration_sec: int, winners_count: int, condition: str):
+    await asyncio.sleep(duration_sec)
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return
+    channel = guild.get_channel(channel_id)
+    if not channel:
+        return
+
+    g_conn, g_cur = get_guild_db(guild_id)
+    g_cur.execute("SELECT participants_json, is_finished FROM active_giveaways WHERE message_id = ?", (msg_id,))
+    row = g_cur.fetchone()
+    g_conn.close()
+
+    if row and row[1] == 0:
+        participants = json.loads(row[0]) if row[0] else []
+        await finish_giveaway(guild, channel, msg_id, amount, winners_count, condition, participants)
+
+async def resume_all_giveaways():
+    await bot.wait_until_ready()
+    now = int(time.time())
+    for guild in bot.guilds:
+        g_conn, g_cur = get_guild_db(guild.id)
+        g_cur.execute("SELECT message_id, channel_id, amount, end_timestamp, winners_count, condition, participants_json FROM active_giveaways WHERE is_finished = 0")
+        rows = g_cur.fetchall()
+        g_conn.close()
+
+        for r in rows:
+            msg_id, chan_id, amount, end_time, winners_cnt, condition, part_json = r
+            channel = guild.get_channel(chan_id)
+            if not channel:
+                continue
+            participants = json.loads(part_json) if part_json else []
+
+            if now >= end_time:
+                asyncio.create_task(finish_giveaway(guild, channel, msg_id, amount, winners_cnt, condition, participants))
+            else:
+                remaining = end_time - now
+                asyncio.create_task(monitor_giveaway(guild.id, chan_id, msg_id, amount, remaining, winners_cnt, condition))
+
+# ----------------- دالة معالجة دخول البوست للنظام -----------------
+async def register_member_boost(guild: discord.Guild, member: discord.Member, boost_count: int, is_fake: bool = False):
+    g_conn, g_cur = get_guild_db(guild.id)
+    g_cur.execute("SELECT is_enabled, single_boost_reward, double_boost_reward, boost_log_channel FROM boost_system_config WHERE guild_id = ?", (guild.id,))
+    cfg = g_cur.fetchone()
+
+    if not cfg or cfg[0] == 0:
+        g_conn.close()
+        return False, "نظام البوست غير مفعّل حالياً في هذا السيرفر."
+
+    is_enabled, single_reward, double_reward, log_chan_id = cfg
+    reward_per_week = double_reward if boost_count >= 2 else single_reward
+
+    if reward_per_week <= 0:
+        g_conn.close()
+        return False, "لم يتم تحديد مكافآت لنظام البوست بعد."
+
+    update_balance(member.id, reward_per_week)
+    now = int(time.time())
+    next_payment = now + (7 * 86400)
+
+    g_cur.execute(
+        "INSERT INTO active_boost_subscriptions (user_id, boost_type, weekly_reward, payments_remaining, next_payment_timestamp, is_fake) VALUES (?, ?, ?, 3, ?, ?)",
+        (member.id, boost_count, reward_per_week, next_payment, 1 if is_fake else 0)
+    )
+    g_conn.commit()
+    g_conn.close()
+
+    type_str = "دبل بوست 🚀🚀" if boost_count >= 2 else "بوست 🚀"
+    
+    try:
+        await member.send(
+            f"🎉 **شكراً لدعمك سيرفر {guild.name}!**\n"
+            f"تم تفعيل اشتراكك في نظام مكافآت الـ {type_str}:\n"
+            f"• استلمت الدفعة الأولى فوراً: `{reward_per_week:,}` Cosmo!\n"
+            f"• متبقي لك: `3` دفعات أسبوعية (كل 7 أيام دفعة طالما البوست مستمر).\n"
+            f"• موعد الدفعة القادمة: <t:{next_payment}:F> (<t:{next_payment}:R>)."
+        )
+    except:
+        pass
+
+    if log_chan_id:
+        chan = guild.get_channel(log_chan_id)
+        if chan:
+            await chan.send(
+                f"🚀 قام {member.mention} بعمل **{type_str}** للسيرفر!\n"
+                f"تم تسليم الدفعة الأولى تلقائياً (`{reward_per_week:,}` Cosmo) مع جدولة 3 دفعات أسبوعية قادمة."
+            )
+
+    return True, f"تم تسجيل اشتراك {type_str} وتسليم الدفعة الأولى بنجاح!"
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    if before.guild and not before.premium_since and after.premium_since:
+        await register_member_boost(after.guild, after, boost_count=1, is_fake=False)
+
+# ----------------- أحداث التفاعل مع الجيف أواي بالريأكشن -----------------
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id or str(payload.emoji) != "🎉":
+        return
+    if not payload.guild_id:
+        return
+
+    g_conn, g_cur = get_guild_db(payload.guild_id)
+    g_cur.execute("SELECT participants_json, is_finished, amount, winners_count, condition, end_timestamp FROM active_giveaways WHERE message_id = ?", (payload.message_id,))
+    row = g_cur.fetchone()
+
+    if not row or row[1] == 1:
+        g_conn.close()
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    member = payload.member or (guild.get_member(payload.user_id) if guild else None)
+    if member and is_blacklisted(member):
+        g_conn.close()
+        return
+
+    participants = json.loads(row[0]) if row[0] else []
+    if payload.user_id not in participants:
+        participants.append(payload.user_id)
+        g_cur.execute("UPDATE active_giveaways SET participants_json = ? WHERE message_id = ?", (json.dumps(participants), payload.message_id))
+        g_conn.commit()
+
+        channel = bot.get_channel(payload.channel_id)
+        if channel:
+            try:
+                msg = await channel.fetch_message(payload.message_id)
+                if msg.embeds:
+                    embed = msg.embeds[0]
+                    embed.description = f"**الجائزة لكل فائز:** `{row[2]:,}` Cosmo\n" \
+                                        f"**عدد الفائزين:** `{row[3]}`\n" \
+                                        f"**المشاركين:** `{len(participants)}`\n" \
+                                        f"**الشرط:** {row[4] if row[4] else 'لا يوجد شرط'}\n" \
+                                        f"**ينتهي:** <t:{row[5]}:R>"
+                    await msg.edit(embed=embed)
+            except:
+                pass
+    g_conn.close()
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id or str(payload.emoji) != "🎉":
+        return
+    if not payload.guild_id:
+        return
+
+    g_conn, g_cur = get_guild_db(payload.guild_id)
+    g_cur.execute("SELECT participants_json, is_finished, amount, winners_count, condition, end_timestamp FROM active_giveaways WHERE message_id = ?", (payload.message_id,))
+    row = g_cur.fetchone()
+
+    if not row or row[1] == 1:
+        g_conn.close()
+        return
+
+    participants = json.loads(row[0]) if row[0] else []
+    if payload.user_id in participants:
+        participants.remove(payload.user_id)
+        g_cur.execute("UPDATE active_giveaways SET participants_json = ? WHERE message_id = ?", (json.dumps(participants), payload.message_id))
+        g_conn.commit()
+
+        channel = bot.get_channel(payload.channel_id)
+        if channel:
+            try:
+                msg = await channel.fetch_message(payload.message_id)
+                if msg.embeds:
+                    embed = msg.embeds[0]
+                    embed.description = f"**الجائزة لكل فائز:** `{row[2]:,}` Cosmo\n" \
+                                        f"**عدد الفائزين:** `{row[3]}`\n" \
+                                        f"**المشاركين:** `{len(participants)}`\n" \
+                                        f"**الشرط:** {row[4] if row[4] else 'لا يوجد شرط'}\n" \
+                                        f"**ينتهي:** <t:{row[5]}:R>"
+                    await msg.edit(embed=embed)
+            except:
+                pass
+    g_conn.close()
+
+# ----------------- معالجة رسائل البوتات (عجلة الحظ) والأعضاء -----------------
+@bot.event
+async def on_message(message: discord.Message):
+    if not message.guild or message.author.id == bot.user.id:
+        return
+
+    if message.author.bot:
+        g_conn, g_cur = get_guild_db(message.guild.id)
+        g_cur.execute("SELECT 1 FROM bot_whitelist WHERE bot_id = ? AND channel_id = ?", (message.author.id, message.channel.id))
+        whitelisted = g_cur.fetchone()
+        g_conn.close()
+
+        if whitelisted:
+            content = message.content or ""
+            if not content and message.embeds:
+                emb = message.embeds[0]
+                content = f"{emb.description or ''} {emb.title or ''}"
+                for field in emb.fields:
+                    content += f" {field.value}"
+
+            match = re.search(r"!(?:add_balance|اضافة)\s+(<@!?(\d+)>)\s+([^\s]+)", content)
+            if match:
+                target_mention, user_id, amount_str = match.groups()
+                target_member = message.guild.get_member(int(user_id))
+                
+                if target_member:
+                    if is_blacklisted(target_member):
+                        return await message.channel.send(f"⛔ تعذر الشحن: {target_member.mention} مدرج في البلاك ليست.")
+
+                    try:
+                        parsed_amount = parse_amount(amount_str)
+                        if parsed_amount > 0:
+                            allowed, pool_msg = deduct_server_spending(message.guild.id, parsed_amount)
+                            if not allowed:
+                                return await message.channel.send(f"⚠️ (عجلة الحظ) {pool_msg}")
+
+                            g_conn, g_cur = get_guild_db(message.guild.id)
+                            g_cur.execute("SELECT double_event_end FROM settings WHERE guild_id = ?", (message.guild.id,))
+                            d_row = g_cur.fetchone()
+                            g_conn.close()
+
+                            is_double = d_row and d_row[0] and int(time.time()) < d_row[0]
+                            final_amount = parsed_amount * 2 if is_double else parsed_amount
+
+                            update_balance(target_member.id, final_amount)
+                            extra_text = " **(مضاعفة ×2 فعالة! 🔥)**" if is_double else ""
+                            await message.channel.send(f"✅ (عجلة الحظ) تمت إضافة `{final_amount:,}` Cosmo إلى رصيد {target_member.mention}.{extra_text}")
+                            try:
+                                await target_member.send(f"📥 تمت إضافة `{final_amount:,}` Cosmo إلى حسابك من عجلة الحظ!{extra_text}")
+                            except:
+                                pass
+                    except Exception as e:
+                        print(f"Error handling wheel bot: {e}")
+        return
+
+    first_word = message.content.split()[0].replace("!", "").replace("/", "") if message.content else ""
+    g_conn, g_cur = get_guild_db(message.guild.id)
+    g_cur.execute("SELECT original_command FROM command_aliases WHERE alias = ?", (first_word,))
+    alias_row = g_cur.fetchone()
+    g_conn.close()
+
+    if alias_row:
+        orig_cmd = alias_row[0]
+        cmd = bot.get_command(orig_cmd)
+        if cmd:
+            prefix = message.content[0] if message.content[0] in ["!", "/"] else "!"
+            message.content = f"{prefix}{orig_cmd} " + " ".join(message.content.split()[1:])
+
+    await bot.process_commands(message)
+
+# ----------------- حدث التشغيل -----------------
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user.name} ({bot.user.id})")
+    bot.owner_id = PRIMARY_OWNER_ID
+    if not auto_backup_task.is_running():
+        auto_backup_task.start()
+    if not check_premium_expiry_task.is_running():
+        check_premium_expiry_task.start()
+    if not process_boost_weekly_payments.is_running():
+        process_boost_weekly_payments.start()
+    asyncio.create_task(resume_all_giveaways())
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash commands.")
+    except Exception as e:
+        print(f"Error syncing: {e}")
+
+# ----------------- واجهة أوامر المساعدة المقسمة -----------------
+
+class HelpView(discord.ui.View):
+    def __init__(self, author: discord.Member):
+        super().__init__(timeout=120)
+        self.author = author
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("⛔ لا يمكنك استخدام أزرار هذه الرسالة.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="الأوامر العامة 🌐", style=discord.ButtonStyle.primary)
+    async def general_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🌐 أوامر الأعضاء العامة",
+            description="تعمل بنظامي السلاش `/` والبادئة `!`:",
+            color=discord.Color.blue()
+        )
+        general_cmds = (
+            "• `/balance [@user]`: عرض رصيد Cosmo.\n"
+            "• `/transfer @user <amount>`: تحويل عملات مع كابتشا.\n"
+            "• `/exchange_list`: عرض العملات المتاحة للتبديل.\n"
+            "• `/exchange <currency> <amount> [note]`: طلب تبديل كوزمو.\n"
+            "• `/transfer_history`: سجل آخر التحويلات.\n"
+            "• `/exchange_history`: متابعة طلبات التبديل.\n"
+            "• `/exchange_stats`: إحصائيات التبديل بالسيرفر.\n"
+            "• `/my_boost_status`: تفاصيل دفعات البوست الخاصة بك.\n"
+            "• `/timer <duration> [reason]`: ضبط مؤقت وتنبيه.\n"
+            "• `/ping`: فحص سرعة استجابة البوت.\n"
+            "• `/server_count`: عرض عدد وسيرفرات البوت."
+        )
+        embed.add_field(name="قائمة الأوامر العامة:", value=general_cmds, inline=False)
+        embed.set_footer(text="اختر أحد الأزرار أدناه للتبديل بين القوائم.")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="الأوامر الإدارية والبريميوم 🛡️", style=discord.ButtonStyle.danger)
+    async def admin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🛡️ أوامر الإدارة والمسؤولين والبريميوم",
+            description="أوامر مخصصة للمسؤولين وأصحاب السيرفر ومالك البوت:",
+            color=discord.Color.red()
+        )
+        admin_cmds_part1 = (
+            "• `/add_balance @user <amount>`: شحن رصيد لعضو.\n"
+            "• `/remove_balance @user <amount>`: خصم رصيد من عضو.\n"
+            "• `/giveaway <amount> <duration> <winners> [condition]`: سحب جيف أواي بالريأكشن.\n"
+            "• `/box <amount> [condition]`: إطلاق بوكس سريع.\n"
+            "• `/roulette <amount> [condition]`: بدء لعبة الروليت بالعجلة.\n"
+            "• `/stop_roulette`: إيقاف الروليت الجارية.\n"
+            "• `/server_budget`: عرض ميزانية الصرف المتبقية.\n"
+            "• `/set_double_event <duration>`: تفعيل حدث مضاعفة الرصيد.\n"
+            "• `/active_premium <code>`: تفعيل اشتراك البريميوم.\n"
+            "• `/premium_status`: تفاصيل بريميوم السيرفر.\n"
+            "• `/set_bot_name <name>` / `/set_bot_avatar <file>`: هوية البوت بالسيرفر."
+        )
+        admin_cmds_part2 = (
+            "• `/setup_boost_rewards <single> <double>`: جوائز البوست الأسبوعية.\n"
+            "• `/toggle_boost_system <true/false>`: فتح/قفل نظام البوست.\n"
+            "• `/fake_boost <1/2>`: محاكاة بوست للتجربة.\n"
+            "• `/set_boost_log #channel`: روم لوج البوست.\n"
+            "• `/set_global_request_log #channel`: تحديد روم استقبال الطلبات العام (مالك البوت).\n"
+            "• `/set_delivery_log #channel`: تحديد روم تسليمات التبديل لهذا السيرفر.\n"
+            "• `/set_success_log #channel`: روم إعلانات التبديل الناجحة.\n"
+            "• `/set_balance_log #channel` / `/set_transfer_log #channel`: رومات اللوج.\n"
+            "• `/toggle_exchange_system <true/false>`: قفل/فتح التبديل العام.\n"
+            "• `/toggle_currency_status <name> <true/false>`: قفل/فتح عملة.\n"
+            "• `/add_exchange_currency <name> <rate> [min]`: ضبط عملة.\n"
+            "• `/premium_code <duration>` / `/set_server_budget <amount>`: أوامر المالك.\n"
+            "• `/auto_backup` / `/leave_guild <ID>`: أدوات المالك الإدارية."
+        )
+        embed.add_field(name="الفعاليات والأرصدة والبريميوم:", value=admin_cmds_part1, inline=False)
+        embed.add_field(name="نظام البوست والتبديل وإعدادات السيرفر:", value=admin_cmds_part2, inline=False)
+        embed.set_footer(text="اختر أحد الأزرار أدناه للتبديل بين القوائم.")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+@bot.hybrid_command(name="help", aliases=["مساعدة"], description="عرض قائمة أوامر البوت مقسمة بالأزرار")
+async def help_command(ctx: commands.Context):
+    embed = discord.Embed(
+        title="✨ قائمة أوامر بوت Cosmo",
+        description="مرحباً بك! اضغط على أحد الأزرار أدناه لعرض الأوامر المطلوبة:\n\n"
+                    "🔹 **الأوامر العامة:** جميع الأوامر المتاحة للأعضاء.\n"
+                    "🔸 **الأوامر الإدارية والبريميوم:** أوامر التحكم، الشحن، السحوبات، واللوجات للمسؤولين.",
+        color=discord.Color.purple()
+    )
+    embed.set_footer(text="Cosmo Currency System • يدعم السلاش والبادئة")
+    view = HelpView(ctx.author)
+    await ctx.send(embed=embed, view=view)
+
+# ----------------- أوامر نظام البوست (Boost System) -----------------
+
+@bot.hybrid_command(name="setup_boost_rewards", aliases=["ضبط_جوائز_البوست"], description="تحديد مكافأة الدفعة الأسبوعية للبوست الواحد والدبل بوست")
+async def setup_boost_rewards(ctx: commands.Context, single_reward: str, double_reward: str):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+
+    try:
+        s_amount = parse_amount(single_reward)
+        d_amount = parse_amount(double_reward)
+    except:
+        return await ctx.send("❌ صيغة المبالغ غير صحيحة.")
+
+    if s_amount <= 0 or d_amount <= 0:
+        return await ctx.send("❌ المبالغ يجب أن تكون أكبر من 0.")
+
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute(
+        "INSERT INTO boost_system_config (guild_id, single_boost_reward, double_boost_reward) VALUES (?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET single_boost_reward = excluded.single_boost_reward, double_boost_reward = excluded.double_boost_reward",
+        (ctx.guild.id, s_amount, d_amount)
+    )
+    g_conn.commit()
+    g_conn.close()
+
+    await ctx.send(
+        f"✅ **تم ضبط مكافآت نظام البوست لهذا السيرفر بنجاح!**\n"
+        f"• **البوست الواحد:** `{s_amount:,}` Cosmo أسبوعياً (إجمالي 4 أسابيع: `{s_amount*4:,}` Cosmo).\n"
+        f"• **الدبل بوست:** `{d_amount:,}` Cosmo أسبوعياً (إجمالي 4 أسابيع: `{d_amount*4:,}` Cosmo)."
+    )
+
+@bot.hybrid_command(name="toggle_boost_system", aliases=["تفعيل_نظام_البوست"], description="تفعيل أو تعطيل استقبال مشتركين جدد في نظام البوست")
+async def toggle_boost_system(ctx: commands.Context, status: bool):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+
+    val = 1 if status else 0
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute(
+        "INSERT INTO boost_system_config (guild_id, is_enabled) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET is_enabled = excluded.is_enabled",
+        (ctx.guild.id, val)
+    )
+    g_conn.commit()
+    g_conn.close()
+
+    status_str = "مفعلاً ويستقبل بوستات جديدة ✅" if status else "معطلاً ولن يدخل أعضاء جدد (المشتركون الحاليون سيستمرون بالاستلام طبيعياً) ⛔"
+    await ctx.send(f"⚙️ أصبح نظام البوست الآن: **{status_str}**.")
+
+@bot.hybrid_command(name="set_boost_log", aliases=["لوج_البوست"], description="تحديد روم إعلانات البوست وتسليم الدفعات الأسبوعية")
+async def set_boost_log(ctx: commands.Context, channel: discord.TextChannel):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute(
+        "INSERT INTO boost_system_config (guild_id, boost_log_channel) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET boost_log_channel = excluded.boost_log_channel",
+        (ctx.guild.id, channel.id)
+    )
+    g_conn.commit()
+    g_conn.close()
+
+    await ctx.send(f"✅ تم ضبط روم لوج البوست على: {channel.mention}")
+
+@bot.hybrid_command(name="fake_boost", aliases=["بوست_وهمي"], description="محاكاة بوست لتجربة النظام واختباره (1 للبوست، 2 للدبل بوست)")
+async def fake_boost(ctx: commands.Context, boost_count: int):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+
+    if boost_count not in [1, 2]:
+        return await ctx.send("❌ يرجى اختيار إما `1` (بوست واحد) أو `2` (دبل بوست).")
+
+    success, msg = await register_member_boost(ctx.guild, ctx.author, boost_count=boost_count, is_fake=True)
+    if not success:
+        return await ctx.send(f"⚠️ {msg}")
+
+    await ctx.send(f"🧪 **(تجربة Fake Boost)** {msg}\nتم إيهام البوت بأنك قمت بعمل `{boost_count}` بوست وتسليم الدفعة الأولى فوراً لحسابك!")
+
+@bot.hybrid_command(name="my_boost_status", aliases=["حالة_البوست_لي"], description="معاينة اشتراكات البوست والدفعات المتبقية لك في هذا السيرفر")
+async def my_boost_status(ctx: commands.Context):
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("SELECT id, boost_type, weekly_reward, payments_remaining, next_payment_timestamp FROM active_boost_subscriptions WHERE user_id = ?", (ctx.author.id,))
+    subs = g_cur.fetchall()
+    g_conn.close()
+
+    if not subs:
+        return await ctx.send("ℹ️ ليس لديك أي اشتراك نشط في نظام البوست حالياً في هذا السيرفر.")
+
+    embed = discord.Embed(title=f"🚀 اشتراكات البوست الخاصة بك | {ctx.guild.name}", color=discord.Color.magenta())
+    for idx, s in enumerate(subs, 1):
+        type_str = "دبل بوست (2 Boosts)" if s[1] == 2 else "بوست واحد (1 Boost)"
+        embed.add_field(
+            name=f"اشتراك #{idx} - {type_str}",
+            value=f"• المكافأة الأسبوعية: `{s[2]:,}` Cosmo\n"
+                  f"• الدفعات المتبقية: `{s[3]}` دفعات من أصل 4\n"
+                  f"• موعد الدفعة القادمة: <t:{s[4]}:F> (<t:{s[4]}:R>)",
+            inline=False
+        )
+    await ctx.send(embed=embed)
+
+# ----------------- أوامر نظام البريميوم وميزانية السيرفر -----------------
+
+@bot.hybrid_command(name="premium_code", aliases=["انشاء_كود_بريميوم"], description="إنشاء كود بريميوم مكون من 14 حرف لمدة محددة")
+async def premium_code(ctx: commands.Context, duration: str):
+    if not await check_is_owner(ctx):
+        return await ctx.send("⛔ هذا الأمر متاح فقط لمالك ومطور البوت الأساسي.")
+
+    duration_sec = parse_duration(duration)
+    if not duration_sec:
+        return await ctx.send("❌ صيغة الوقت غير صحيحة. مثال: `30d`, `7d`, `12h`.")
+
+    chars = string.ascii_uppercase + string.digits
+    code = ''.join(random.choice(chars) for _ in range(14))
+
+    now = int(time.time())
+    global_cursor.execute(
+        "INSERT INTO premium_codes (code, duration_seconds, created_at, is_used) VALUES (?, ?, ?, 0)",
+        (code, duration_sec, now)
+    )
+    global_conn.commit()
+
+    await ctx.send(
+        f"💎 **تم إنشاء كود بريميوم جديد بنجاح!**\n"
+        f"• **الكود:** `{code}`\n"
+        f"• **المدة:** `{duration}`\n"
+        f"• **طريقة التفعيل:** `/active_premium code:{code}`"
+    )
+
+@bot.hybrid_command(name="active_premium", aliases=["تفعيل_البريميوم"], description="تفعيل كود البريميوم للسيرفر الحالي")
+async def active_premium(ctx: commands.Context, code: str):
+    is_owner = await check_is_owner(ctx)
+    has_admin = ctx.author.guild_permissions.administrator if hasattr(ctx.author, "guild_permissions") else False
+    is_server_owner = ctx.author.id == ctx.guild.owner_id
+    
+    if not (is_owner or is_server_owner or has_admin or is_bot_admin(ctx)):
+        return await ctx.send("⛔ ليس لديك صلاحية لتفعيل الكود في هذا السيرفر.")
+
+    clean_code = code.strip().upper()
+    global_cursor.execute("SELECT duration_seconds, is_used FROM premium_codes WHERE code = ?", (clean_code,))
+    row = global_cursor.fetchone()
+
+    if not row:
+        return await ctx.send("❌ كود البريميوم غير صالح أو غير موجود.")
+    if row[1] == 1:
+        return await ctx.send("❌ تم استخدام هذا الكود مسبقاً.")
+
+    duration_sec = row[0]
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("SELECT premium_end FROM premium_info WHERE guild_id = ?", (ctx.guild.id,))
+    s_row = g_cur.fetchone()
+    current_end = s_row[0] if s_row and s_row[0] else 0
+
+    now = int(time.time())
+    new_end = (current_end + duration_sec) if current_end > now else (now + duration_sec)
+
+    g_cur.execute(
+        "INSERT INTO premium_info (guild_id, activated_at, premium_end) VALUES (?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET premium_end = excluded.premium_end",
+        (ctx.guild.id, now, new_end)
+    )
+    g_conn.commit()
+    g_conn.close()
+
+    global_cursor.execute("UPDATE premium_codes SET is_used = 1, used_guild_id = ? WHERE code = ?", (ctx.guild.id, clean_code))
+    global_conn.commit()
+
+    await ctx.send(
+        f"🎉 **تم تفعيل اشتراك البريميوم لهذا السيرفر بنجاح!**\n"
+        f"• **ينتهي في:** <t:{new_end}:F> (<t:{new_end}:R>)\n"
+        f"• تفعيل الصلاحيات الإدارية وتخصيص هوية البوت عبر `/set_bot_name` و `/set_bot_avatar`."
+    )
+
+@bot.hybrid_command(name="premium_status", aliases=["حالة_البريميوم"], description="عرض تفاصيل اشتراك البريميوم في هذا السيرفر والوقت المتبقي")
+async def premium_status(ctx: commands.Context):
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("SELECT activated_at, premium_end, custom_name, custom_avatar_url FROM premium_info WHERE guild_id = ?", (ctx.guild.id,))
+    row = g_cur.fetchone()
+    g_conn.close()
+
+    now = int(time.time())
+    if not row or not row[1] or now >= row[1]:
+        return await ctx.send("❌ هذا السيرفر لا يمتلك اشتراك بريميوم نشط حالياً (أو قد انتهت صلاحيته).")
+
+    embed = discord.Embed(
+        title=f"💎 تفاصيل اشتراك البريميوم | {ctx.guild.name}",
+        description="بيانات اشتراك البريميوم الحالي لهذا السيرفر:",
+        color=discord.Color.purple()
+    )
+    embed.add_field(name="📅 تاريخ التفعيل", value=f"<t:{row[0]}:F>", inline=False)
+    embed.add_field(name="⏳ تاريخ الانتهاء", value=f"<t:{row[1]}:F>", inline=False)
+    embed.add_field(name="⏱️ الوقت المتبقي", value=f"<t:{row[1]}:R>", inline=False)
+    embed.add_field(name="🎨 الاسم المخصص", value=f"`{row[2]}`" if row[2] else "الافتراضي", inline=True)
+    embed.add_field(name="🖼️ الصورة المخصصة", value="مفعلة ✅" if row[3] else "الافتراضية", inline=True)
+    embed.set_footer(text="Cosmo Premium System")
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="set_bot_name", aliases=["تغيير_اسم_البوت"], description="تغيير اسم ولقب البوت داخل هذا السيرفر فقط (سيرفرات البريميوم)")
+async def set_bot_name(ctx: commands.Context, new_name: str):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    if not is_guild_premium(ctx.guild.id):
+        return await ctx.send("💎 هذه الميزة تتطلب اشتراك بريميوم نشط للسيرفر!")
+
+    try:
+        await ctx.guild.me.edit(nick=new_name[:32])
+        g_conn, g_cur = get_guild_db(ctx.guild.id)
+        g_cur.execute("UPDATE premium_info SET custom_name = ? WHERE guild_id = ?", (new_name[:32], ctx.guild.id))
+        g_conn.commit()
+        g_conn.close()
+        await ctx.send(f"✅ تم تغيير اسم البوت في هذا السيرفر بنجاح إلى: **{new_name[:32]}**.")
+    except Exception as e:
+        await ctx.send(f"❌ تعذر تغيير الاسم، تأكد من صلاحيات البوت: {e}")
+
+@bot.hybrid_command(name="set_bot_avatar", aliases=["تغيير_صورة_البوت"], description="تغيير صورة البوت الخاصة بهذا السيرفر فقط (سيرفرات البريميوم)")
+async def set_bot_avatar(ctx: commands.Context, image: discord.Attachment):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    if not is_guild_premium(ctx.guild.id):
+        return await ctx.send("💎 هذه الميزة تتطلب اشتراك بريميوم نشط للسيرفر!")
+
+    if not image.content_type or not image.content_type.startswith("image/"):
+        return await ctx.send("❌ يرجى إرفاق ملف صورة صالح.")
+
+    try:
+        img_bytes = await image.read()
+        await ctx.guild.me.edit(avatar=img_bytes)
+        g_conn, g_cur = get_guild_db(ctx.guild.id)
+        g_cur.execute("UPDATE premium_info SET custom_avatar_url = ? WHERE guild_id = ?", (image.url, ctx.guild.id))
+        g_conn.commit()
+        g_conn.close()
+        await ctx.send(f"✅ تم تغيير صورة البوت في بروفايل هذا السيرفر بنجاح!")
+    except discord.HTTPException as e:
+        await ctx.send(f"❌ خطأ من ديسكورد أثناء تعديل الصورة: {e}")
+    except Exception as e:
+        await ctx.send(f"❌ حدث خطأ غير متوقع: {e}")
+
+@bot.hybrid_command(name="set_server_budget", aliases=["شحن_ميزانية_السيرفر"], description="تحديد/شحن رصيد ميزانية الصرف المتاحة للسيرفر (مالك البوت فقط)")
+async def set_server_budget(ctx: commands.Context, amount: str):
+    if not await check_is_owner(ctx):
+        return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
+
+    try:
+        parsed = parse_amount(amount)
+    except:
+        return await ctx.send("❌ صيغة المبلغ غير صحيحة.")
+
+    if parsed < 0:
+        return await ctx.send("❌ المبلغ يجب أن يكون 0 أو أكثر.")
+
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute(
+        "INSERT INTO settings (guild_id, spending_balance) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET spending_balance = excluded.spending_balance",
+        (ctx.guild.id, parsed)
+    )
+    g_conn.commit()
+    g_conn.close()
+
+    await ctx.send(f"🏦 **تم ضبط ميزانية الصرف المتاحة لهذا السيرفر على:** `{parsed:,}` Cosmo.\n(سيتم خصم مبالغ الشحن والجيف والبوكس والروليت والعجلة من هذا الرصيد تدريجياً).")
+
+@bot.hybrid_command(name="server_budget", aliases=["ميزانية_السيرفر"], description="عرض ميزانية الصرف المتبقية للسيرفر")
+async def server_budget(ctx: commands.Context):
+    budget = get_server_spending_balance(ctx.guild.id)
+    await ctx.send(f"🪙 **رصيد ميزانية السيرفر المتاحة للصرف:** `{budget:,}` Cosmo.")
+
+# ----------------- أوامر النسخ الاحتياطي والمالك -----------------
+
+@bot.hybrid_command(name="auto_backup", aliases=["باك_اب_تلقائي"], description="إرسال نسخة احتياطية فورية لقاعدة البيانات العامة إلى خاص مالك البوت")
+async def auto_backup(ctx: commands.Context):
+    if not await check_is_owner(ctx):
+        return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
+
+    try:
+        shutil.copyfile("global_cosmo.db", "global_cosmo_backup.db")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        file = discord.File("global_cosmo_backup.db", filename=f"global_cosmo_backup_{int(time.time())}.db")
+        await ctx.author.send(f"📦 **نسخة احتياطية لقاعدة البيانات العامة بطلب يدوي:**\nالتاريخ: `{now_str}`", file=file)
+        await ctx.send("✅ تم إرسال ملف النسخة الاحتياطية بنجاح إلى رسائلك الخاصة!")
+    except Exception as e:
+        await ctx.send(f"❌ حدث خطأ أثناء إرسال النسخة الاحتياطية: {e}")
+
+@bot.hybrid_command(name="leave_guild", aliases=["خروج_البوت"], description="إخراج البوت من سيرفر معين (صاحب البوت فقط)")
+async def leave_guild(ctx: commands.Context, guild_id: str):
+    if not await check_is_owner(ctx):
+        return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
+    
+    try:
+        target_guild = bot.get_guild(int(guild_id))
+        if not target_guild:
+            return await ctx.send("❌ البوت غير متواجد في هذا السيرفر.")
+        await target_guild.leave()
+        await ctx.send(f"✅ تم بنجاح خروج البوت من السيرفر: **{target_guild.name}** (`{guild_id}`).")
+    except Exception as e:
+        await ctx.send(f"❌ حدث خطأ: {e}")
+
+# ----------------- أوامر تصريح البوتات الإضافية (عجلة الحظ وغيرها) -----------------
+
+@bot.hybrid_command(name="allow_bot", aliases=["سماح_لبوت"], description="السماح لبوت معين باستخدام أوامر الإدارة في روم محدد")
+async def allow_bot(ctx: commands.Context, bot_id: str, channel: discord.TextChannel):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+    
+    try:
+        b_id = int(bot_id)
+    except ValueError:
+        return await ctx.send("❌ يرجى إدخال معرف بوت صالح (أرقام فقط).")
+
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute(
+        "INSERT OR REPLACE INTO bot_whitelist (bot_id, channel_id) VALUES (?, ?)",
+        (b_id, channel.id)
+    )
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"✅ تم السماح للبوت (`ID: {b_id}`) بتنفيذ عمليات الشحن داخل الروم {channel.mention} بنجاح.")
+
+@bot.hybrid_command(name="disallow_bot", aliases=["الغاء_سماح_لبوت"], description="إلغاء تصريح البوت من تنفيذ الأوامر")
+async def disallow_bot(ctx: commands.Context, bot_id: str):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+    
+    try:
+        b_id = int(bot_id)
+    except ValueError:
+        return await ctx.send("❌ يرجى إدخال معرف بوت صالح.")
+
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("DELETE FROM bot_whitelist WHERE bot_id = ?", (b_id,))
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"🗑️ تم إلغاء التصريح للبوت (`ID: {b_id}`) بنجاح.")
+
+# ----------------- أوامر المعلومات العامة المحدثة -----------------
+
+@bot.hybrid_command(name="ping", aliases=["بنق"], description="فحص سرعة استجابة البوت")
+async def ping(ctx: commands.Context):
+    latency = round(bot.latency * 1000)
+    await ctx.send(f"🏓 بونق! سرعة الاستجابة: `{latency}ms`")
+
+@bot.hybrid_command(name="server_count", aliases=["عدد_السيرفرات"], description="عرض قائمة السيرفرات المتواجد بها البوت وروابطها (مالك البوت)")
+async def server_count(ctx: commands.Context):
+    if not await check_is_owner(ctx):
+        total_guilds = len(bot.guilds)
+        total_members = sum(g.member_count for g in bot.guilds if g.member_count)
+        return await ctx.send(f"📊 يتواجد البوت حالياً في **{total_guilds}** سيرفر، ويخدم أكثر من **{total_members:,}** عضو.")
+
+    await ctx.defer()
+
+    total_guilds = len(bot.guilds)
+    total_members = sum(g.member_count for g in bot.guilds if g.member_count)
+
+    server_entries = []
+
+    for idx, guild in enumerate(bot.guilds, 1):
+        invite_link = None
+        try:
+            invites = await guild.invites()
+            if invites:
+                invite_link = invites[0].url
+        except:
+            pass
+
+        if not invite_link:
+            for channel in guild.text_channels:
+                if channel.permissions_for(guild.me).create_instant_invite:
+                    try:
+                        new_inv = await channel.create_invite(max_age=0, max_uses=0, reason="Server List Owner Inspection")
+                        invite_link = new_inv.url
+                        break
+                    except:
+                        continue
+
+        invite_display = f"[اضغط هنا للدخول]({invite_link})" if invite_link else "`لا تتوفر صلاحية إنشاء رابط`"
+        
+        entry = (
+            f"**#{idx} | {guild.name}**\n"
+            f"• **ID:** `{guild.id}`\n"
+            f"• **الأعضاء:** `{guild.member_count:,}`\n"
+            f"• **رابط الدعوة:** {invite_display}\n"
+        )
+        server_entries.append(entry)
+
+    chunks = []
+    current_chunk = ""
+    for entry in server_entries:
+        if len(current_chunk) + len(entry) > 1800:
+            chunks.append(current_chunk)
+            current_chunk = entry
+        else:
+            current_chunk += entry
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    for i, chunk in enumerate(chunks, 1):
+        embed = discord.Embed(
+            title=f"📊 قائمة سيرفرات البوت ({total_guilds} سيرفر) - صفحة {i}/{len(chunks)}",
+            description=f"👥 **إجمالي الأعضاء:** `{total_members:,}` عضو\n\n" + chunk,
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text=f"طلب بواسطة المالك: {ctx.author.name}")
+        await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="timer", aliases=["مؤقت"], description="إنشاء مؤقت مع تنبيه عند الانتهاء")
+async def timer(ctx: commands.Context, duration: str, *, reason: str = "انتهى الوقت!"):
+    sec = parse_duration(duration)
+    if not sec:
+        return await ctx.send("❌ صيغة الوقت غير صحيحة. مثال: `10s`, `5m`, `1h`.")
+    end_t = int(time.time()) + sec
+    await ctx.send(f"⏳ **المؤقت بدأ:** سينتهي <t:{end_t}:R>.\n📌 **السبب:** `{reason}`")
+    await asyncio.sleep(sec)
+    await ctx.send(f"⏰ {ctx.author.mention} **المؤقت انتهى!** ➔ `{reason}`")
+
+async def schedule_double_announcement(channel: discord.TextChannel, guild_id: int, duration_sec: int):
+    await asyncio.sleep(duration_sec)
+    g_conn, g_cur = get_guild_db(guild_id)
+    g_cur.execute("UPDATE settings SET double_event_end = 0 WHERE guild_id = ?", (guild_id,))
+    g_conn.commit()
+    g_conn.close()
+    try:
+        await channel.send("📢 **انتهى حدث الدبل (المضاعفة ×2) لعجلة الحظ الآن!**\nعادت جوائز العجلة إلى قيمتها الأصلية.")
+    except:
+        pass
+
+@bot.hybrid_command(name="set_double_event", aliases=["تفعيل_الدبل"], description="تفعيل حدث مضاعفة جوائز عجلة الحظ مع إعلان انتهاء تلقائي")
+async def set_double_event(ctx: commands.Context, duration: str):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+    sec = parse_duration(duration)
+    if not sec:
+        return await ctx.send("❌ صيغة الوقت غير صحيحة (مثال: `1h`, `30m`).")
+    end_time = int(time.time()) + sec
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("UPDATE settings SET double_event_end = ? WHERE guild_id = ?", (end_time, ctx.guild.id))
+    g_conn.commit()
+    g_conn.close()
+    
+    await ctx.send(f"🔥 **تم تفعيل حدث المضاعفة (الدبل ×2) بنجاح!**\n⏳ **ينتهي الحدث:** <t:{end_time}:R> (في <t:{end_time}:t>).")
+    asyncio.create_task(schedule_double_announcement(ctx.channel, ctx.guild.id, sec))
+
+@bot.hybrid_command(name="set_balance_log", aliases=["لوج_الرصيد"], description="تحديد روم إشعارات إضافة وخصم الرصيد")
+async def set_balance_log(ctx: commands.Context, channel: discord.TextChannel):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("UPDATE settings SET balance_log = ? WHERE guild_id = ?", (channel.id, ctx.guild.id))
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"✅ تم ضبط روم لوج إضافة/خصم الرصيد على: {channel.mention}")
+
+# ----------------- أوامر الرصيد والتحويل -----------------
+
+@bot.hybrid_command(name="balance", aliases=["رصيد", "bal"], description="معرفة رصيد العملات")
+async def balance(ctx: commands.Context, member: discord.Member = None):
+    target = member or ctx.author
+    bal = get_balance(target.id)
+    await ctx.send(f"🪙 رصيد **{target.display_name}** هو: `{bal:,}` Cosmo")
+
+@bot.hybrid_command(name="transfer", aliases=["تحويل"], description="تحويل عملات Cosmo لشخص آخر")
+async def transfer(ctx: commands.Context, member: discord.Member, amount: str):
+    if member.bot or member.id == ctx.author.id:
+        return await ctx.send("❌ لا يمكنك التحويل لنفسك أو إلى بوت.")
+    if is_blacklisted(ctx.author) or is_blacklisted(member):
+        return await ctx.send("⛔ لا يمكن إتمام التحويل بسبب إدراج أحد الطرفين في البلاك ليست.")
+
+    try:
+        parsed_amount = parse_amount(amount)
+    except:
+        return await ctx.send("❌ صيغة المبلغ غير صحيحة.")
+
+    if parsed_amount <= 0:
+        return await ctx.send("❌ المبلغ يجب أن يكون أكبر من 0.")
+    if get_balance(ctx.author.id) < parsed_amount:
+        return await ctx.send("❌ رصيدك من Cosmo لا يكفي.")
+
+    captcha_code = str(random.randint(1000, 9999))
+    captcha_img = generate_captcha_image(captcha_code)
+    file = discord.File(captcha_img, filename="captcha.png")
+
+    msg = await ctx.send(f"⚠️ {ctx.author.mention} لتأكيد تحويل `{parsed_amount:,}` Cosmo، اكتب الكود خلال **20 ثانية**:", file=file)
+
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        reply = await bot.wait_for("message", timeout=20.0, check=check)
+        if reply.content.strip() == captcha_code:
+            update_balance(ctx.author.id, -parsed_amount)
+            update_balance(member.id, parsed_amount)
+            
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            global_cursor.execute("INSERT INTO transfer_logs (sender_id, receiver_id, amount, timestamp) VALUES (?, ?, ?, ?)",
+                                  (ctx.author.id, member.id, parsed_amount, now))
+            global_conn.commit()
+
+            await ctx.send(f"✅ تم تحويل `{parsed_amount:,}` Cosmo إلى {member.mention}.")
+            try:
+                await msg.delete()
+                await reply.delete()
+                await member.send(f"📥 استلمت `{parsed_amount:,}` Cosmo من **{ctx.author.name}** (`ID: {ctx.author.id}`).")
+            except:
+                pass
+
+            g_conn, g_cur = get_guild_db(ctx.guild.id)
+            g_cur.execute("SELECT transfer_log FROM settings WHERE guild_id = ?", (ctx.guild.id,))
+            row = g_cur.fetchone()
+            g_conn.close()
+            if row and row[0]:
+                log_chan = ctx.guild.get_channel(row[0])
+                if log_chan:
+                    await log_chan.send(f"🔄 **تحويل جديد:** قام {ctx.author.mention} بتحويل `{parsed_amount:,}` Cosmo إلى {member.mention}.")
+        else:
+            await ctx.send("❌ الكود غير صحيح. تم إلغاء العملية.")
+            try:
+                await msg.delete()
+            except:
+                pass
+    except asyncio.TimeoutError:
+        try:
+            await msg.delete()
+        except:
+            pass
+        await ctx.send(f"⏱️ {ctx.author.mention} انتهى الوقت المحدد.")
+
+@bot.hybrid_command(name="add_balance", aliases=["اضافة"], description="إضافة رصيد لعضو (مسؤولين فقط - يخصم من ميزانية السيرفر)")
+async def add_balance(ctx: commands.Context, member: discord.Member, amount: str):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    if is_blacklisted(member):
+        return await ctx.send("⛔ العضو مدرج في البلاك ليست.")
+
+    try:
+        parsed_amount = parse_amount(amount)
+    except:
+        return await ctx.send("❌ صيغة المبلغ غير صحيحة.")
+
+    if parsed_amount <= 0:
+        return await ctx.send("❌ المبلغ يجب أن يكون رقماً موجباً.")
+
+    allowed, pool_msg = deduct_server_spending(ctx.guild.id, parsed_amount)
+    if not allowed:
+        return await ctx.send(pool_msg)
+    
+    update_balance(member.id, parsed_amount)
+    await ctx.send(f"✅ تمت إضافة `{parsed_amount:,}` Cosmo إلى رصيد {member.mention}.\n{pool_msg}")
+
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("SELECT balance_log FROM settings WHERE guild_id = ?", (ctx.guild.id,))
+    row = g_cur.fetchone()
+    g_conn.close()
+    if row and row[0]:
+        chan = ctx.guild.get_channel(row[0])
+        if chan:
+            await chan.send(f"📥 **شحن رصيد:** قام {ctx.author.mention} بإضافة `{parsed_amount:,}` Cosmo إلى {member.mention}.")
+
+@bot.hybrid_command(name="remove_balance", aliases=["خصم"], description="خصم رصيد من عضو (مسؤولين فقط)")
+async def remove_balance(ctx: commands.Context, member: discord.Member, amount: str):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    try:
+        parsed_amount = parse_amount(amount)
+    except:
+        return await ctx.send("❌ صيغة المبلغ غير صحيحة.")
+
+    if parsed_amount <= 0:
+        return await ctx.send("❌ المبلغ يجب أن يكون رقماً موجباً.")
+    
+    update_balance(member.id, -parsed_amount)
+    await ctx.send(f"✅ تم خصم `{parsed_amount:,}` Cosmo من رصيد {member.mention}.")
+
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("SELECT balance_log FROM settings WHERE guild_id = ?", (ctx.guild.id,))
+    row = g_cur.fetchone()
+    g_conn.close()
+    if row and row[0]:
+        chan = ctx.guild.get_channel(row[0])
+        if chan:
+            await chan.send(f"📤 **خصم رصيد:** قام {ctx.author.mention} بسحب `{parsed_amount:,}` Cosmo من {member.mention}.")
+
+# ----------------- نظام التحقق والتسليم المشترك -----------------
+
+class ClaimVerificationView(discord.ui.View):
+    def __init__(self, winner: discord.Member, amount: int, reward_type: str = "الجائزة"):
+        super().__init__(timeout=None)
+        self.winner = winner
+        self.amount = amount
+        self.reward_type = reward_type
+
+    @discord.ui.button(label="تسليم", style=discord.ButtonStyle.success, emoji="✅")
+    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g_conn, g_cur = get_guild_db(interaction.guild.id)
+        g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
+        row = g_cur.fetchone()
+        g_conn.close()
+
+        is_admin = interaction.user.id == interaction.guild.owner_id or interaction.user.id == PRIMARY_OWNER_ID
+        if row and row[0]:
+            role = interaction.guild.get_role(row[0])
+            if role and role in interaction.user.roles:
+                is_admin = True
+
+        if not is_admin:
+            return await interaction.response.send_message("⛔ المسؤولون فقط يمكنهم اتخاذ هذا الإجراء.", ephemeral=True)
+
+        if is_blacklisted(self.winner):
+            for item in self.children:
+                item.disabled = True
+            await interaction.message.edit(view=self)
+            return await interaction.response.send_message(f"⛔ تعذر التسليم: العضو {self.winner.mention} مدرج في البلاك ليست.")
+
+        update_balance(self.winner.id, self.amount)
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message(f"✅ تم تسليم `{self.amount:,}` Cosmo إلى {self.winner.mention} بواسطة {interaction.user.mention}.")
+        try:
+            await self.winner.send(f"🎉 تم تسليمك {self.reward_type} بقيمة `{self.amount:,}` Cosmo.")
+        except:
+            pass
+
+    @discord.ui.button(label="عدم التسليم", style=discord.ButtonStyle.danger, emoji="❌")
+    async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g_conn, g_cur = get_guild_db(interaction.guild.id)
+        g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
+        row = g_cur.fetchone()
+        g_conn.close()
+
+        is_admin = interaction.user.id == interaction.guild.owner_id or interaction.user.id == PRIMARY_OWNER_ID
+        if row and row[0]:
+            role = interaction.guild.get_role(row[0])
+            if role and role in interaction.user.roles:
+                is_admin = True
+
+        if not is_admin:
+            return await interaction.response.send_message("⛔ المسؤولون فقط يمكنهم اتخاذ هذا الإجراء.", ephemeral=True)
+
+        refund_server_spending(interaction.guild.id, self.amount)
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message(f"🛑 تم إلغاء تسليم الجائزة لـ {self.winner.mention} بواسطة {interaction.user.mention} (أُعيد المبلغ لميزانية السيرفر).")
+
+# ----------------- نظام الجيف أواي بالريأكشن -----------------
+
+@bot.hybrid_command(name="giveaway", aliases=["سحب", "جيف_اواي"], description="بدء سحب جيف أواي على عملات Cosmo بالريأكشن 🎉")
+async def giveaway(ctx: commands.Context, amount: str, duration: str, winners_count: int, *, condition: str = None):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+
+    try:
+        parsed_amount = parse_amount(amount)
+    except:
+        return await ctx.send("❌ صيغة المبلغ غير صحيحة.")
+
+    if parsed_amount <= 0:
+        return await ctx.send("❌ المبلغ يجب أن يكون أكبر من 0.")
+
+    if winners_count <= 0:
+        return await ctx.send("❌ يجب أن يكون عدد الفائزين 1 على الأقل.")
+
+    total_cost = parsed_amount * winners_count
+    allowed, pool_msg = deduct_server_spending(ctx.guild.id, total_cost)
+    if not allowed:
+        return await ctx.send(pool_msg)
+
+    duration_seconds = parse_duration(duration)
+    if not duration_seconds:
+        refund_server_spending(ctx.guild.id, total_cost)
+        return await ctx.send("❌ صيغة الوقت غير صحيحة. استخدم: `10s`، `5m`، `2h`، أو `1d`.")
+
+    end_timestamp = int(time.time()) + duration_seconds
+
+    embed = discord.Embed(
+        title="🎉 سحب على عملات Cosmo! 🎉",
+        description=f"**الجائزة لكل فائز:** `{parsed_amount:,}` Cosmo\n"
+                    f"**عدد الفائزين:** `{winners_count}`\n"
+                    f"**المشاركين:** `0`\n"
+                    f"**الشرط:** {condition if condition else 'لا يوجد شرط'}\n"
+                    f"**ينتهي:** <t:{end_timestamp}:R>",
+        color=discord.Color.purple()
+    )
+    embed.set_footer(text="تفاعل بالريأكشن 🎉 للدخول في السحب!")
+
+    msg = await ctx.send(embed=embed)
+    await msg.add_reaction("🎉")
+
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute(
+        "INSERT INTO active_giveaways (message_id, channel_id, amount, end_timestamp, winners_count, condition, participants_json, is_finished) VALUES (?, ?, ?, ?, ?, ?, '[]', 0)",
+        (msg.id, ctx.channel.id, parsed_amount, end_timestamp, winners_count, condition)
+    )
+    g_conn.commit()
+    g_conn.close()
+
+    asyncio.create_task(monitor_giveaway(ctx.guild.id, ctx.channel.id, msg.id, parsed_amount, duration_seconds, winners_count, condition))
+
+# ----------------- نظام البوكسات (Box) -----------------
+
+class BoxClaimView(discord.ui.View):
+    def __init__(self, amount: int, condition: str = None):
+        super().__init__(timeout=None)
+        self.amount = amount
+        self.condition = condition
+        self.claimed = False
+
+    @discord.ui.button(label="فتح البوكس 🎁", style=discord.ButtonStyle.success)
+    async def open_box(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.claimed:
+            return await interaction.response.send_message("❌ تم فتح هذا البوكس بالفعل من قبل شخص آخر!", ephemeral=True)
+        
+        if is_blacklisted(interaction.user):
+            return await interaction.response.send_message("⛔ لا يمكنك فتح البوكس؛ أنت مدرج في البلاك ليست.", ephemeral=True)
+
+        self.claimed = True
+        button.disabled = True
+        button.label = "تم فتح البوكس"
+        button.style = discord.ButtonStyle.secondary
+        await interaction.message.edit(view=self)
+
+        winner = interaction.user
+
+        if not self.condition:
+            update_balance(winner.id, self.amount)
+            await interaction.response.send_message(f"🎉 مبروك {winner.mention}! كنت الأسرع وقمت بفتح البوكس وربحت `{self.amount:,}` Cosmo وتم تسليمها إلى حسابك تلقائياً.")
+            try:
+                await winner.send(f"🎁 مبروك! حصلت على `{self.amount:,}` Cosmo من فتح البوكس السريع.")
+            except:
+                pass
+        else:
+            await interaction.response.send_message(f"🎉 {winner.mention} كان الأسرع في الضغط على البوكس!\n⚠️ **الشرط المطلوب:** `{self.condition}`\nفي انتظار مراجعة الإدارة للتسليم.")
+            claim_view = ClaimVerificationView(winner, self.amount, "جائزة البوكس")
+            await interaction.channel.send(f"مراجعة شرط البوكس لـ {winner.mention}:", view=claim_view)
+
+@bot.hybrid_command(name="box", aliases=["بوكس"], description="إنشاء بوكس سريع لأول شخص يضغط على الزر")
+async def box(ctx: commands.Context, amount: str, *, condition: str = None):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+
+    try:
+        parsed_amount = parse_amount(amount)
+    except:
+        return await ctx.send("❌ صيغة المبلغ غير صحيحة.")
+
+    if parsed_amount <= 0:
+        return await ctx.send("❌ المبلغ يجب أن يكون أكبر من 0.")
+
+    allowed, pool_msg = deduct_server_spending(ctx.guild.id, parsed_amount)
+    if not allowed:
+        return await ctx.send(pool_msg)
+
+    embed = discord.Embed(
+        title="🎁 بوكس Cosmo السريع! 🎁",
+        description=f"**الجائزة:** `{parsed_amount:,}` Cosmo\n"
+                    f"**الشرط:** {condition if condition else 'لا يوجد شرط (تسليم فوري)'}\n"
+                    f"**القاعدة:** أول من يضغط على الزر يفوز بالجائزة فوراً!",
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text="كن الأسرع واضغط على الزر أدناه!")
+    
+    view = BoxClaimView(parsed_amount, condition)
+    await ctx.send(embed=embed, view=view)
+
+# ----------------- لعبة الروليت المطورة بالعجلة الرسومية -----------------
+
+class RouletteSession:
+    def __init__(self, guild_id: int):
+        self.guild_id = guild_id
+        self.is_stopped = False
+        self.current_view = None
+
+    def stop(self):
+        self.is_stopped = True
+        if self.current_view:
+            self.current_view.stop()
+
+class RouletteLobbyView(discord.ui.View):
+    def __init__(self, amount: int, condition: str):
+        super().__init__(timeout=None)
+        self.amount = amount
+        self.condition = condition
+        self.participants = set()
+
+    def make_embed(self, guild: discord.Guild):
+        members_text = ""
+        if self.participants:
+            members_list = [guild.get_member(uid) for uid in self.participants if guild.get_member(uid)]
+            members_text = "\n".join([f"• {m.mention}" for m in members_list])
+        else:
+            members_text = "لا يوجد مشاركون حتى الآن."
+
+        embed = discord.Embed(
+            title="🎯 لعبة الروليت | Roulette 🎯",
+            description=f"**الجائزة للفائز الأخير:** `{self.amount:,}` Cosmo\n"
+                        f"**الشرط:** {self.condition if self.condition else 'لا يوجد شرط'}\n"
+                        f"**الحد الأدنى للبدء:** 4 لاعبين\n"
+                        f"⏳ **وقت التسجيل:** 30 ثانية!\n\n"
+                        f"👥 **المشاركون ({len(self.participants)}):**\n{members_text}",
+            color=discord.Color.red()
+        )
+        return embed
+
+    @discord.ui.button(label="دخول / خروج الروليت 🎯", style=discord.ButtonStyle.danger)
+    async def join_roulette(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if is_blacklisted(interaction.user):
+            return await interaction.response.send_message("⛔ لا يمكنك المشاركة؛ أنت في قائمة البلاك ليست.", ephemeral=True)
+            
+        if interaction.user.id in self.participants:
+            self.participants.remove(interaction.user.id)
+            await interaction.response.send_message("❌ تم خروجك من الروليت.", ephemeral=True)
+        else:
+            self.participants.add(interaction.user.id)
+            await interaction.response.send_message("✅ تم تسجيل دخولك في الروليت!", ephemeral=True)
+        try:
+            await interaction.message.edit(embed=self.make_embed(interaction.guild), view=self)
+        except:
+            pass
+
+class RouletteTargetSelect(discord.ui.Select):
+    def __init__(self, active_members, current_turn_member):
+        options = [
+            discord.SelectOption(label=clean_display_name(m.display_name)[:25], value=str(m.id))
+            for m in active_members if m.id != current_turn_member.id
+        ]
+        super().__init__(placeholder="اختر لاعباً لطرده...", min_values=1, max_values=1, options=options[:25])
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.chosen_target_id = int(self.values[0])
+        self.view.action_taken = "kick_specific"
+        self.view.stop()
+        await interaction.response.defer()
+
+class RouletteTurnView(discord.ui.View):
+    def __init__(self, current_player: discord.Member, active_players: list):
+        super().__init__(timeout=25)
+        self.current_player = current_player
+        self.action_taken = None
+        self.chosen_target_id = None
+        self.add_item(RouletteTargetSelect(active_players, current_player))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.current_player.id:
+            await interaction.response.send_message("⛔ ليس دورك الآن!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="طرد عشوائي 🎲", style=discord.ButtonStyle.danger, row=1)
+    async def kick_random(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.action_taken = "kick_random"
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="انسحاب 🏳️", style=discord.ButtonStyle.secondary, row=1)
+    async def surrender(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.action_taken = "surrender"
+        self.stop()
+        await interaction.response.defer()
+
+@bot.hybrid_command(name="roulette", aliases=["روليت"], description="بدء لعبة الروليت التنافسية مع العجلة الرسومية (يخصم من ميزانية السيرفر)")
+async def roulette(ctx: commands.Context, amount: str, *, condition: str = None):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    if ctx.guild.id in active_roulettes:
+        return await ctx.send("⚠️ هناك لعبة روليت جارية بالفعل!")
+
+    try:
+        parsed_amount = parse_amount(amount)
+    except:
+        return await ctx.send("❌ صيغة المبلغ غير صحيحة.")
+
+    if parsed_amount <= 0:
+        return await ctx.send("❌ المبلغ يجب أن يكون أكبر من 0.")
+
+    allowed, pool_msg = deduct_server_spending(ctx.guild.id, parsed_amount)
+    if not allowed:
+        return await ctx.send(pool_msg)
+
+    session = RouletteSession(ctx.guild.id)
+    active_roulettes[ctx.guild.id] = session
+
+    lobby_view = RouletteLobbyView(parsed_amount, condition)
+    session.current_view = lobby_view
+    await ctx.send(embed=lobby_view.make_embed(ctx.guild), view=lobby_view)
+
+    for _ in range(30):
+        if session.is_stopped:
+            active_roulettes.pop(ctx.guild.id, None)
+            refund_server_spending(ctx.guild.id, parsed_amount)
+            return
+        await asyncio.sleep(1)
+
+    participants = [ctx.guild.get_member(uid) for uid in lobby_view.participants if ctx.guild.get_member(uid) and not is_blacklisted(ctx.guild.get_member(uid))]
+    if len(participants) < 4:
+        active_roulettes.pop(ctx.guild.id, None)
+        refund_server_spending(ctx.guild.id, parsed_amount)
+        return await ctx.channel.send("⚠️ تم إلغاء الروليت لعدم اكتمال 4 لاعبين على الأقل (أُعيدت الجائزة لميزانية السيرفر).")
+
+    round_num = 1
+    while len(participants) > 2:
+        if session.is_stopped:
+            active_roulettes.pop(ctx.guild.id, None)
+            refund_server_spending(ctx.guild.id, parsed_amount)
+            return
+
+        chosen_index = random.randint(0, len(participants) - 1)
+        turn_player = participants[chosen_index]
+
+        wheel_buf = await generate_roulette_wheel_image(ctx.guild, participants, chosen_index)
+        wheel_file = discord.File(wheel_buf, filename="wheel.png")
+        
+        await ctx.channel.send(f"🎡 **الجولة {round_num}: تم تدوير العجلة ووقفت على {turn_player.mention}!**", file=wheel_file)
+
+        turn_view = RouletteTurnView(turn_player, participants)
+        session.current_view = turn_view
+        await ctx.channel.send(f"🎲 {turn_player.mention} معك **25 ثانية** لاختيار قرارك:", view=turn_view)
+        await turn_view.wait()
+
+        if session.is_stopped:
+            active_roulettes.pop(ctx.guild.id, None)
+            refund_server_spending(ctx.guild.id, parsed_amount)
+            return
+
+        eliminated = None
+        if turn_view.action_taken == "kick_random":
+            others = [p for p in participants if p.id != turn_player.id]
+            eliminated = random.choice(others)
+            await ctx.channel.send(f"🎲 طرد عشوائي: تم طرد {eliminated.mention}!")
+        elif turn_view.action_taken == "kick_specific" and turn_view.chosen_target_id:
+            eliminated = ctx.guild.get_member(turn_view.chosen_target_id)
+            await ctx.channel.send(f"🎯 طرد محدد: قرر {turn_player.mention} طرد {eliminated.mention}!")
+        else:
+            eliminated = turn_player
+            await ctx.channel.send(f"⏱️ تم استبعاد {turn_player.mention} لانتهاء الوقت أو الانسحاب.")
+
+        if eliminated and eliminated in participants:
+            participants.remove(eliminated)
+
+        round_num += 1
+        await asyncio.sleep(2)
+
+    if session.is_stopped:
+        active_roulettes.pop(ctx.guild.id, None)
+        refund_server_spending(ctx.guild.id, parsed_amount)
+        return
+
+    await ctx.channel.send(f"🚨 **المواجهة النهائية الحاسمة بين:** {participants[0].mention} و {participants[1].mention}!\nالعجلة تدور الآن لتحديد الفائز...")
+    await asyncio.sleep(2)
+
+    winner_index = random.randint(0, 1)
+    final_winner = participants[winner_index]
+
+    final_wheel_buf = await generate_roulette_wheel_image(ctx.guild, participants, winner_index)
+    final_wheel_file = discord.File(final_wheel_buf, filename="final_wheel.png")
+
+    await ctx.channel.send(f"🎡 **العجلة وقفت على الفائز النهائي:** {final_winner.mention}!", file=final_wheel_file)
+
+    active_roulettes.pop(ctx.guild.id, None)
+
+    if not condition:
+        update_balance(final_winner.id, parsed_amount)
+        await ctx.channel.send(f"👑 **مبروك للفائز بالروليت:** {final_winner.mention}!\nتم تسليم `{parsed_amount:,}` Cosmo إلى رصيدك تلقائياً.")
+        try:
+            await final_winner.send(f"🎉 مبروك! فزت في لعبة الروليت وحصلت على `{parsed_amount:,}` Cosmo.")
+        except:
+            pass
+    else:
+        await ctx.channel.send(
+            f"👑 **الفائز النهائي:** {final_winner.mention}!\n"
+            f"⚠️ **الشرط المطلوب:** `{condition}`\nفي انتظار مراجعة الإدارة للتسليم."
+        )
+        claim_view = ClaimVerificationView(final_winner, parsed_amount, "جائزة الروليت")
+        await ctx.channel.send(f"تحقق من شرط فائز الروليت {final_winner.mention}:", view=claim_view)
+
+@bot.hybrid_command(name="stop_roulette", aliases=["ايقاف_الروليت"], description="إيقاف لعبة الروليت الجارية فوراً")
+async def stop_roulette(ctx: commands.Context):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    if ctx.guild.id not in active_roulettes:
+        return await ctx.send("❌ لا توجد لعبة نشطة.")
+    session = active_roulettes.pop(ctx.guild.id)
+    session.stop()
+    await ctx.send("🛑 تم إيقاف لعبة الروليت بدون فائز (أُعيدت الميزانية للسيرفر).")
+
+# ----------------- أوامر التبديل المحدثة المركزية والمحلية -----------------
+
+@bot.hybrid_command(name="set_global_request_log", aliases=["لوج_الطلبات_العام"], description="تحديد الروم الموحد لاستقبال جميع طلبات التبديل من كل السيرفرات (مالك البوت فقط)")
+async def set_global_request_log(ctx: commands.Context, channel: discord.TextChannel):
+    if not await check_is_owner(ctx):
+        return await ctx.send("⛔ هذا الأمر متاح فقط لمالك ومطور البوت الأساسي.")
+
+    global_cursor.execute("INSERT OR REPLACE INTO global_settings (key, value) VALUES ('global_request_log', ?)", (channel.id,))
+    global_conn.commit()
+    await ctx.send(f"✅ تم ضبط روم استقبال طلبات التبديل العام والموحد لجميع السيرفرات على: {channel.mention}")
+
+@bot.hybrid_command(name="set_delivery_log", aliases=["لوج_التسليمات"], description="تحديد روم تسليمات وإثباتات التبديل لهذا السيرفر")
+async def set_delivery_log(ctx: commands.Context, channel: discord.TextChannel):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute(
+        "INSERT INTO settings (guild_id, delivery_log) VALUES (?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET delivery_log = excluded.delivery_log",
+        (ctx.guild.id, channel.id)
+    )
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"✅ تم ضبط روم تسليمات التبديل لهذا السيرفر على: {channel.mention} (`ID: {channel.id}`).")
+
+@bot.hybrid_command(name="toggle_exchange_system", aliases=["قفل_التبديل_العام"], description="قفل أو فتح نظام التبديل كاملاً في هذا السيرفر")
+async def toggle_exchange_system(ctx: commands.Context, status: bool):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    val = 1 if status else 0
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("UPDATE settings SET exchange_enabled = ? WHERE guild_id = ?", (val, ctx.guild.id))
+    g_conn.commit()
+    g_conn.close()
+    msg = "مفتوحاً للجميع ✅" if status else "مقفلاً حالياً ⛔"
+    await ctx.send(f"⚙️ تم ضبط نظام التبديل لهذا السيرفر ليكون: **{msg}**.")
+
+@bot.hybrid_command(name="toggle_currency_status", aliases=["قفل_عملة"], description="قفل أو فتح تبديل عملة معينة في السيرفر")
+async def toggle_currency_status(ctx: commands.Context, currency_name: str, status: bool):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    val = 1 if status else 0
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("UPDATE exchange_currencies SET is_active = ? WHERE LOWER(currency_name) = LOWER(?)", (val, currency_name.strip()))
+    g_conn.commit()
+    g_conn.close()
+    msg = "متاحة للتبديل ✅" if status else "معطلة ومقفلة ⛔"
+    await ctx.send(f"⚙️ عملة **{currency_name}** في هذا السيرفر أصبحت الآن: **{msg}**.")
+
+@bot.hybrid_command(name="add_exchange_currency", aliases=["اضافة_عملة_تبديل"], description="إضافة/تعديل عملة تبديل بالسيرفر مع سعر الصرف والحد الأدنى المستلم")
+async def add_exchange_currency(ctx: commands.Context, currency_name: str, rate: float, min_received: float = 0.0):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute(
+        "INSERT OR REPLACE INTO exchange_currencies (currency_name, exchange_rate, is_active, min_received) VALUES (?, ?, 1, ?)",
+        (currency_name.strip(), rate, min_received)
+    )
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"✅ تم ضبط عملة **{currency_name}** في هذا السيرفر:\n• السعر: `1 Cosmo = {rate} {currency_name}`\n• الحد الأدنى للاستلام: `{min_received} {currency_name}`.")
+
+@bot.hybrid_command(name="delete_exchange_currency", aliases=["حذف_عملة_تبديل"], description="حذف عملة من قائمة التبديل في هذا السيرفر")
+async def delete_exchange_currency(ctx: commands.Context, currency_name: str):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("DELETE FROM exchange_currencies WHERE LOWER(currency_name) = LOWER(?)", (currency_name.strip(),))
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"🗑️ تم حذف العملة **{currency_name}** من قائمة التبديل بهذا السيرفر.")
+
+@bot.hybrid_command(name="exchange_list", aliases=["قائمة_العملات"], description="عرض جميع العملات المتاحة للتبديل في هذا السيرفر")
+async def exchange_list(ctx: commands.Context):
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("SELECT currency_name, exchange_rate, is_active, min_received FROM exchange_currencies")
+    rows = g_cur.fetchall()
+    g_conn.close()
+    if not rows:
+        return await ctx.send("⚠️ لا توجد أي عملات مضافة للتبديل حالياً في هذا السيرفر.")
+    
+    msg = "💱 **العملات المتاحة للتبديل في هذا السيرفر:**\n"
+    for r in rows:
+        status_txt = "متاحة ✅" if r[2] == 1 else "مقفلة ⛔"
+        msg += f"• **{r[0]}**: `1 Cosmo = {r[1]} {r[0]}` | الحد الأدنى: `{r[3]} {r[0]}` | الحالة: **{status_txt}**\n"
+    await ctx.send(msg)
+
+@bot.hybrid_command(name="exchange_stats", aliases=["احصائيات_التبديل"], description="عرض إحصائيات عمليات التبديل الناجحة في هذا السيرفر")
+async def exchange_stats(ctx: commands.Context):
+    global_cursor.execute("SELECT COUNT(*), SUM(cosmo_amount) FROM exchange_logs WHERE guild_id = ? AND status = 'تم القبول'", (ctx.guild.id,))
+    row = global_cursor.fetchone()
+    total_count = row[0] if row and row[0] else 0
+    total_cosmo = row[1] if row and row[1] else 0
+
+    embed = discord.Embed(title=f"📊 إحصائيات التبديل | {ctx.guild.name}", color=discord.Color.green())
+    embed.add_field(name="إجمالي الطلبات المقبولة", value=f"`{total_count:,}` عملية", inline=False)
+    embed.add_field(name="إجمالي كوزمو المستبدلة", value=f"`{total_cosmo:,}` Cosmo", inline=False)
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="exchange", aliases=["تبديل"], description="طلب تبديل عملات Cosmo إلى عملة أخرى")
+async def exchange(ctx: commands.Context, currency_name: str, amount: str, *, note: str = "لا يوجد"):
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("SELECT exchange_enabled, delivery_log FROM settings WHERE guild_id = ?", (ctx.guild.id,))
+    s_row = g_cur.fetchone()
+
+    if s_row and s_row[0] == 0:
+        g_conn.close()
+        return await ctx.send("⛔ نظام التبديل مقفل حالياً في هذا السيرفر من قبل الإدارة.")
+
+    try:
+        parsed_amount = parse_amount(amount)
+    except:
+        g_conn.close()
+        return await ctx.send("❌ صيغة المبلغ غير صحيحة.")
+
+    if parsed_amount <= 0:
+        g_conn.close()
+        return await ctx.send("❌ المبلغ يجب أن يكون أكبر من 0.")
+    if get_balance(ctx.author.id) < parsed_amount:
+        g_conn.close()
+        return await ctx.send("❌ رصيدك من Cosmo لا يكفي.")
+
+    g_cur.execute(
+        "SELECT exchange_rate, is_active, min_received FROM exchange_currencies WHERE LOWER(currency_name) = LOWER(?)",
+        (currency_name.strip(),)
+    )
+    curr_row = g_cur.fetchone()
+    if not curr_row:
+        g_conn.close()
+        return await ctx.send(f"❌ العملة `{currency_name}` غير متوفرة في هذا السيرفر.")
+
+    rate, is_active, min_recv = curr_row
+    if is_active == 0:
+        g_conn.close()
+        return await ctx.send(f"⛔ تبديل عملة **{currency_name}** متوقف ومقفل حالياً.")
+
+    total_received = round(parsed_amount * rate, 4)
+
+    if total_received < min_recv:
+        g_conn.close()
+        return await ctx.send(
+            f"❌ تم رفض طلبك تلقائياً: المبلغ المستحق (`{total_received} {currency_name}`) أقل من الحد الأدنى المسموح به وهو `{min_recv} {currency_name}`."
+        )
+
+    delivery_log_id = s_row[1] if s_row and len(s_row) > 1 and s_row[1] else None
+    g_conn.close()
+
+    global_cursor.execute("SELECT value FROM global_settings WHERE key = 'global_request_log'")
+    global_req_row = global_cursor.fetchone()
+
+    if not global_req_row or not global_req_row[0]:
+        return await ctx.send("⚠️ لم يقم مالك البوت بتعيين الروم العام لاستقبال الطلبات بعد (`/set_global_request_log`).")
+
+    req_channel = bot.get_channel(global_req_row[0])
+    if not req_channel:
+        return await ctx.send("❌ روم استقبال طلبات التبديل العام غير متاح حالياً.")
+
+    update_balance(ctx.author.id, -parsed_amount)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    global_cursor.execute(
+        "INSERT INTO exchange_logs (guild_id, user_id, cosmo_amount, target_currency, received_amount, note, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, 'قيد الانتظار', ?)",
+        (ctx.guild.id, ctx.author.id, parsed_amount, currency_name, total_received, note, now)
+    )
+    req_id = global_cursor.lastrowid
+    global_conn.commit()
+
+    invite_link = None
+    try:
+        invites = await ctx.guild.invites()
+        if invites:
+            invite_link = invites[0].url
+        else:
+            new_invite = await ctx.channel.create_invite(max_age=0, max_uses=0)
+            invite_link = new_invite.url
+    except:
+        invite_link = None
+
+    server_display = f"[{ctx.guild.name}]({invite_link})" if invite_link else f"**{ctx.guild.name}**"
+
+    if delivery_log_id:
+        delivery_channel = ctx.guild.get_channel(delivery_log_id)
+        if delivery_channel:
+            channel_link = f"https://discord.com/channels/{ctx.guild.id}/{delivery_log_id}"
+            delivery_display = f"[#{delivery_channel.name}]({channel_link}) (<#{delivery_log_id}>)"
+        else:
+            delivery_display = f"<#{delivery_log_id}>"
+    else:
+        delivery_display = "`لم يتم التحديد بعد`"
+
+    embed = discord.Embed(title=f"📥 طلب تبديل جديد #{req_id}", color=discord.Color.gold())
+    embed.add_field(name="🏛️ السيرفر", value=server_display, inline=True)
+    embed.add_field(name="📦 روم التسليمات", value=delivery_display, inline=True)
+    embed.add_field(name="👤 العضو", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=False)
+    embed.add_field(name="🪙 مبلغ Cosmo", value=f"`{parsed_amount:,}`", inline=True)
+    embed.add_field(name=f"💵 المستحق من ({currency_name})", value=f"`{total_received}`", inline=True)
+    embed.add_field(name="📝 الوصف والملاحظات", value=f"```{note}```", inline=False)
+    embed.set_footer(text=f"للقبول: /accept_exchange {req_id} | للرفض: /deny_exchange {req_id}")
+
+    await req_channel.send(embed=embed)
+    await ctx.send(f"✅ تم إرسال طلب التبديل برقم `{req_id}` إلى الإدارة بنجاح.")
+
+# ----------------- باقي اللوجات والسجلات -----------------
+
+@bot.hybrid_command(name="set_transfer_log", aliases=["لوج_التحويل"], description="تحديد روم إشعارات التحويل")
+async def set_transfer_log(ctx: commands.Context, channel: discord.TextChannel):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("UPDATE settings SET transfer_log = ? WHERE guild_id = ?", (channel.id, ctx.guild.id))
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"✅ تم ضبط روم لوج التحويلات على: {channel.mention}")
+
+@bot.hybrid_command(name="set_success_log", aliases=["لوج_نجاح_التبديل"], description="تحديد روم إعلانات التبديل الناجحة الخاص بهذا السيرفر")
+async def set_success_log(ctx: commands.Context, channel: discord.TextChannel):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("UPDATE settings SET exchange_success_log = ? WHERE guild_id = ?", (channel.id, ctx.guild.id))
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"✅ تم ضبط روم نجاح التبديل على: {channel.mention}")
+
+@bot.hybrid_command(name="accept_exchange", aliases=["قبول_التبديل"], description="قبول طلب التبديل")
+async def accept_exchange(ctx: commands.Context, req_id: int):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+    global_cursor.execute("SELECT user_id, cosmo_amount, target_currency, received_amount, status, guild_id FROM exchange_logs WHERE id = ?", (req_id,))
+    row = global_cursor.fetchone()
+    if not row or row[4] != "قيد الانتظار":
+        return await ctx.send("❌ الطلب غير موجود أو تمت معالجته مسبقاً.")
+
+    global_cursor.execute("UPDATE exchange_logs SET status = 'تم القبول' WHERE id = ?", (req_id,))
+    global_conn.commit()
+
+    await ctx.send(f"✅ تم قبول طلب التبديل #{req_id}.")
+
+    origin_guild_id = row[5]
+    origin_guild = bot.get_guild(origin_guild_id)
+    if origin_guild:
+        g_conn, g_cur = get_guild_db(origin_guild_id)
+        g_cur.execute("SELECT exchange_success_log FROM settings WHERE guild_id = ?", (origin_guild_id,))
+        s_log = g_cur.fetchone()
+        g_conn.close()
+        if s_log and s_log[0]:
+            succ_chan = origin_guild.get_channel(s_log[0])
+            if succ_chan:
+                await succ_chan.send(f"🎉 تم بنجاح تبديل `{row[1]:,}` Cosmo للعضو <@{row[0]}> مقابل `{row[3]}` {row[2]}.")
+
+@bot.hybrid_command(name="deny_exchange", aliases=["رفض_التبديل"], description="رفض طلب التبديل مع ذكر السبب")
+async def deny_exchange(ctx: commands.Context, req_id: int, *, reason: str = "غير محدد"):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية.")
+    global_cursor.execute("SELECT user_id, cosmo_amount, target_currency, status FROM exchange_logs WHERE id = ?", (req_id,))
+    row = global_cursor.fetchone()
+    if not row or row[3] != "قيد الانتظار":
+        return await ctx.send("❌ الطلب غير صالح أو تمت معالجته.")
+
+    update_balance(row[0], row[1])
+    global_cursor.execute("UPDATE exchange_logs SET status = 'مرفوض' WHERE id = ?", (req_id,))
+    global_conn.commit()
+
+    await ctx.send(f"🛑 تم رفض الطلب #{req_id} وإعادة الرصيد.")
+    try:
+        user = await bot.fetch_user(row[0])
+        if user:
+            await user.send(f"❌ تم رفض طلب التبديل #{req_id} وإعادة `{row[1]:,}` Cosmo لحسابك.\n**السبب:** `{reason}`")
+    except:
+        pass
+
+@bot.hybrid_command(name="transfer_history", aliases=["سجل_التحويل"], description="عرض آخر عمليات التحويل العامة")
+async def transfer_history(ctx: commands.Context, member: discord.Member = None):
+    target = member or ctx.author
+    global_cursor.execute("SELECT sender_id, receiver_id, amount, timestamp FROM transfer_logs WHERE sender_id = ? OR receiver_id = ? ORDER BY id DESC LIMIT 5", (target.id, target.id))
+    rows = global_cursor.fetchall()
+    if not rows:
+        return await ctx.send("لا توجد تحويلات سابقة مسجلة.")
+    
+    msg = f"📋 **آخر تحويلات {target.display_name}:**\n"
+    for r in rows:
+        action = "إرسال إلى" if r[0] == target.id else "استلام من"
+        other_id = r[1] if r[0] == target.id else r[0]
+        msg += f"• {action} <@{other_id}> بمبلغ `{r[2]:,}` Cosmo بتاريخ `{r[3]}`\n"
+    await ctx.send(msg)
+
+@bot.hybrid_command(name="exchange_history", aliases=["سجل_التبديل"], description="عرض سجل عمليات التبديل")
+async def exchange_history(ctx: commands.Context, member: discord.Member = None):
+    target = member or ctx.author
+    global_cursor.execute("SELECT cosmo_amount, target_currency, received_amount, status, timestamp, note FROM exchange_logs WHERE user_id = ? ORDER BY id DESC LIMIT 5", (target.id,))
+    rows = global_cursor.fetchall()
+    if not rows:
+        return await ctx.send("لا توجد عمليات تبديل سابقة مسجلة.")
+    
+    msg = f"📋 **آخر عمليات تبديل لـ {target.display_name}:**\n"
+    for r in rows:
+        msg += f"• `{r[0]:,}` Cosmo إلى `{r[2]}` {r[1]} - الحالة: **{r[3]}** (الوصف: {r[5]}) (`{r[4]}`)\n"
+    await ctx.send(msg)
+
+@bot.hybrid_command(name="set_admin_role", aliases=["رتبة_المسؤول"], description="تعيين رتبة مسؤولي البوت")
+async def set_admin_role(ctx: commands.Context, role: discord.Role):
+    if ctx.author.id != ctx.guild.owner_id and ctx.author.id != PRIMARY_OWNER_ID:
+        return await ctx.send("⛔ مالك السيرفر فقط يمكنه تعيين الرتبة.")
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("UPDATE settings SET admin_role_id = ? WHERE guild_id = ?", (role.id, ctx.guild.id))
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"✅ تم اعتماد رتبة {role.mention} كمسؤول للبوت.")
+
+@bot.hybrid_command(name="set_blacklist_role", aliases=["رتبة_البلاك_ليست"], description="تحديد رتبة البلاك ليست")
+async def set_blacklist_role(ctx: commands.Context, role: discord.Role):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("UPDATE settings SET blacklist_role_id = ? WHERE guild_id = ?", (role.id, ctx.guild.id))
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"✅ تم اعتماد رتبة البلاك ليست: {role.mention}.")
+
+@bot.hybrid_command(name="add_alias", aliases=["اضافة_اختصار"], description="إضافة اختصار جديد لأي أمر خاص بهذا السيرفر")
+async def add_alias(ctx: commands.Context, original_command: str, new_alias: str):
+    if not is_bot_admin(ctx):
+        return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+    cmd = bot.get_command(original_command)
+    if not cmd:
+        return await ctx.send("❌ الأمر الأساسي غير موجود.")
+    
+    g_conn, g_cur = get_guild_db(ctx.guild.id)
+    g_cur.execute("INSERT OR REPLACE INTO command_aliases (original_command, alias) VALUES (?, ?)", (original_command, new_alias.strip()))
+    g_conn.commit()
+    g_conn.close()
+    await ctx.send(f"✅ تم تعيين الاختصار `{new_alias}` للأمر `{original_command}` في هذا السيرفر بنجاح.")
+
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+
+if not TOKEN:
+    raise ValueError("❌ لم يتم العثور على التوكن في ملف .env!")
+
+bot.run(TOKEN)
+
