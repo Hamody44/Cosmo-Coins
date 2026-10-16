@@ -9,6 +9,7 @@ global_cosmo.db
 global_cosmo_backup.db
 guilds_data/
 *.db
+*.log
 *.db-journal
 *.db-wal
 *.db-shm
