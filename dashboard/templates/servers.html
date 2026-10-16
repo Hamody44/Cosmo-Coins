@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <h3 class="fw-bold text-white mb-1">السيرفرات المتاحة للإدارة</h3>
+        <p class="text-muted-custom mb-0">يتم إظهار السيرفرات التي تملك فيها صلاحية إدارة السيرفر أو إضافة البوت فقط.</p>
+    </div>
+</div>
+
+<div class="row g-4">
+    {% for g in guilds %}
+    <div class="col-md-4 col-sm-6">
+        <div class="card p-3 text-center h-100 shadow-sm">
+            {% if g.icon %}
+                <img src="https://cdn.discordapp.com/icons/{{ g.id }}/{{ g.icon }}.png" class="rounded-circle mx-auto mb-3 border border-secondary" width="80" height="80">
+            {% else %}
+                <div class="rounded-circle bg-secondary mx-auto mb-3 d-flex align-items-center justify-content-center text-white fw-bold fs-4" style="width:80px;height:80px;">{{ g.name[:2] }}</div>
+            {% endif %}
+            <h5 class="fw-bold text-white mb-3 text-truncate">{{ g.name }}</h5>
+            <div class="mt-auto">
+                {% if g.bot_joined %}
+                    <a href="/manage/{{ g.id }}" class="btn btn-primary w-100 fw-bold">⚙️ لوحة التحكم</a>
+                {% else %}
+                    <a href="https://discord.com/oauth2/authorize?client_id={{ g.id }}&scope=bot&permissions=8" target="_blank" class="btn btn-outline-warning w-100 fw-bold">➕ إضافة البوت</a>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="col-12 text-center py-5">
+        <p class="fs-5 text-muted-custom">لا توجد سيرفرات تملك فيها صلاحية إدارة السيرفر حالياً.</p>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}
