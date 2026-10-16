@@ -1,0 +1,11 @@
+discord.py
+pillow
+python-dotenv
+google-genai
+Flask
+requests
+pyngrok
+pycloudflared
+openai
+requests
+python-dotenv
