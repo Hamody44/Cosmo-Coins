@@ -43,7 +43,8 @@ app.config.update(
     SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "true").lower() == "true",
 )
 
-CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
+# معرّف تطبيق/بوت Cosmo Coins (معرّف عام)؛ هذا هو مصدر الحقيقة لرابط OAuth والدعوة.
+CLIENT_ID = "1550533434362044607"
 CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
 BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_API_BASE = "https://discord.com/api/v10"
@@ -134,6 +135,14 @@ def get_bot_guild_ids():
     except Exception as e:
         print(f"Error fetching bot guilds: {e}")
     return set()
+
+def build_bot_invite_url():
+    """رابط إضافة تطبيق Cosmo Coins؛ client_id هو معرّف التطبيق وليس معرّف السيرفر."""
+    return "https://discord.com/oauth2/authorize?" + urlencode({
+        "client_id": CLIENT_ID,
+        "scope": "bot applications.commands",
+        "permissions": "8",
+    })
 
 def csrf_token():
     token = session.get("csrf_token")
@@ -302,7 +311,12 @@ def servers():
                 g["bot_joined"] = int(g["id"]) in bot_guild_ids
                 manageable_guilds.append(g)
 
-    return render_template("servers.html", user=user, guilds=manageable_guilds)
+    return render_template(
+        "servers.html",
+        user=user,
+        guilds=manageable_guilds,
+        bot_invite_url=build_bot_invite_url(),
+    )
 
 @app.route("/manage/<int:guild_id>", methods=["GET", "POST"])
 def manage(guild_id):

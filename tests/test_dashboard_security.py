@@ -67,6 +67,13 @@ class DashboardSecurityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 dashboard.get_redirect_uri()
 
+    def test_bot_invite_uses_application_id_not_server_id(self):
+        with patch.object(dashboard, "CLIENT_ID", "1550533434362044607"):
+            query = parse_qs(urlparse(dashboard.build_bot_invite_url()).query)
+        self.assertEqual(query["client_id"], ["1550533434362044607"])
+        self.assertEqual(query["scope"], ["bot applications.commands"])
+        self.assertNotIn("guild_id", query)
+
 
 if __name__ == "__main__":
     unittest.main()
