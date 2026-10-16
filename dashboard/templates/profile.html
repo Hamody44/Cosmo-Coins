@@ -1,0 +1,308 @@
+{% extends "base.html" %}
+{% block content %}
+
+<!-- تنبيهات العمليات -->
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for category, msg in messages %}
+      <div class="alert alert-{{ category }} alert-dismissible fade show mb-4" role="alert">
+        {{ msg }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+      </div>
+    {% endfor %}
+  {% endif %}
+{% endwith %}
+
+<!-- الجزء العلوي: بطاقة المستخدم + نموذج التبديل -->
+<div class="row g-4 mb-4">
+    <!-- بطاقة الحساب والرصيد -->
+    <div class="col-lg-4">
+        <div class="card p-4 text-center h-100 d-flex flex-column justify-content-between">
+            <div>
+                <div class="position-relative d-inline-block mx-auto mb-3">
+                    {% if user.avatar %}
+                        <img src="https://cdn.discordapp.com/avatars/{{ user.id }}/{{ user.avatar }}.png?size=128" class="rounded-circle border border-primary p-1 shadow" width="105" height="105" alt="Avatar">
+                    {% else %}
+                        <div class="rounded-circle bg-secondary d-flex align-items-center justify-content-center mx-auto text-white fs-1 shadow" style="width: 105px; height: 105px;">
+                            {{ user.username[0]|upper }}
+                        </div>
+                    {% endif %}
+                </div>
+                <h4 class="text-white fw-bold mb-1">{{ user.global_name or user.username }}</h4>
+                <p class="text-muted-custom small mb-0">ID: <code>{{ user.id }}</code></p>
+            </div>
+
+            <div class="p-3 bg-dark rounded border border-warning my-3 text-center shadow-sm">
+                <span class="text-muted-custom d-block small mb-1 fw-semibold">رصيد Cosmo المتاح</span>
+                <span class="fs-2 text-warning fw-bold">{{ "{:,}".format(balance) }}</span>
+                <span class="text-white fw-bold ms-1">Cosmo</span>
+            </div>
+
+            <div class="text-muted-custom small text-center">
+                <span>🟢 حساب نشط ومتصل بنظام Cosmo</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- نموذج تبديل الكوزمو (/exchange) -->
+    <div class="col-lg-8">
+        <div class="card p-4 h-100">
+            <div class="d-flex align-items-center gap-2 mb-3">
+                <span class="fs-3">💱</span>
+                <div>
+                    <h4 class="text-white fw-bold mb-0">طلب تبديل Cosmo (/exchange)</h4>
+                    <p class="text-muted-custom small mb-0">استبدل عملات Cosmo بعملات السيرفرات البريميوم المتاحة مباشرة</p>
+                </div>
+            </div>
+
+            {% if guilds|length > 0 %}
+            <form method="POST" id="exchangeForm">
+                <!-- 1. اختيار السيرفر المستلم -->
+                <div class="mb-3">
+                    <label class="form-label text-white fw-semibold">1. اختر سيرفر الاستلام (السيرفرات المفعلة للبريميوم فقط)</label>
+                    <select name="guild_id" id="guildSelect" class="form-select" required>
+                        <option value="">-- اضغط لتحديد السيرفر --</option>
+                        {% for g in guilds %}
+                            <option value="{{ g.id }}">{{ g.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- 2. اختيار العملة -->
+                <div class="mb-3">
+                    <label class="form-label text-white fw-semibold">2. اختر العملة المراد استلامها</label>
+                    <select name="currency_name" id="currencySelect" class="form-select" required disabled>
+                        <option value="">-- اختر السيرفر أولاً --</option>
+                    </select>
+                    <div id="rateInfo" class="form-text text-info mt-1" style="display: none;"></div>
+                </div>
+
+                <!-- 3. كمية الكوزمو -->
+                <div class="mb-3">
+                    <label class="form-label text-white fw-semibold">3. كمية الكوزمو المراد استبدالها (Amount)</label>
+                    <input type="text" name="cosmo_amount" id="cosmoAmount" class="form-control" placeholder="أدخل المبلغ (يدعم الأرقام أو 1k, 1m...)" required disabled>
+                    <div class="d-flex justify-content-between align-items-center mt-1">
+                        <span class="text-muted-custom small">رصيدك: <b>{{ "{:,}".format(balance) }}</b> Cosmo</span>
+                        <span id="calcResult" class="text-success fw-bold small"></span>
+                    </div>
+                </div>
+
+                <!-- 4. ملاحظات إضافية -->
+                <div class="mb-4">
+                    <label class="form-label text-white fw-semibold">4. الوصف والملاحظات (اختياري)</label>
+                    <textarea name="notes" class="form-control" rows="2" placeholder="اكتب رقم حسابك في اللعبة أو أي تفاصيل يحتاجها المسؤول للتسليم..."></textarea>
+                </div>
+
+                <button type="submit" id="submitBtn" class="btn btn-warning w-100 py-2 fw-bold fs-5 text-dark" disabled>
+                    🚀 إرسال طلب التبديل إلى الإدارة
+                </button>
+            </form>
+            {% else %}
+            <div class="text-center py-5">
+                <div class="fs-1 mb-2">🔒</div>
+                <h5 class="text-white fw-bold">لا توجد سيرفرات بريميوم متاحة للاستلام</h5>
+                <p class="text-muted-custom mb-0">لإجراء التبديل، يجب أن تكون متواجداً في سيرفر يمتلك اشتراك بريميوم نشط ونظام تبديل مفتوح.</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- الجزء السفلي: سجل طلبات التبديل + سجل التحويلات -->
+<div class="row g-4">
+    <!-- 1. سجل طلبات التبديل (exchange_history) -->
+    <div class="col-lg-7">
+        <div class="card p-4 h-100">
+            <h5 class="text-white fw-bold mb-3 d-flex align-items-center justify-content-between">
+                <span>📋 سجل طلبات التبديل (Exchange History)</span>
+                <span class="badge bg-secondary fs-6">{{ exchanges|length }}</span>
+            </h5>
+            <div class="table-responsive">
+                <table class="table table-custom align-middle small mb-0">
+                    <thead>
+                        <tr>
+                            <th>الطلب</th>
+                            <th>السيرفر</th>
+                            <th>المبلغ والعملة</th>
+                            <th>الحالة</th>
+                            <th>التاريخ</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for ex in exchanges %}
+                        <tr>
+                            <td class="fw-bold">#{{ ex.id }}</td>
+                            <td>{{ ex.server_name }}</td>
+                            <td>
+                                <div><b class="text-warning">{{ "{:,}".format(ex.cosmo_amount) }}</b> Cosmo</div>
+                                <div class="text-muted-custom">➔ {{ ex.received_amount }} {{ ex.target_currency }}</div>
+                            </td>
+                            <td>
+                                {% if ex.status == 'تم القبول' %}
+                                    <span class="badge bg-success">✅ تم القبول</span>
+                                {% elif ex.status == 'قيد الانتظار' %}
+                                    <span class="badge bg-warning text-dark">⏳ قيد الانتظار</span>
+                                {% elif ex.status == 'مرفوض' %}
+                                    <span class="badge bg-danger">❌ مرفوض</span>
+                                {% else %}
+                                    <span class="badge bg-secondary">{{ ex.status }}</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-muted-custom small">{{ ex.timestamp }}</td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="5" class="text-center text-muted-custom py-4">لا توجد طلبات تبديل مسجلة حتى الآن.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. سجل التحويلات (من الأحدث للأقدم مع إظهار الاسم والآيدي سوياً) -->
+    <div class="col-lg-5">
+        <div class="card p-4 h-100">
+            <h5 class="text-white fw-bold mb-3 d-flex align-items-center justify-content-between">
+                <span>📜 سجل التحويلات (الأحدث في الأعلى)</span>
+                <span class="badge bg-secondary fs-6">{{ transfers|length }}</span>
+            </h5>
+            <div class="table-responsive">
+                <table class="table table-custom align-middle small mb-0">
+                    <thead>
+                        <tr>
+                            <th>النوع</th>
+                            <th>الطرف (الاسم والـ ID)</th>
+                            <th>المبلغ</th>
+                            <th>التاريخ</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for tr in transfers %}
+                        <tr>
+                            <td>
+                                {% if tr.is_receiver %}
+                                    <span class="badge bg-success-subtle text-success border border-success fw-bold">📥 استلام</span>
+                                {% else %}
+                                    <span class="badge bg-danger-subtle text-danger border border-danger fw-bold">📤 إرسال</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div class="fw-bold text-white">{{ tr.other_name }}</div>
+                                <code class="small text-muted-custom">{{ tr.other_id }}</code>
+                            </td>
+                            <td>
+                                {% if tr.is_receiver %}
+                                    <span class="text-success fw-bold">+{{ "{:,}".format(tr.amount) }}</span>
+                                {% else %}
+                                    <span class="text-danger fw-bold">-{{ "{:,}".format(tr.amount) }}</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-muted-custom small">{{ tr.timestamp }}</td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="4" class="text-center text-muted-custom py-4">لا توجد عمليات تحويل مسجلة.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const guildsData = {{ guilds|tojson }};
+    const guildSelect = document.getElementById('guildSelect');
+    const currencySelect = document.getElementById('currencySelect');
+    const cosmoAmount = document.getElementById('cosmoAmount');
+    const rateInfo = document.getElementById('rateInfo');
+    const calcResult = document.getElementById('calcResult');
+    const submitBtn = document.getElementById('submitBtn');
+
+    function parseAmountStr(str) {
+        if (!str) return 0;
+        str = str.toLowerCase().trim();
+        if (str.endsWith('k')) return parseFloat(str) * 1000;
+        if (str.endsWith('m')) return parseFloat(str) * 1000000;
+        if (str.endsWith('b')) return parseFloat(str) * 1000000000;
+        return parseFloat(str) || 0;
+    }
+
+    if (guildSelect) {
+        guildSelect.addEventListener('change', function() {
+            const selectedGid = this.value;
+            currencySelect.innerHTML = '<option value="">-- اختر العملة --</option>';
+            rateInfo.style.display = 'none';
+            calcResult.textContent = '';
+            cosmoAmount.value = '';
+            cosmoAmount.disabled = true;
+            submitBtn.disabled = true;
+
+            if (!selectedGid) {
+                currencySelect.disabled = true;
+                return;
+            }
+
+            const targetGuild = guildsData.find(g => String(g.id) === String(selectedGid));
+            if (targetGuild && targetGuild.currencies) {
+                targetGuild.currencies.forEach(c => {
+                    const opt = document.createElement('option');
+                    opt.value = c.name;
+                    opt.textContent = `${c.name} (1 Cosmo = ${c.rate} ${c.name})`;
+                    opt.dataset.rate = c.rate;
+                    opt.dataset.min = c.min;
+                    currencySelect.appendChild(opt);
+                });
+                currencySelect.disabled = false;
+            }
+        });
+
+        currencySelect.addEventListener('change', function() {
+            const selectedOpt = this.options[this.selectedIndex];
+            if (!this.value) {
+                cosmoAmount.disabled = true;
+                rateInfo.style.display = 'none';
+                calcResult.textContent = '';
+                submitBtn.disabled = true;
+                return;
+            }
+
+            const rate = parseFloat(selectedOpt.dataset.rate);
+            const min = parseFloat(selectedOpt.dataset.min);
+            rateInfo.textContent = `ℹ️ سعر الصرف: 1 Cosmo = ${rate} ${this.value} | الحد الأدنى للاستلام: ${min} ${this.value}`;
+            rateInfo.style.display = 'block';
+            cosmoAmount.disabled = false;
+            submitBtn.disabled = false;
+            calculateExchange();
+        });
+
+        cosmoAmount.addEventListener('input', calculateExchange);
+
+        function calculateExchange() {
+            const amount = parseAmountStr(cosmoAmount.value);
+            const selectedOpt = currencySelect.options[currencySelect.selectedIndex];
+            if (!amount || isNaN(amount) || !currencySelect.value) {
+                calcResult.textContent = '';
+                return;
+            }
+
+            const rate = parseFloat(selectedOpt.dataset.rate);
+            const min = parseFloat(selectedOpt.dataset.min);
+            const totalReceived = (amount * rate).toFixed(4);
+
+            if (parseFloat(totalReceived) < min) {
+                calcResult.className = 'text-danger fw-bold small';
+                calcResult.textContent = `❌ المستحق: ${totalReceived} ${currencySelect.value} (أقل من الحد الأدنى ${min})`;
+                submitBtn.disabled = true;
+            } else {
+                calcResult.className = 'text-success fw-bold small';
+                calcResult.textContent = `✅ المستحق التقريبي: ${totalReceived} ${currencySelect.value}`;
+                submitBtn.disabled = false;
+            }
+        }
+    }
+</script>
+{% endblock %}
