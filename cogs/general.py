@@ -118,8 +118,8 @@ class HelpView(discord.ui.View):
                 )),
                 ("💱 التبديل والبوست", (
                     "• `/accept_exchange <id>` و`/deny_exchange <id>` — معالجة طلبات التبديل.\n"
-                    "• `/add_exchange_currency` و`/delete_exchange_currency` — إدارة العملات.\n"
-                    "• `/toggle_currency_status` و`/toggle_exchange_system` — تشغيل أو إيقاف التبديل.\n"
+                    "• `/add_exchange_currency` و`/delete_exchange_currency` و`/toggle_currency_status` — إدارة الكتالوج العام من سيرفر Cosmo فقط.\n"
+                    "• `/toggle_exchange_system` — تشغيل أو إيقاف التبديل في السيرفر الحالي.\n"
                     "• `/setup_boost_rewards` و`/toggle_boost_system` — إعداد مكافآت البوست.\n"
                     "• `/fake_boost <1|2>` — اختبار مكافآت البوست."
                 )),
@@ -139,12 +139,13 @@ class HelpView(discord.ui.View):
         await self.show_page(
             interaction,
             "👑 Premium وأدوات مالك البوت",
-            "الاسم والصورة والبنر مميزات Premium؛ وأوامر الميزانية العامة وأدوات النظام تظل لمالك البوت فقط.",
+                    "تخصيص اسم عرض الرصيد والصورة والبنر مميزات Premium؛ اسم الرصيد لا يغيّر العملة أو قيمتها.",
             discord.Color.gold(),
             [
                 ("💎 Premium", (
                     "• `/active_premium <code>` — تفعيل اشتراك السيرفر.\n"
                     "• `/premium_status` — عرض حالة الاشتراك.\n"
+                    "• `/set_currency_name <name>` — تغيير اسم عرض الرصيد في هذا السيرفر فقط؛ اكتب `Cosmo` لإعادة الاسم الافتراضي.\n"
                     "• `/set_bot_name <name>` — تخصيص اسم البوت في السيرفر.\n"
                     "• `/set_bot_avatar <file>` — تخصيص صورة البوت.\n"
                     "• `/set_bot_banner <file>` — تخصيص بنر البوت."

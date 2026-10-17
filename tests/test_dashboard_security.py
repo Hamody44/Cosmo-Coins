@@ -57,6 +57,115 @@ class DashboardSecurityTests(unittest.TestCase):
         self.assertFalse(dashboard.user_can_manage_guild("token", 202))
         self.assertTrue(dashboard.user_can_manage_guild("token", 303))
 
+    def test_exchange_guild_filter_requires_owner_or_manage_permissions(self):
+        self.assertTrue(dashboard.guild_can_manage_exchange({"owner": True, "permissions": "0"}))
+        self.assertTrue(dashboard.guild_can_manage_exchange({"owner": False, "permissions": "32"}))
+        self.assertTrue(dashboard.guild_can_manage_exchange({"owner": False, "permissions": "8"}))
+        self.assertFalse(dashboard.guild_can_manage_exchange({"owner": False, "permissions": "0"}))
+        self.assertFalse(dashboard.guild_can_manage_exchange({"owner": False, "permissions": "invalid"}))
+
+    def test_profile_exchange_list_includes_manageable_non_premium_guild(self):
+        class Response:
+            status_code = 200
+            def json(self):
+                return [{"id": "123", "name": "No Premium Guild", "owner": True, "permissions": "0"}]
+
+        class SettingsCursor:
+            def execute(self, *_args, **_kwargs):
+                pass
+            def fetchone(self):
+                return (1, None)
+
+        class EmptyCursor:
+            def execute(self, *_args, **_kwargs):
+                pass
+            def fetchall(self):
+                return []
+
+        class Connection:
+            def close(self):
+                pass
+
+        with self.client.session_transaction() as session:
+            session["user"] = {"id": "456", "username": "test", "global_name": "Tester"}
+            session["access_token"] = "test-token"
+
+        with patch("dashboard.app.requests.get", return_value=Response()), \
+             patch("dashboard.app.get_bot_guild_ids", return_value={123}), \
+             patch("dashboard.app.database.get_exchange_currencies", return_value=[("Gems", 2.0, 1, 0.0)]), \
+             patch("dashboard.app.database.get_currency_label", return_value="Cosmo"), \
+             patch("dashboard.app.get_guild_db", return_value=(Connection(), SettingsCursor())), \
+             patch("dashboard.app.get_global_db", return_value=(Connection(), EmptyCursor())), \
+             patch("dashboard.app.get_balance", return_value=1000):
+            response = self.client.get("/profile")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"No Premium Guild", response.data)
+        self.assertIn(b"Premium", response.data)
+
+    def test_profile_exchange_post_uses_global_rate_without_premium(self):
+        class GuildResponse:
+            status_code = 200
+            def json(self):
+                return [{"id": "123", "name": "No Premium Guild", "owner": True, "permissions": "0"}]
+
+        class OtherResponse:
+            status_code = 403
+            def json(self):
+                return []
+
+        class SendResponse:
+            status_code = 200
+
+        class SettingsCursor:
+            def execute(self, *_args, **_kwargs):
+                pass
+            def fetchone(self):
+                return (1, None)
+
+        class GlobalCursor:
+            def execute(self, *_args, **_kwargs):
+                pass
+            def fetchall(self):
+                return []
+            def fetchone(self):
+                return ("999",)
+
+        class Connection:
+            def close(self):
+                pass
+
+        def discord_get(url, **_kwargs):
+            if url.endswith("/users/@me/guilds"):
+                return GuildResponse()
+            return OtherResponse()
+
+        with self.client.session_transaction() as session:
+            session["user"] = {"id": "456", "username": "test", "global_name": "Tester"}
+            session["access_token"] = "test-token"
+            session["csrf_token"] = "valid-csrf"
+
+        with patch("dashboard.app.requests.get", side_effect=discord_get), \
+             patch("dashboard.app.requests.post", return_value=SendResponse()), \
+             patch("dashboard.app.get_bot_guild_ids", return_value={123}), \
+             patch("dashboard.app.database.get_exchange_currencies", return_value=[("Gems", 2.0, 1, 0.0)]), \
+             patch("dashboard.app.database.get_exchange_currency", return_value=("Gems", 2.0, 1, 0.0)), \
+             patch("dashboard.app.database.get_currency_label", return_value="Cosmo"), \
+             patch("dashboard.app.get_guild_db", return_value=(Connection(), SettingsCursor())), \
+             patch("dashboard.app.get_global_db", return_value=(Connection(), GlobalCursor())), \
+             patch("dashboard.app.get_balance", return_value=1000), \
+             patch("dashboard.app.create_exchange_request", return_value=42) as create_request:
+            response = self.client.post("/profile", data={
+                "csrf_token": "valid-csrf",
+                "guild_id": "123",
+                "currency_name": "Gems",
+                "cosmo_amount": "200",
+                "notes": "player id 123",
+            })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(create_request.call_args.args[:5], (123, 456, 200, "Gems", 400.0))
+
     def test_session_key_is_not_the_known_weak_default(self):
         self.assertNotEqual(dashboard.app.secret_key, "cosmo_fixed_dashboard_secret_key_2026")
         self.assertGreaterEqual(len(dashboard.app.secret_key), 32)

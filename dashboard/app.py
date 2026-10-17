@@ -5,6 +5,7 @@ import secrets
 import hmac
 import ipaddress
 import socket
+import math
 from urllib.parse import urlencode, urlsplit
 from datetime import timedelta, datetime
 import time
@@ -183,6 +184,14 @@ def user_can_manage_guild(access_token: str, guild_id: int) -> bool:
         return False
     return False
 
+def guild_can_manage_exchange(guild_data: dict) -> bool:
+    """لا يكفي كون المستخدم عضوًا؛ يلزم أن يكون مالكًا أو مديرًا للسيرفر."""
+    try:
+        permissions = int(guild_data.get("permissions", 0))
+    except (TypeError, ValueError):
+        permissions = 0
+    return bool(guild_data.get("owner") or (permissions & 0x8) or (permissions & 0x20))
+
 def fetch_public_image(url: str, max_bytes: int = 8 * 1024 * 1024):
     """جلب صورة HTTPS عامة فقط مع منع عناوين الشبكات الخاصة والتحويلات."""
     try:
@@ -356,7 +365,7 @@ def manage(guild_id):
         banner_url = ""
         avatar_url = ""
         try:
-            cur.execute("SELECT premium_end, custom_banner_url, custom_avatar_url FROM premium_info WHERE guild_id = ?", (guild_id,))
+            cur.execute("SELECT premium_end, custom_banner_url, custom_avatar_url, custom_currency_name FROM premium_info WHERE guild_id = ?", (guild_id,))
             prem_row = cur.fetchone()
             if prem_row and prem_row[0] and int(prem_row[0]) > now_ts:
                 is_premium = True
@@ -366,8 +375,12 @@ def manage(guild_id):
                 premium_expiry_str = f"متبقي {days} يوم و {hours} ساعة ({datetime.fromtimestamp(int(prem_row[0])).strftime('%Y-%m-%d %H:%M')})"
                 banner_url = prem_row[1] or ""
                 avatar_url = prem_row[2] or ""
+                currency_label = prem_row[3] or "Cosmo"
+            else:
+                currency_label = "Cosmo"
         except Exception as e:
             print(f"[DEBUG] Premium read error: {e}")
+            currency_label = "Cosmo"
 
         # 2. معالجة إرسال البيانات (POST)
         if request.method == "POST":
@@ -397,19 +410,6 @@ def manage(guild_id):
                 conn.commit()
                 flash("تم حفظ إعدادات السيرفر وجميع اللوجات بنجاح!", "success")
                 conn.close()
-                return redirect(url_for("manage", guild_id=guild_id))
-
-            elif action == "toggle_currency":
-                c_name = request.form.get("currency_name", "").strip()
-                new_status = int(request.form.get("status", 1))
-
-                cur.execute(
-                    "UPDATE exchange_currencies SET is_active = ? WHERE LOWER(currency_name) = LOWER(?)",
-                    (new_status, c_name)
-                )
-                conn.commit()
-                conn.close()
-                flash(f"تم تحديث حالة عملة ({c_name}) بنجاح!", "success")
                 return redirect(url_for("manage", guild_id=guild_id))
 
             elif action == "add_reply":
@@ -443,6 +443,7 @@ def manage(guild_id):
                 new_nick = request.form.get("bot_nick", "").strip()
                 banner_link = request.form.get("banner_url", "").strip()
                 avatar_link = request.form.get("avatar_url", "").strip()
+                requested_currency_label = " ".join(request.form.get("currency_name", "").split())
 
                 patch_payload = {}
                 if new_nick:
@@ -470,6 +471,20 @@ def manage(guild_id):
                         avatar_url = avatar_link
                     else:
                         flash("تعذر استخدام رابط الصورة: يجب أن يكون HTTPS لصورة عامة صالحة وألا يتجاوز 8MB.", "warning")
+
+                if len(requested_currency_label) > 24 or any(not char.isprintable() for char in requested_currency_label) or any(char in requested_currency_label for char in "@`<>"):
+                    flash("اسم العملة يجب أن يكون واضحًا وبحد أقصى 24 حرفًا، ومن دون رموز الإشارات أو backticks.", "warning")
+                else:
+                    stored_currency_label = (
+                        None if not requested_currency_label or requested_currency_label.casefold() == "cosmo"
+                        else requested_currency_label
+                    )
+                    cur.execute(
+                        "INSERT INTO premium_info (guild_id, custom_currency_name) VALUES (?, ?) "
+                        "ON CONFLICT(guild_id) DO UPDATE SET custom_currency_name = excluded.custom_currency_name",
+                        (guild_id, stored_currency_label),
+                    )
+                    currency_label = stored_currency_label or "Cosmo"
 
                 if patch_payload:
                     try:
@@ -512,9 +527,8 @@ def manage(guild_id):
             "ticket_log": ticket_log,
         }
 
-        # 4. قراءة العملات
-        cur.execute("SELECT currency_name, exchange_rate, is_active FROM exchange_currencies")
-        currencies = cur.fetchall()
+        # العملات العامة موحدة من قاعدة سيرفر Cosmo ولا يمكن تعديلها من صفحة سيرفر أخرى.
+        currencies = database.get_exchange_currencies(active_only=False)
 
         # 5. قراءة الردود
         replies = []
@@ -563,6 +577,7 @@ def manage(guild_id):
             channels=text_channels,
             is_premium=is_premium,
             premium_expiry=premium_expiry_str,
+            currency_label=currency_label,
             bot_nick=bot_current_nick,
             banner_url=banner_url,
             avatar_url=avatar_url
@@ -597,46 +612,43 @@ def profile():
         except:
             pass
 
-    # 2. جلب سيرفرات المستخدم والتحقق من (وجود البوت + اشتراك البريميوم + نظام التبديل مفعل)
+    # 2. لا يشترط Premium: يجب أن يكون المستخدم مديرًا للسيرفر، والبوت موجودًا، والتبديل مفتوحًا.
     auth_headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get(f"{DISCORD_API_BASE}/users/@me/guilds", headers=auth_headers)
+    r = requests.get(f"{DISCORD_API_BASE}/users/@me/guilds", headers=auth_headers, timeout=8)
     user_guilds = r.json() if r.status_code == 200 else []
     bot_guild_ids = get_bot_guild_ids()
+    global_currencies = database.get_exchange_currencies(active_only=True)
+    currencies_data = [
+        {"name": name, "rate": float(rate), "min": float(minimum)}
+        for name, rate, _active, minimum in global_currencies
+        if math.isfinite(float(rate)) and float(rate) > 0
+        and math.isfinite(float(minimum)) and float(minimum) >= 0
+    ]
 
     eligible_guilds = []
     guilds_dict = {}
     if isinstance(user_guilds, list):
         for g in user_guilds:
-            gid = int(g.get("id", 0))
+            try:
+                gid = int(g.get("id", 0))
+            except (TypeError, ValueError):
+                continue
             guilds_dict[gid] = g.get("name", f"Server {gid}")
-            if gid in bot_guild_ids:
+            manageable = guild_can_manage_exchange(g)
+            if manageable and gid in bot_guild_ids and currencies_data:
                 try:
                     s_conn, s_cur = get_guild_db(gid)
-                    # فحص البريميوم
-                    s_cur.execute("SELECT premium_end FROM premium_info WHERE guild_id = ?", (gid,))
-                    prem_row = s_cur.fetchone()
-                    is_prem = prem_row and prem_row[0] and int(prem_row[0]) > now_ts
-
-                    # فحص قفل التبديل العام
                     s_cur.execute("SELECT exchange_enabled, delivery_log FROM settings WHERE guild_id = ?", (gid,))
                     set_row = s_cur.fetchone()
                     ex_enabled = set_row[0] if set_row and set_row[0] is not None else 1
                     deliv_log_id = set_row[1] if set_row and len(set_row) > 1 else None
-
-                    if is_prem and ex_enabled == 1:
-                        # جلب العملات المفعلة في هذا السيرفر
-                        s_cur.execute("SELECT currency_name, exchange_rate, min_received FROM exchange_currencies WHERE is_active = 1")
-                        curr_rows = s_cur.fetchall()
-                        currencies_data = [
-                            {"name": c[0], "rate": float(c[1]), "min": float(c[2])}
-                            for c in curr_rows
-                        ]
-                        if currencies_data:
-                            g_data = dict(g)
-                            g_data["currencies"] = currencies_data
-                            g_data["delivery_log"] = deliv_log_id
-                            eligible_guilds.append(g_data)
                     s_conn.close()
+                    if ex_enabled == 1:
+                        g_data = dict(g)
+                        g_data["currencies"] = currencies_data
+                        g_data["delivery_log"] = deliv_log_id
+                        g_data["currency_label"] = database.get_currency_label(gid)
+                        eligible_guilds.append(g_data)
                 except Exception as ex:
                     print(f"[DEBUG] Check eligible guild {gid} error: {ex}")
 
@@ -680,6 +692,7 @@ def profile():
             exchanges.append({
                 "id": req_id,
                 "server_name": server_name,
+                "currency_label": database.get_currency_label(g_id),
                 "cosmo_amount": cosmo_amt,
                 "target_currency": curr_name,
                 "received_amount": recv_amt,
@@ -693,10 +706,10 @@ def profile():
 
     # 5. معالجة طلب التبديل (مثل أمر exchange)
     if request.method == "POST":
-        target_guild_id = request.form.get("guild_id")
+        target_guild_id = request.form.get("guild_id", "")
         currency_name = request.form.get("currency_name", "").strip()
         amount_input = request.form.get("cosmo_amount", "").strip()
-        note = request.form.get("notes", "").strip()
+        note = request.form.get("notes", "").strip()[:500]
         if not note:
             note = "لا يوجد"
 
@@ -710,38 +723,36 @@ def profile():
             flash("❌ المبلغ يجب أن يكون أكبر من 0.", "danger")
             return redirect(url_for("profile"))
 
-        current_user_bal = get_balance(user_id)
-        if current_user_bal < parsed_amount:
-            flash("❌ رصيدك من Cosmo لا يكفي.", "danger")
-            return redirect(url_for("profile"))
-
         selected_guild = next((g for g in eligible_guilds if str(g["id"]) == str(target_guild_id)), None)
         if not selected_guild:
-            flash("❌ السيرفر المحدد غير متاح أو لا يمتلك اشتراك بريميوم نشط.", "danger")
+            flash("❌ السيرفر المحدد غير متاح: يجب أن تديره، وأن يكون البوت موجودًا والتبديل مفتوحًا.", "danger")
             return redirect(url_for("profile"))
 
         gid = int(selected_guild["id"])
-        s_conn, s_cur = get_guild_db(gid)
-        s_cur.execute("SELECT exchange_rate, is_active, min_received FROM exchange_currencies WHERE LOWER(currency_name) = LOWER(?)", (currency_name,))
-        curr_row = s_cur.fetchone()
-        
-        s_cur.execute("SELECT delivery_log FROM settings WHERE guild_id = ?", (gid,))
-        set_row = s_cur.fetchone()
-        delivery_log_id = set_row[0] if set_row and set_row[0] else None
-        s_conn.close()
+        curr_row = database.get_exchange_currency(currency_name)
 
         if not curr_row:
-            flash(f"❌ العملة `{currency_name}` غير متوفرة في هذا السيرفر.", "danger")
+            flash(f"❌ العملة `{currency_name}` غير موجودة في الكتالوج العام.", "danger")
             return redirect(url_for("profile"))
 
-        rate, is_active, min_recv = curr_row
+        currency_name, rate, is_active, min_recv = curr_row
         if is_active == 0:
-            flash(f"⛔ تبديل عملة {currency_name} متوقف ومقفل حالياً.", "danger")
+            flash(f"⛔ تبديل العملة العامة {currency_name} متوقف حاليًا.", "danger")
+            return redirect(url_for("profile"))
+
+        if not math.isfinite(float(rate)) or float(rate) <= 0 or not math.isfinite(float(min_recv)) or float(min_recv) < 0:
+            flash("❌ إعداد سعر العملة غير صالح؛ تواصل مع إدارة البوت.", "danger")
             return redirect(url_for("profile"))
 
         total_received = round(parsed_amount * rate, 4)
         if total_received < min_recv:
             flash(f"❌ تم رفض طلبك تلقائياً: المبلغ المستحق (`{total_received} {currency_name}`) أقل من الحد الأدنى وهو `{min_recv} {currency_name}`.", "danger")
+            return redirect(url_for("profile"))
+
+        delivery_log_id = selected_guild.get("delivery_log")
+        currency_label = selected_guild.get("currency_label", "Cosmo")
+        if get_balance(user_id) < parsed_amount:
+            flash(f"❌ رصيدك من {currency_label} لا يكفي.", "danger")
             return redirect(url_for("profile"))
 
         g_conn, g_cur = get_global_db()
@@ -759,6 +770,9 @@ def profile():
         req_id = create_exchange_request(gid, user_id, parsed_amount, currency_name, total_received, note, now_str)
         if req_id is None:
             g_conn.close()
+            if database.has_pending_exchange_request(user_id):
+                flash("⏳ لديك طلب تبديل سابق قيد الانتظار؛ لم يُخصم أي مبلغ جديد. انتظر معالجته قبل إنشاء طلب آخر.", "warning")
+                return redirect(url_for("profile"))
             flash("❌ لم يعد رصيدك كافياً لإتمام الطلب؛ لم يُخصم أي مبلغ.", "danger")
             return redirect(url_for("profile"))
         g_conn.close()
@@ -791,7 +805,7 @@ def profile():
                 {"name": "🏛️ السيرفر", "value": server_display, "inline": True},
                 {"name": "📦 روم التسليمات", "value": delivery_display, "inline": True},
                 {"name": "👤 العضو", "value": f"<@{user_id}> (`{user_id}`)", "inline": False},
-                {"name": "🪙 مبلغ Cosmo", "value": f"`{parsed_amount:,}`", "inline": True},
+                {"name": f"🪙 مبلغ {currency_label}", "value": f"`{parsed_amount:,}`", "inline": True},
                 {"name": f"💵 المستحق من ({currency_name})", "value": f"`{total_received}`", "inline": True},
                 {"name": "📝 الوصف والملاحظات", "value": f"```{note}```", "inline": False}
             ],
@@ -805,14 +819,22 @@ def profile():
                 json={"embeds": [embed]},
                 timeout=5
             )
-            if not 200 <= send_result.status_code < 300:
+            if 400 <= send_result.status_code < 500:
                 deny_exchange_request(req_id)
                 flash("❌ تعذر إرسال الطلب للإدارة؛ أُعيد رصيدك تلقائياً.", "danger")
                 return redirect(url_for("profile"))
+            if not 200 <= send_result.status_code < 300:
+                flash(
+                    f"⚠️ تعذر تأكيد نتيجة إرسال الطلب #{req_id} (استجابة Discord غير نهائية). أبقينا الطلب والخصم قيد الانتظار لتجنب تكرار العملية؛ لا تعِد الإرسال وتواصل مع الإدارة للتحقق.",
+                    "warning",
+                )
+                return redirect(url_for("profile"))
         except Exception as ex:
             print(f"[DEBUG] Send exchange request error: {ex}")
-            deny_exchange_request(req_id)
-            flash("❌ تعذر إرسال الطلب للإدارة؛ أُعيد رصيدك تلقائياً.", "danger")
+            flash(
+                f"⚠️ لم نتمكن من تأكيد وصول الطلب #{req_id} بسبب انقطاع الاتصال. أبقينا الطلب والخصم قيد الانتظار لتجنب ازدواج العملية؛ لا تعِد الإرسال وتواصل مع الإدارة للتحقق.",
+                "warning",
+            )
             return redirect(url_for("profile"))
 
         flash(f"✅ تم إرسال طلب التبديل برقم `{req_id}` إلى الإدارة بنجاح.", "success")

@@ -89,7 +89,8 @@ def get_guild_db(guild_id: int):
         premium_end INTEGER DEFAULT 0,
         custom_name TEXT,
         custom_avatar_url TEXT,
-        custom_banner_url TEXT
+        custom_banner_url TEXT,
+        custom_currency_name TEXT
     )''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS exchange_currencies (
@@ -173,6 +174,11 @@ def get_guild_db(guild_id: int):
     except sqlite3.OperationalError:
         pass
 
+    try:
+        cur.execute("ALTER TABLE premium_info ADD COLUMN custom_currency_name TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     return conn, cur
 
@@ -194,6 +200,49 @@ def is_guild_premium(guild_id: int) -> bool:
     if row and row[0]:
         return int(time.time()) < row[0]
     return False
+
+def get_currency_label(guild_id: int | None = None) -> str:
+    """اسم العرض لرصيد Cosmo في سيرفر بعينه؛ لا ينشئ عملة أو رصيداً منفصلاً."""
+    if guild_id is None:
+        return "Cosmo"
+    g_conn, g_cur = get_guild_db(guild_id)
+    try:
+        g_cur.execute(
+            "SELECT custom_currency_name, premium_end FROM premium_info WHERE guild_id = ?",
+            (guild_id,),
+        )
+        row = g_cur.fetchone()
+        label = row[0].strip() if row and row[0] and row[1] and int(row[1]) > int(time.time()) else ""
+        if not label:
+            return "Cosmo"
+        return label.replace("@", "@\u200b").replace("`", "ˋ").replace("<", "‹").replace(">", "›")
+    finally:
+        g_conn.close()
+
+def get_exchange_currencies(active_only: bool = False):
+    """الكتالوج المشترك؛ قاعدة سيرفر Cosmo هي المصدر الوحيد لكل السيرفرات."""
+    g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+    try:
+        query = "SELECT currency_name, exchange_rate, is_active, min_received FROM exchange_currencies"
+        if active_only:
+            query += " WHERE is_active = 1"
+        query += " ORDER BY LOWER(currency_name), currency_name"
+        g_cur.execute(query)
+        return g_cur.fetchall()
+    finally:
+        g_conn.close()
+
+def get_exchange_currency(currency_name: str):
+    g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+    try:
+        g_cur.execute(
+            "SELECT currency_name, exchange_rate, is_active, min_received "
+            "FROM exchange_currencies WHERE LOWER(currency_name) = LOWER(?)",
+            (currency_name.strip(),),
+        )
+        return g_cur.fetchone()
+    finally:
+        g_conn.close()
 
 def is_bot_admin(ctx):
     if ctx.author.id == PRIMARY_OWNER_ID:
@@ -316,6 +365,14 @@ def transfer_balance(sender_id: int, receiver_id: int, amount: int, timestamp: s
         conn.commit()
         return True
 
+def has_pending_exchange_request(user_id: int) -> bool:
+    with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM exchange_logs WHERE user_id = ? AND status = 'قيد الانتظار' LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        return row is not None
+
 def create_exchange_request(guild_id: int, user_id: int, amount: int, currency: str,
                             received_amount: float, note: str, timestamp: str):
     amount = int(amount)
@@ -323,6 +380,13 @@ def create_exchange_request(guild_id: int, user_id: int, amount: int, currency: 
         return None
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        pending = conn.execute(
+            "SELECT 1 FROM exchange_logs WHERE user_id = ? AND status = 'قيد الانتظار' LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if pending:
+            conn.rollback()
+            return None
         cur = conn.execute(
             "UPDATE balances SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
             (amount, user_id, amount),

@@ -7,8 +7,22 @@ from database import (
     get_balance, parse_amount, generate_captcha_image,
     is_blacklisted, is_bot_admin, global_cursor, get_guild_db, PRIMARY_OWNER_ID,
     send_global_action_log, transfer_balance, create_exchange_request,
-    accept_exchange_request, deny_exchange_request
+    accept_exchange_request, deny_exchange_request, get_currency_label,
+    get_exchange_currencies, get_exchange_currency, has_pending_exchange_request
 )
+
+def can_manage_exchange_request(ctx: commands.Context, origin_guild_id: int) -> bool:
+    """مالك البوت أو مدير السيرفر صاحب الطلب يستطيع معالجة الطلب؛ لا يلزم Premium."""
+    if ctx.author.id == PRIMARY_OWNER_ID:
+        return True
+    if not ctx.guild or ctx.guild.id != origin_guild_id:
+        return False
+    if ctx.author.id == ctx.guild.owner_id:
+        return True
+    permissions = getattr(ctx.author, "guild_permissions", None)
+    if permissions and (permissions.administrator or permissions.manage_guild):
+        return True
+    return is_bot_admin(ctx)
 
 class Economy(commands.Cog):
     def __init__(self, bot):
@@ -18,10 +32,12 @@ class Economy(commands.Cog):
     async def balance(self, ctx: commands.Context, member: discord.Member = None):
         target = member or ctx.author
         bal = get_balance(target.id)
-        await ctx.send(f"🪙 رصيد **{target.display_name}** هو: `{bal:,}` Cosmo")
+        label = get_currency_label(ctx.guild.id if ctx.guild else None)
+        await ctx.send(f"🪙 رصيد **{target.display_name}** هو: `{bal:,}` {label}")
 
     @commands.hybrid_command(name="transfer", aliases=["تحويل"], description="تحويل عملات Cosmo لشخص آخر")
     async def transfer(self, ctx: commands.Context, member: discord.Member, amount: str):
+        currency_label = get_currency_label(ctx.guild.id if ctx.guild else None)
         if member.bot or member.id == ctx.author.id:
             return await ctx.send("❌ لا يمكنك التحويل لنفسك أو إلى بوت.")
         if is_blacklisted(ctx.author) or is_blacklisted(member):
@@ -35,13 +51,13 @@ class Economy(commands.Cog):
         if parsed_amount <= 0:
             return await ctx.send("❌ المبلغ يجب أن يكون أكبر من 0.")
         if get_balance(ctx.author.id) < parsed_amount:
-            return await ctx.send("❌ رصيدك من Cosmo لا يكفي.")
+            return await ctx.send(f"❌ رصيدك من {currency_label} لا يكفي.")
 
         captcha_code = str(random.randint(1000, 9999))
         captcha_img = generate_captcha_image(captcha_code)
         file = discord.File(captcha_img, filename="captcha.png")
 
-        msg = await ctx.send(f"⚠️ {ctx.author.mention} لتأكيد تحويل `{parsed_amount:,}` Cosmo، اكتب الكود خلال **20 ثانية**:", file=file)
+        msg = await ctx.send(f"⚠️ {ctx.author.mention} لتأكيد تحويل `{parsed_amount:,}` {currency_label}، اكتب الكود خلال **20 ثانية**:", file=file)
 
         def check(m):
             return m.author == ctx.author and m.channel == ctx.channel
@@ -59,11 +75,11 @@ class Economy(commands.Cog):
                         pass
                     return
 
-                await ctx.send(f"✅ تم تحويل `{parsed_amount:,}` Cosmo إلى {member.mention}.")
+                await ctx.send(f"✅ تم تحويل `{parsed_amount:,}` {currency_label} إلى {member.mention}.")
                 try:
                     await msg.delete()
                     await reply.delete()
-                    await member.send(f"📥 استلمت `{parsed_amount:,}` Cosmo من **{ctx.author.name}** (`ID: {ctx.author.id}`).")
+                    await member.send(f"📥 استلمت `{parsed_amount:,}` {currency_label} من **{ctx.author.name}** (`ID: {ctx.author.id}`).")
                 except:
                     pass
 
@@ -74,7 +90,7 @@ class Economy(commands.Cog):
                 if row and row[0]:
                     log_chan = ctx.guild.get_channel(row[0])
                     if log_chan:
-                        await log_chan.send(f"🔄 **تحويل جديد:** قام {ctx.author.mention} بتحويل `{parsed_amount:,}` Cosmo إلى {member.mention}.")
+                        await log_chan.send(f"🔄 **تحويل جديد:** قام {ctx.author.mention} بتحويل `{parsed_amount:,}` {currency_label} إلى {member.mention}.")
 
                 # إرسال إلى اللوج العام العالمي
                 global_embed = discord.Embed(
@@ -85,7 +101,7 @@ class Economy(commands.Cog):
                 global_embed.add_field(name="🏛️ السيرفر", value=f"{ctx.guild.name} (`{ctx.guild.id}`)", inline=False)
                 global_embed.add_field(name="📤 المرسل", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=True)
                 global_embed.add_field(name="📥 المستلم", value=f"{member.mention} (`{member.id}`)", inline=True)
-                global_embed.add_field(name="🪙 المبلغ", value=f"`{parsed_amount:,}` Cosmo", inline=False)
+                global_embed.add_field(name="🪙 المبلغ", value=f"`{parsed_amount:,}` {currency_label}", inline=False)
                 global_embed.set_footer(text="Cosmo Global Economy Log")
                 await send_global_action_log(self.bot, global_embed)
             else:
@@ -131,10 +147,11 @@ class Economy(commands.Cog):
         for req_id, g_id, cosmo_amt, curr_name, recv_amt, status, t_stamp, note in rows:
             guild_obj = self.bot.get_guild(g_id)
             guild_title = guild_obj.name if guild_obj else "سيرفر غير معروف"
+            currency_label = get_currency_label(g_id)
             status_display = status_emojis.get(status, f"🔹 {status}")
             
             details = (
-                f"• **المبلغ:** `{cosmo_amt:,}` Cosmo ➔ `{recv_amt}` {curr_name}\n"
+                f"• **المبلغ:** `{cosmo_amt:,}` {currency_label} ➔ `{recv_amt}` {curr_name}\n"
                 f"• **الحالة:** {status_display}\n"
                 f"• **السيرفر:** `{guild_title}`\n"
                 f"• **التاريخ:** `{t_stamp}`\n"
@@ -145,20 +162,31 @@ class Economy(commands.Cog):
         embed.set_footer(text="Cosmo Currency System • Exchange History")
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="exchange_list", aliases=["قائمة_العملات"], description="عرض جميع العملات المتاحة للتبديل في هذا السيرفر")
+    @commands.hybrid_command(name="exchange_list", aliases=["قائمة_العملات"], description="عرض العملات العامة المتاحة للتبديل")
     async def exchange_list(self, ctx: commands.Context):
-        g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute("SELECT currency_name, exchange_rate, is_active, min_received FROM exchange_currencies")
-        rows = g_cur.fetchall()
-        g_conn.close()
+        rows = get_exchange_currencies(active_only=True)
         if not rows:
-            return await ctx.send("⚠️ لا توجد أي عملات مضافة للتبديل حالياً في هذا السيرفر.")
-        
-        msg = "💱 **العملات المتاحة للتبديل في هذا السيرفر:**\n"
-        for r in rows:
-            status_txt = "متاحة ✅" if r[2] == 1 else "مقفلة ⛔"
-            msg += f"• **{r[0]}**: `1 Cosmo = {r[1]} {r[0]}` | الحد الأدنى: `{r[3]} {r[0]}` | الحالة: **{status_txt}**\n"
-        await ctx.send(msg)
+            return await ctx.send("⚠️ لا توجد عملات مفعّلة للتبديل حاليًا في الكتالوج العام.")
+
+        label = get_currency_label(ctx.guild.id if ctx.guild else None)
+        pages = [rows[index:index + 20] for index in range(0, len(rows), 20)]
+        for page_number, page in enumerate(pages, 1):
+            embed = discord.Embed(
+                title="💱 العملات العامة المتاحة للتبديل",
+                description=(
+                    f"الأسعار موحّدة لكل السيرفرات، وتُدار من سيرفر Cosmo.\n"
+                    f"رصيدك الأساسي هنا يظهر باسم **{label}**."
+                ),
+                color=discord.Color.teal(),
+            )
+            for name, rate, _active, minimum in page:
+                embed.add_field(
+                    name=f"🪙 {name}",
+                    value=f"`1 {label} = {float(rate):g} {name}`\nالحد الأدنى للاستلام: `{float(minimum):g} {name}`",
+                    inline=True,
+                )
+            embed.set_footer(text=f"كتالوج Cosmo العام • صفحة {page_number}/{len(pages)}")
+            await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="exchange_stats", aliases=["احصائيات_التبديل"], description="عرض إحصائيات عمليات التبديل الناجحة في هذا السيرفر")
     async def exchange_stats(self, ctx: commands.Context):
@@ -169,11 +197,12 @@ class Economy(commands.Cog):
 
         embed = discord.Embed(title=f"📊 إحصائيات التبديل | {ctx.guild.name}", color=discord.Color.green())
         embed.add_field(name="إجمالي الطلبات المقبولة", value=f"`{total_count:,}` عملية", inline=False)
-        embed.add_field(name="إجمالي كوزمو المستبدلة", value=f"`{total_cosmo:,}` Cosmo", inline=False)
+        embed.add_field(name=f"إجمالي {get_currency_label(ctx.guild.id if ctx.guild else None)} المستبدلة", value=f"`{total_cosmo:,}` {get_currency_label(ctx.guild.id if ctx.guild else None)}", inline=False)
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="exchange", aliases=["تبديل"], description="طلب تبديل عملات Cosmo إلى عملة أخرى")
     async def exchange(self, ctx: commands.Context, currency_name: str, amount: str, *, note: str = "لا يوجد"):
+        currency_label = get_currency_label(ctx.guild.id if ctx.guild else None)
         g_conn, g_cur = get_guild_db(ctx.guild.id)
         g_cur.execute("SELECT exchange_enabled, delivery_log FROM settings WHERE guild_id = ?", (ctx.guild.id,))
         s_row = g_cur.fetchone()
@@ -193,15 +222,14 @@ class Economy(commands.Cog):
             return await ctx.send("❌ المبلغ يجب أن يكون أكبر من 0.")
         if get_balance(ctx.author.id) < parsed_amount:
             g_conn.close()
-            return await ctx.send("❌ رصيدك من Cosmo لا يكفي.")
+            return await ctx.send(f"❌ رصيدك من {currency_label} لا يكفي.")
 
-        g_cur.execute("SELECT exchange_rate, is_active, min_received FROM exchange_currencies WHERE LOWER(currency_name) = LOWER(?)", (currency_name.strip(),))
-        curr_row = g_cur.fetchone()
+        curr_row = get_exchange_currency(currency_name)
         if not curr_row:
             g_conn.close()
-            return await ctx.send(f"❌ العملة `{currency_name}` غير متوفرة في هذا السيرفر.")
+            return await ctx.send(f"❌ العملة `{currency_name}` غير موجودة في الكتالوج العام.")
 
-        rate, is_active, min_recv = curr_row
+        currency_name, rate, is_active, min_recv = curr_row
         if is_active == 0:
             g_conn.close()
             return await ctx.send(f"⛔ تبديل عملة **{currency_name}** متوقف ومقفل حالياً.")
@@ -227,6 +255,8 @@ class Economy(commands.Cog):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         req_id = create_exchange_request(ctx.guild.id, ctx.author.id, parsed_amount, currency_name, total_received, note, now)
         if req_id is None:
+            if has_pending_exchange_request(ctx.author.id):
+                return await ctx.send("⏳ لديك طلب تبديل سابق قيد الانتظار؛ لم يُخصم أي مبلغ جديد. انتظر معالجته قبل إنشاء طلب آخر.")
             return await ctx.send("❌ لم يعد رصيدك كافياً لإتمام الطلب؛ لم يُخصم أي مبلغ.")
 
         invite_link = None
@@ -256,7 +286,7 @@ class Economy(commands.Cog):
         embed.add_field(name="🏛️ السيرفر", value=server_display, inline=True)
         embed.add_field(name="📦 روم التسليمات", value=delivery_display, inline=True)
         embed.add_field(name="👤 العضو", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=False)
-        embed.add_field(name="🪙 مبلغ Cosmo", value=f"`{parsed_amount:,}`", inline=True)
+        embed.add_field(name=f"🪙 مبلغ {currency_label}", value=f"`{parsed_amount:,}`", inline=True)
         embed.add_field(name=f"💵 المستحق من ({currency_name})", value=f"`{total_received}`", inline=True)
         embed.add_field(name="📝 الوصف والملاحظات", value=f"```{note}```", inline=False)
         embed.set_footer(text=f"للقبول: /accept_exchange {req_id} | للرفض: /deny_exchange {req_id}")
@@ -275,7 +305,7 @@ class Economy(commands.Cog):
         if not row or row[4] != "قيد الانتظار":
             return await ctx.send("❌ الطلب غير موجود أو تمت معالجته مسبقاً.")
 
-        if ctx.author.id != PRIMARY_OWNER_ID and (not ctx.guild or ctx.guild.id != row[5] or not is_bot_admin(ctx)):
+        if not can_manage_exchange_request(ctx, row[5]):
             return await ctx.send("⛔ يجب أن تكون مسؤولاً في السيرفر الذي يخصه طلب التبديل.")
         if not accept_exchange_request(req_id):
             return await ctx.send("❌ تمت معالجة هذا الطلب بالفعل؛ لم يُنفذ القبول مرة أخرى.")
@@ -283,6 +313,7 @@ class Economy(commands.Cog):
         await ctx.send(f"✅ تم قبول طلب التبديل #{req_id}.")
 
         origin_guild_id = row[5]
+        origin_currency_label = get_currency_label(origin_guild_id)
         origin_guild = self.bot.get_guild(origin_guild_id)
         if origin_guild:
             g_conn, g_cur = get_guild_db(origin_guild_id)
@@ -292,7 +323,7 @@ class Economy(commands.Cog):
             if s_log and s_log[0]:
                 succ_chan = origin_guild.get_channel(s_log[0])
                 if succ_chan:
-                    await succ_chan.send(f"🎉 تم بنجاح تبديل `{row[1]:,}` Cosmo للعضو <@{row[0]}> مقابل `{row[3]}` {row[2]}.")
+                    await succ_chan.send(f"🎉 تم بنجاح تبديل `{row[1]:,}` {origin_currency_label} للعضو <@{row[0]}> مقابل `{row[3]}` {row[2]}.")
 
     @commands.hybrid_command(name="deny_exchange", aliases=["رفض_التبديل"], description="رفض طلب التبديل مع ذكر السبب")
     async def deny_exchange(self, ctx: commands.Context, req_id: int, *, reason: str = "غير محدد"):
@@ -301,7 +332,7 @@ class Economy(commands.Cog):
         if not row or row[3] != "قيد الانتظار":
             return await ctx.send("❌ الطلب غير صالح أو تمت معالجته.")
 
-        if ctx.author.id != PRIMARY_OWNER_ID and (not ctx.guild or ctx.guild.id != row[4] or not is_bot_admin(ctx)):
+        if not can_manage_exchange_request(ctx, row[4]):
             return await ctx.send("⛔ يجب أن تكون مسؤولاً في السيرفر الذي يخصه طلب التبديل.")
         refunded = deny_exchange_request(req_id)
         if not refunded:
@@ -311,13 +342,14 @@ class Economy(commands.Cog):
         try:
             user = await self.bot.fetch_user(refunded[0])
             if user:
-                await user.send(f"❌ تم رفض طلب التبديل #{req_id} وإعادة `{refunded[1]:,}` Cosmo لحسابك.\n**السبب:** `{reason}`")
+                await user.send(f"❌ تم رفض طلب التبديل #{req_id} وإعادة `{refunded[1]:,}` {get_currency_label(row[4])} لحسابك.\n**السبب:** `{reason}`")
         except:
             pass
 
     @commands.hybrid_command(name="transfer_history", aliases=["سجل_التحويل"], description="عرض آخر عمليات التحويل العامة")
     async def transfer_history(self, ctx: commands.Context, member: discord.Member = None):
         target = member or ctx.author
+        currency_label = get_currency_label(ctx.guild.id if ctx.guild else None)
         global_cursor.execute("SELECT sender_id, receiver_id, amount, timestamp FROM transfer_logs WHERE sender_id = ? OR receiver_id = ? ORDER BY id DESC LIMIT 5", (target.id, target.id))
         rows = global_cursor.fetchall()
         if not rows:
@@ -327,7 +359,7 @@ class Economy(commands.Cog):
         for r in rows:
             action = "إرسال إلى" if r[0] == target.id else "استلام من"
             other_id = r[1] if r[0] == target.id else r[0]
-            msg += f"• {action} <@{other_id}> بمبلغ `{r[2]:,}` Cosmo بتاريخ `{r[3]}`\n"
+            msg += f"• {action} <@{other_id}> بمبلغ `{r[2]:,}` {currency_label} بتاريخ `{r[3]}`\n"
         await ctx.send(msg)
 
 async def setup(bot):

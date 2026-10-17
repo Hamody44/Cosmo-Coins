@@ -49,8 +49,9 @@ class FinancialTransactionTests(unittest.TestCase):
         database.update_balance(11, 250)
         request_id = database.create_exchange_request(99, 11, 200, "Gems", 20.0, "test", "now")
         self.assertIsNotNone(request_id)
+        self.assertTrue(database.has_pending_exchange_request(11))
         self.assertEqual(self.balance(11), 50)
-        self.assertIsNone(database.create_exchange_request(99, 11, 100, "Gems", 10.0, "test", "later"))
+        self.assertIsNone(database.create_exchange_request(99, 11, 20, "Gems", 2.0, "test", "later"))
         self.assertEqual(self.balance(11), 50)
         with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM exchange_logs").fetchone()[0], 1)
@@ -61,6 +62,7 @@ class FinancialTransactionTests(unittest.TestCase):
         self.assertEqual(self.balance(12), 180)
         self.assertEqual(database.deny_exchange_request(request_id), (12, 120))
         self.assertIsNone(database.deny_exchange_request(request_id))
+        self.assertFalse(database.has_pending_exchange_request(12))
         self.assertEqual(self.balance(12), 300)
 
     def test_acceptance_is_idempotent_and_rejection_cannot_follow(self):

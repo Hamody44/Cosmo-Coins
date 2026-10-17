@@ -40,17 +40,21 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="update_bot_identity">
         <div class="row g-3">
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label text-white fw-semibold">اسم البوت المستعار (Nickname)</label>
                 <input type="text" name="bot_nick" class="form-control" value="{{ bot_nick }}" placeholder="اكتب اسم البوت الجديد...">
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label text-white fw-semibold">رابط صورة البوت (Avatar URL)</label>
                 <input type="url" name="avatar_url" class="form-control" value="{{ avatar_url }}" placeholder="https://i.imgur.com/...png">
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label text-white fw-semibold">رابط بنر البوت (Banner URL)</label>
                 <input type="url" name="banner_url" class="form-control" value="{{ banner_url }}" placeholder="https://i.imgur.com/...png">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label text-white fw-semibold">اسم عرض رصيد Cosmo في هذا السيرفر فقط</label>
+                <input type="text" name="currency_name" class="form-control" maxlength="24" value="{{ currency_label if currency_label != 'Cosmo' else '' }}" placeholder="اتركه فارغًا لاستخدام Cosmo">
             </div>
         </div>
         <button type="submit" class="btn btn-warning mt-3 fw-bold">حفظ مظهر وهوية البوت</button>
@@ -143,22 +147,24 @@
     <!-- العملات المسجلة والردود التلقائية -->
     <div class="col-lg-7">
         <div class="card p-4 mb-4">
-            <h5 class="text-white fw-bold mb-3">💱 عملات السيرفر وقفل التبديل الفردي</h5>
+            <h5 class="text-white fw-bold mb-2">💱 كتالوج العملات العام</h5>
+            <p class="text-muted-custom small">هذه الأسعار والحالات موحّدة لكل السيرفرات وتدار من سيرفر Cosmo فقط؛ لا يمكن تغييرها من إعدادات هذا السيرفر.</p>
             <div class="table-responsive">
                 <table class="table table-custom align-middle">
                     <thead>
                         <tr>
                             <th>العملة</th>
-                            <th>سعر التحويل</th>
+                            <th>السعر</th>
+                            <th>الحد الأدنى</th>
                             <th>الحالة</th>
-                            <th>تحكم</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for curr in currencies %}
                         <tr>
                             <td class="fw-bold">{{ curr[0] }}</td>
-                            <td>{{ curr[1] }} Cosmo</td>
+                            <td>1 {{ currency_label }} = {{ curr[1] }} {{ curr[0] }}</td>
+                            <td>{{ curr[3] }} {{ curr[0] }}</td>
                             <td>
                                 {% if curr[2] == 1 %}
                                     <span class="badge bg-success">متاح للتبديل</span>
@@ -166,21 +172,10 @@
                                     <span class="badge bg-danger">معطل</span>
                                 {% endif %}
                             </td>
-                            <td>
-                                <form method="POST" style="display:inline;">
-                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                    <input type="hidden" name="action" value="toggle_currency">
-                                    <input type="hidden" name="currency_name" value="{{ curr[0] }}">
-                                    <input type="hidden" name="status" value="{{ 0 if curr[2] == 1 else 1 }}">
-                                    <button class="btn btn-sm {% if curr[2] == 1 %}btn-outline-danger{% else %}btn-outline-success{% endif %}">
-                                        {{ "إيقاف" if curr[2] == 1 else "تشغيل" }}
-                                    </button>
-                                </form>
-                            </td>
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="4" class="text-center text-muted-custom py-3">لا توجد عملات مضافة بعد عبر أمر <code>/add_exchange_currency</code>.</td>
+                            <td colspan="4" class="text-center text-muted-custom py-3">لا توجد عملات مضافة في الكتالوج العام بعد.</td>
                         </tr>
                         {% endfor %}
                     </tbody>

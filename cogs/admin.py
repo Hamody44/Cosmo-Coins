@@ -6,12 +6,13 @@ import string
 import random
 import asyncio
 import base64
+import math
 from datetime import datetime
 from database import (
     check_is_owner, is_bot_admin, is_guild_premium, parse_duration,
     parse_amount, get_guild_db, global_cursor, global_conn, PRIMARY_OWNER_ID,
     deduct_server_spending, update_balance, debit_balance, is_blacklisted, get_server_spending_balance,
-    send_global_action_log
+    send_global_action_log, COSMO_GUILD_ID, get_exchange_currency, get_currency_label
 )
 
 def can_manage_bot(ctx: commands.Context) -> bool:
@@ -28,6 +29,15 @@ def can_manage_bot(ctx: commands.Context) -> bool:
     if ctx.author.guild_permissions.administrator or ctx.author.guild_permissions.manage_guild:
         return True
     return is_bot_admin(ctx)
+
+def can_manage_global_exchange(ctx: commands.Context) -> bool:
+    """كتالوج التبديل العام لا يُدار إلا من سيرفر Cosmo بواسطة إدارته."""
+    if not ctx.guild or ctx.guild.id != COSMO_GUILD_ID:
+        return False
+    if ctx.author.id == PRIMARY_OWNER_ID or ctx.author.id == ctx.guild.owner_id:
+        return True
+    permissions = getattr(ctx.author, "guild_permissions", None)
+    return bool(permissions and (permissions.administrator or permissions.manage_guild))
 
 async def schedule_double_announcement(channel: discord.TextChannel, guild_id: int, duration_sec: int):
     await asyncio.sleep(duration_sec)
@@ -200,6 +210,7 @@ class Admin(commands.Cog):
     async def add_balance(self, ctx: commands.Context, member: discord.Member, amount: str):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية لإضافة الرصيد.")
+        currency_label = get_currency_label(ctx.guild.id)
         if is_blacklisted(member):
             return await ctx.send("⛔ العضو مدرج في البلاك ليست.")
 
@@ -215,7 +226,7 @@ class Admin(commands.Cog):
             return await ctx.send(pool_msg)
         
         update_balance(member.id, parsed_amount)
-        await ctx.send(f"✅ تمت إضافة `{parsed_amount:,}` Cosmo إلى رصيد {member.mention}.\n{pool_msg}")
+        await ctx.send(f"✅ تمت إضافة `{parsed_amount:,}` {currency_label} إلى رصيد {member.mention}.\n{pool_msg}")
 
         g_conn, g_cur = get_guild_db(ctx.guild.id)
         g_cur.execute("SELECT balance_log FROM settings WHERE guild_id = ?", (ctx.guild.id,))
@@ -224,7 +235,7 @@ class Admin(commands.Cog):
         if row and row[0]:
             chan = ctx.guild.get_channel(row[0])
             if chan:
-                await chan.send(f"📥 **شحن رصيد:** قام {ctx.author.mention} بإضافة `{parsed_amount:,}` Cosmo إلى {member.mention}.")
+                await chan.send(f"📥 **شحن رصيد:** قام {ctx.author.mention} بإضافة `{parsed_amount:,}` {currency_label} إلى {member.mention}.")
 
         global_embed = discord.Embed(
             title="🌐 عملية شحن رصيد (Global Add Balance)",
@@ -234,7 +245,7 @@ class Admin(commands.Cog):
         global_embed.add_field(name="🏛️ السيرفر", value=f"{ctx.guild.name} (`{ctx.guild.id}`)", inline=False)
         global_embed.add_field(name="🛡️ المسؤول", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=True)
         global_embed.add_field(name="👤 العضو المشحون له", value=f"{member.mention} (`{member.id}`)", inline=True)
-        global_embed.add_field(name="🪙 المبلغ المضاف", value=f"`{parsed_amount:,}` Cosmo", inline=False)
+        global_embed.add_field(name="🪙 المبلغ المضاف", value=f"`{parsed_amount:,}` {currency_label}", inline=False)
         global_embed.set_footer(text="Cosmo Global Admin Log")
         await send_global_action_log(self.bot, global_embed)
 
@@ -242,6 +253,7 @@ class Admin(commands.Cog):
     async def remove_balance(self, ctx: commands.Context, member: discord.Member, amount: str):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية لخصم الرصيد.")
+        currency_label = get_currency_label(ctx.guild.id)
         try:
             parsed_amount = parse_amount(amount)
         except:
@@ -251,12 +263,12 @@ class Admin(commands.Cog):
         
         if not debit_balance(member.id, parsed_amount):
             return await ctx.send("❌ رصيد العضو أقل من المبلغ المطلوب خصمه.")
-        await ctx.send(f"✅ تم خصم `{parsed_amount:,}` Cosmo من رصيد {member.mention}.")
+        await ctx.send(f"✅ تم خصم `{parsed_amount:,}` {currency_label} من رصيد {member.mention}.")
 
     @commands.hybrid_command(name="server_budget", aliases=["ميزانية_السيرفر"], description="عرض ميزانية الصرف المتبقية للسيرفر")
     async def server_budget(self, ctx: commands.Context):
         budget = get_server_spending_balance(ctx.guild.id)
-        await ctx.send(f"🪙 **رصيد ميزانية السيرفر المتاحة للصرف:** `{budget:,}` Cosmo.")
+        await ctx.send(f"🪙 **رصيد ميزانية السيرفر المتاحة للصرف:** `{budget:,}` {get_currency_label(ctx.guild.id)}.")
 
     @commands.hybrid_command(
         name="set_server_budget",
@@ -296,12 +308,13 @@ class Admin(commands.Cog):
 
         target_guild = self.bot.get_guild(target_guild_id)
         g_name = target_guild.name if target_guild else f"السيرفر (`{target_guild_id}`)"
+        currency_label = get_currency_label(target_guild_id)
 
         await ctx.send(
             f"🎯 **تم تعيين ميزانية السيرفر بنجاح!**\n"
             f"• **السيرفر المستهدف:** {g_name}\n"
-            f"• **الميزانية السابقة:** `{current_budget:,}` Cosmo\n"
-            f"• **الميزانية المحددة الجديدة:** `{parsed:,}` Cosmo"
+            f"• **الميزانية السابقة:** `{current_budget:,}` {currency_label}\n"
+            f"• **الميزانية المحددة الجديدة:** `{parsed:,}` {currency_label}"
         )
 
     @commands.hybrid_command(
@@ -312,6 +325,7 @@ class Admin(commands.Cog):
     async def add_server_budget(self, ctx: commands.Context, amount: str):
         if not await check_is_owner(self.bot, ctx):
             return await ctx.send("⛔ هذا الأمر متاح فقط لمالك ومطور البوت الأساسي.")
+        currency_label = get_currency_label(ctx.guild.id if ctx.guild else None)
 
         try:
             parsed = parse_amount(amount)
@@ -340,9 +354,9 @@ class Admin(commands.Cog):
 
         await ctx.send(
             f"🏦 **تمت إضافة ميزانية جديدة للسيرفر بنجاح!**\n"
-            f"• **المبلغ المضاف:** `+{parsed:,}` Cosmo\n"
-            f"• **الميزانية السابقة:** `{current_budget:,}` Cosmo\n"
-            f"• **إجمالي الميزانية المتاحة الآن:** `{new_total_budget:,}` Cosmo"
+            f"• **المبلغ المضاف:** `+{parsed:,}` {currency_label}\n"
+            f"• **الميزانية السابقة:** `{current_budget:,}` {currency_label}\n"
+            f"• **إجمالي الميزانية المتاحة الآن:** `{new_total_budget:,}` {currency_label}"
         )
 
     @commands.hybrid_command(
@@ -353,6 +367,7 @@ class Admin(commands.Cog):
     async def remove_server_budget(self, ctx: commands.Context, amount: str):
         if not await check_is_owner(self.bot, ctx):
             return await ctx.send("⛔ هذا الأمر متاح فقط لمالك ومطور البوت الأساسي.")
+        currency_label = get_currency_label(ctx.guild.id if ctx.guild else None)
 
         try:
             parsed = parse_amount(amount)
@@ -364,7 +379,7 @@ class Admin(commands.Cog):
         current_budget = get_server_spending_balance(ctx.guild.id)
         if current_budget < parsed:
             return await ctx.send(
-                f"❌ لا يمكن الخصم: المبلغ المطلوب خصمه (`{parsed:,}`) أكبر من ميزانية السيرفر الحالية (`{current_budget:,}` Cosmo)."
+                f"❌ لا يمكن الخصم: المبلغ المطلوب خصمه (`{parsed:,}`) أكبر من ميزانية السيرفر الحالية (`{current_budget:,}` {currency_label})."
             )
 
         new_total_budget = current_budget - parsed
@@ -382,9 +397,9 @@ class Admin(commands.Cog):
 
         await ctx.send(
             f"📉 **تم خصم مبلغ من ميزانية السيرفر بنجاح!**\n"
-            f"• **المبلغ المخصوم:** `-{parsed:,}` Cosmo\n"
-            f"• **الميزانية السابقة:** `{current_budget:,}` Cosmo\n"
-            f"• **الميزانية المتبقية الآن:** `{new_total_budget:,}` Cosmo"
+            f"• **المبلغ المخصوم:** `-{parsed:,}` {currency_label}\n"
+            f"• **الميزانية السابقة:** `{current_budget:,}` {currency_label}\n"
+            f"• **الميزانية المتبقية الآن:** `{new_total_budget:,}` {currency_label}"
         )
 
     @commands.hybrid_command(
@@ -403,14 +418,15 @@ class Admin(commands.Cog):
         )
         rows = g_cur.fetchall()
         current_pool = get_server_spending_balance(ctx.guild.id)
+        currency_label = get_currency_label(ctx.guild.id)
         g_conn.close()
 
         if not rows:
-            return await ctx.send(f"ℹ️ لا توجد أي عمليات مسجلة في ميزانية السيرفر حتى الآن.\n🪙 **الميزانية الحالية:** `{current_pool:,}` Cosmo.")
+            return await ctx.send(f"ℹ️ لا توجد أي عمليات مسجلة في ميزانية السيرفر حتى الآن.\n🪙 **الميزانية الحالية:** `{current_pool:,}` {currency_label}.")
 
         embed = discord.Embed(
             title=f"📋 سجل ميزانية السيرفر | {ctx.guild.name}",
-            description=f"🪙 **الميزانية المتاحة حالياً:** `{current_pool:,}` Cosmo\n\nعرض آخر **5** عمليات تمت على الميزانية:",
+            description=f"🪙 **الميزانية المتاحة حالياً:** `{current_pool:,}` {currency_label}\n\nعرض آخر **5** عمليات تمت على الميزانية:",
             color=discord.Color.gold()
         )
 
@@ -418,7 +434,7 @@ class Admin(commands.Cog):
             action_icon = "🟢 إضافة" if action == "إضافة" else "🔴 خصم"
             details = (
                 f"• **نوع العملية:** {action_icon}\n"
-                f"• **المبلغ:** `{amt:,}` Cosmo\n"
+                f"• **المبلغ:** `{amt:,}` {currency_label}\n"
                 f"• **الرصيد:** من `{old_b:,}` ➔ إلى `{new_b:,}`\n"
                 f"• **المسؤول:** <@{admin_id}> (`{admin_id}`)\n"
                 f"• **التاريخ:** `{t_stamp}`"
@@ -482,7 +498,7 @@ class Admin(commands.Cog):
     @commands.hybrid_command(name="premium_status", aliases=["حالة_البريميوم"], description="عرض تفاصيل اشتراك البريميوم في هذا السيرفر والوقت المتبقي")
     async def premium_status(self, ctx: commands.Context):
         g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute("SELECT activated_at, premium_end, custom_name, custom_avatar_url, custom_banner_url FROM premium_info WHERE guild_id = ?", (ctx.guild.id,))
+        g_cur.execute("SELECT activated_at, premium_end, custom_name, custom_avatar_url, custom_banner_url, custom_currency_name FROM premium_info WHERE guild_id = ?", (ctx.guild.id,))
         row = g_cur.fetchone()
         g_conn.close()
 
@@ -497,7 +513,29 @@ class Admin(commands.Cog):
         embed.add_field(name="🎨 الاسم المخصص", value=f"`{row[2]}`" if row[2] else "الافتراضي", inline=True)
         embed.add_field(name="🖼️ الصورة المخصصة", value="مفعلة ✅" if row[3] else "الافتراضية", inline=True)
         embed.add_field(name="🚩 البنر المخصص", value="مفعل ✅" if len(row) > 4 and row[4] else "الافتراضي", inline=True)
+        embed.add_field(name="🪙 اسم الرصيد المعروض", value=f"`{row[5]}`" if len(row) > 5 and row[5] else "Cosmo (الافتراضي)", inline=True)
         await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="set_currency_name", aliases=["اسم_العملة"], description="تخصيص اسم العرض لرصيد Cosmo في هذا السيرفر (Premium)")
+    async def set_currency_name(self, ctx: commands.Context, *, new_name: str):
+        if not can_manage_bot(ctx):
+            return await ctx.send("⛔ ليس لديك صلاحية إدارة إعدادات السيرفر.")
+        if not is_guild_premium(ctx.guild.id):
+            return await ctx.send("💎 **ميزة Premium:** تخصيص اسم الرصيد يحتاج اشتراكًا نشطًا في هذا السيرفر.")
+        new_name = " ".join(new_name.split())
+        if len(new_name) > 24 or any(not char.isprintable() for char in new_name) or any(char in new_name for char in "@`<>"):
+            return await ctx.send("❌ الاسم يجب أن يكون واضحًا وبحد أقصى 24 حرفًا، ومن دون رموز الإشارات أو backticks.")
+        stored_name = None if not new_name or new_name.casefold() in {"cosmo", "default", "افتراضي"} else new_name
+        g_conn, g_cur = get_guild_db(ctx.guild.id)
+        g_cur.execute(
+            "INSERT INTO premium_info (guild_id, custom_currency_name) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET custom_currency_name = excluded.custom_currency_name",
+            (ctx.guild.id, stored_name),
+        )
+        g_conn.commit()
+        g_conn.close()
+        visible_name = stored_name or "Cosmo"
+        await ctx.send(f"✅ اسم عرض رصيدك في هذا السيرفر أصبح **{visible_name}**. لم يتغير الرصيد نفسه، ولا يتأثر أي سيرفر آخر.")
 
     @commands.hybrid_command(name="set_bot_name", aliases=["تغيير_اسم_البوت"], description="تغيير اسم ولقب البوت داخل هذا السيرفر (بريميوم)")
     async def set_bot_name(self, ctx: commands.Context, new_name: str):
@@ -642,38 +680,57 @@ class Admin(commands.Cog):
 
     @commands.hybrid_command(name="toggle_currency_status", aliases=["قفل_عملة"], description="قفل أو فتح تبديل عملة معينة في السيرفر")
     async def toggle_currency_status(self, ctx: commands.Context, currency_name: str, status: bool):
-        if not can_manage_bot(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية.")
+        if not can_manage_global_exchange(ctx):
+            return await ctx.send(f"⛔ إدارة العملات العامة متاحة لإدارة سيرفر Cosmo فقط (`{COSMO_GUILD_ID}`).")
         val = 1 if status else 0
-        g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute("UPDATE exchange_currencies SET is_active = ? WHERE LOWER(currency_name) = LOWER(?)", (val, currency_name.strip()))
+        existing = get_exchange_currency(currency_name)
+        if not existing:
+            return await ctx.send(f"❌ العملة `{currency_name}` غير موجودة في الكتالوج العام.")
+        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+        g_cur.execute("UPDATE exchange_currencies SET is_active = ? WHERE currency_name = ?", (val, existing[0]))
         g_conn.commit()
         g_conn.close()
         msg = "متاحة للتبديل ✅" if status else "معطلة ومقفلة ⛔"
-        await ctx.send(f"⚙️ عملة **{currency_name}** أصبحت الآن: **{msg}**.")
+        await ctx.send(f"⚙️ العملة العامة **{existing[0]}** أصبحت الآن: **{msg}** في جميع السيرفرات.")
 
-    @commands.hybrid_command(name="add_exchange_currency", aliases=["اضافة_عملة_تبديل"], description="إضافة/تعديل عملة تبديل بالسيرفر")
+    @commands.hybrid_command(name="add_exchange_currency", aliases=["اضافة_عملة_تبديل"], description="إضافة أو تعديل عملة في كتالوج التبديل العام من سيرفر Cosmo")
     async def add_exchange_currency(self, ctx: commands.Context, currency_name: str, rate: float, min_received: float = 0.0):
-        if not can_manage_bot(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية.")
-        g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute(
-            "INSERT OR REPLACE INTO exchange_currencies (currency_name, exchange_rate, is_active, min_received) VALUES (?, ?, 1, ?)",
-            (currency_name.strip(), rate, min_received)
-        )
+        if not can_manage_global_exchange(ctx):
+            return await ctx.send(f"⛔ إدارة العملات العامة متاحة لإدارة سيرفر Cosmo فقط (`{COSMO_GUILD_ID}`).")
+        currency_name = " ".join(currency_name.split())
+        if not currency_name or len(currency_name) > 32 or any(not char.isprintable() for char in currency_name) or any(char in currency_name for char in "@`<>"):
+            return await ctx.send("❌ اسم العملة يجب أن يكون واضحاً وبحد أقصى 32 حرفاً ومن دون رموز الإشارات أو backticks.")
+        if not math.isfinite(rate) or rate <= 0 or not math.isfinite(min_received) or min_received < 0:
+            return await ctx.send("❌ يجب أن يكون السعر أكبر من صفر والحد الأدنى صفراً أو أكثر، وبقيم رقمية صالحة.")
+        existing = get_exchange_currency(currency_name)
+        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+        if existing:
+            g_cur.execute(
+                "UPDATE exchange_currencies SET exchange_rate = ?, min_received = ? WHERE currency_name = ?",
+                (rate, min_received, existing[0]),
+            )
+            currency_name = existing[0]
+        else:
+            g_cur.execute(
+                "INSERT INTO exchange_currencies (currency_name, exchange_rate, is_active, min_received) VALUES (?, ?, 1, ?)",
+                (currency_name, rate, min_received),
+            )
         g_conn.commit()
         g_conn.close()
-        await ctx.send(f"✅ تم ضبط عملة **{currency_name}**:\n• السعر: `1 Cosmo = {rate} {currency_name}`\n• الحد الأدنى: `{min_received} {currency_name}`.")
+        await ctx.send(f"✅ تم تحديث العملة العامة **{currency_name}** لكل السيرفرات:\n• السعر: `1 Cosmo = {rate:g} {currency_name}`\n• الحد الأدنى: `{min_received:g} {currency_name}`.")
 
-    @commands.hybrid_command(name="delete_exchange_currency", aliases=["حذف_عملة_تبديل"], description="حذف عملة من قائمة التبديل في هذا السيرفر")
+    @commands.hybrid_command(name="delete_exchange_currency", aliases=["حذف_عملة_تبديل"], description="حذف عملة من كتالوج التبديل العام من سيرفر Cosmo")
     async def delete_exchange_currency(self, ctx: commands.Context, currency_name: str):
-        if not can_manage_bot(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية.")
-        g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute("DELETE FROM exchange_currencies WHERE LOWER(currency_name) = LOWER(?)", (currency_name.strip(),))
+        if not can_manage_global_exchange(ctx):
+            return await ctx.send(f"⛔ إدارة العملات العامة متاحة لإدارة سيرفر Cosmo فقط (`{COSMO_GUILD_ID}`).")
+        existing = get_exchange_currency(currency_name)
+        if not existing:
+            return await ctx.send(f"❌ العملة `{currency_name}` غير موجودة في الكتالوج العام.")
+        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+        g_cur.execute("DELETE FROM exchange_currencies WHERE currency_name = ?", (existing[0],))
         g_conn.commit()
         g_conn.close()
-        await ctx.send(f"🗑️ تم حذف العملة **{currency_name}** بنجاح.")
+        await ctx.send(f"🗑️ تم حذف العملة العامة **{existing[0]}** من قائمة جميع السيرفرات.")
 
     @commands.hybrid_command(name="set_admin_role", aliases=["رتبة_المسؤول"], description="تعيين رتبة مسؤولي البوت")
     async def set_admin_role(self, ctx: commands.Context, role: discord.Role):
