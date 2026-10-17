@@ -6,6 +6,8 @@ import re
 import math
 import random
 import io
+import threading
+from contextlib import closing
 import discord
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -16,7 +18,9 @@ if not os.path.exists("guilds_data"):
     os.makedirs("guilds_data")
 
 # قاعدة البيانات المركزية العامة
-global_conn = sqlite3.connect("global_cosmo.db", check_same_thread=False)
+GLOBAL_DB_PATH = os.path.abspath("global_cosmo.db")
+_balance_lock = threading.RLock()
+global_conn = sqlite3.connect(GLOBAL_DB_PATH, check_same_thread=False, timeout=10)
 global_cursor = global_conn.cursor()
 
 global_cursor.execute('''CREATE TABLE IF NOT EXISTS balances (
@@ -85,7 +89,8 @@ def get_guild_db(guild_id: int):
         premium_end INTEGER DEFAULT 0,
         custom_name TEXT,
         custom_avatar_url TEXT,
-        custom_banner_url TEXT
+        custom_banner_url TEXT,
+        custom_currency_name TEXT
     )''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS exchange_currencies (
@@ -169,6 +174,11 @@ def get_guild_db(guild_id: int):
     except sqlite3.OperationalError:
         pass
 
+    try:
+        cur.execute("ALTER TABLE premium_info ADD COLUMN custom_currency_name TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     return conn, cur
 
@@ -190,6 +200,49 @@ def is_guild_premium(guild_id: int) -> bool:
     if row and row[0]:
         return int(time.time()) < row[0]
     return False
+
+def get_currency_label(guild_id: int | None = None) -> str:
+    """اسم العرض لرصيد Cosmo في سيرفر بعينه؛ لا ينشئ عملة أو رصيداً منفصلاً."""
+    if guild_id is None:
+        return "Cosmo"
+    g_conn, g_cur = get_guild_db(guild_id)
+    try:
+        g_cur.execute(
+            "SELECT custom_currency_name, premium_end FROM premium_info WHERE guild_id = ?",
+            (guild_id,),
+        )
+        row = g_cur.fetchone()
+        label = row[0].strip() if row and row[0] and row[1] and int(row[1]) > int(time.time()) else ""
+        if not label:
+            return "Cosmo"
+        return label.replace("@", "@\u200b").replace("`", "ˋ").replace("<", "‹").replace(">", "›")
+    finally:
+        g_conn.close()
+
+def get_exchange_currencies(active_only: bool = False):
+    """الكتالوج المشترك؛ قاعدة سيرفر Cosmo هي المصدر الوحيد لكل السيرفرات."""
+    g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+    try:
+        query = "SELECT currency_name, exchange_rate, is_active, min_received FROM exchange_currencies"
+        if active_only:
+            query += " WHERE is_active = 1"
+        query += " ORDER BY LOWER(currency_name), currency_name"
+        g_cur.execute(query)
+        return g_cur.fetchall()
+    finally:
+        g_conn.close()
+
+def get_exchange_currency(currency_name: str):
+    g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+    try:
+        g_cur.execute(
+            "SELECT currency_name, exchange_rate, is_active, min_received "
+            "FROM exchange_currencies WHERE LOWER(currency_name) = LOWER(?)",
+            (currency_name.strip(),),
+        )
+        return g_cur.fetchone()
+    finally:
+        g_conn.close()
 
 def is_bot_admin(ctx):
     if ctx.author.id == PRIMARY_OWNER_ID:
@@ -257,14 +310,131 @@ def is_blacklisted(member: discord.Member) -> bool:
     return False
 
 def get_balance(user_id):
-    global_cursor.execute("SELECT balance FROM balances WHERE user_id = ?", (user_id,))
-    row = global_cursor.fetchone()
-    return row[0] if row else 0
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        row = conn.execute("SELECT balance FROM balances WHERE user_id = ?", (user_id,)).fetchone()
+        return row[0] if row else 0
 
 def update_balance(user_id, amount):
-    bal = get_balance(user_id) + amount
-    global_cursor.execute("INSERT OR REPLACE INTO balances (user_id, balance) VALUES (?, ?)", (user_id, bal))
-    global_conn.commit()
+    amount = int(amount)
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (user_id,))
+        cur = conn.execute(
+            "UPDATE balances SET balance = balance + ? WHERE user_id = ? AND balance + ? >= 0",
+            (amount, user_id, amount),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            raise ValueError("رصيد غير كافٍ لإتمام الخصم.")
+        conn.commit()
+        return conn.execute("SELECT balance FROM balances WHERE user_id = ?", (user_id,)).fetchone()[0]
+
+def debit_balance(user_id, amount: int) -> bool:
+    amount = int(amount)
+    if amount <= 0:
+        raise ValueError("يجب أن يكون مبلغ الخصم موجباً.")
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE balances SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+            (amount, user_id, amount),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+def transfer_balance(sender_id: int, receiver_id: int, amount: int, timestamp: str) -> bool:
+    amount = int(amount)
+    if amount <= 0 or sender_id == receiver_id:
+        return False
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (sender_id,))
+        cur = conn.execute(
+            "UPDATE balances SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+            (amount, sender_id, amount),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return False
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (receiver_id,))
+        conn.execute("UPDATE balances SET balance = balance + ? WHERE user_id = ?", (amount, receiver_id))
+        conn.execute(
+            "INSERT INTO transfer_logs (sender_id, receiver_id, amount, timestamp) VALUES (?, ?, ?, ?)",
+            (sender_id, receiver_id, amount, timestamp),
+        )
+        conn.commit()
+        return True
+
+def has_pending_exchange_request(user_id: int) -> bool:
+    with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM exchange_logs WHERE user_id = ? AND status = 'قيد الانتظار' LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        return row is not None
+
+def create_exchange_request(guild_id: int, user_id: int, amount: int, currency: str,
+                            received_amount: float, note: str, timestamp: str):
+    amount = int(amount)
+    if amount <= 0:
+        return None
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        pending = conn.execute(
+            "SELECT 1 FROM exchange_logs WHERE user_id = ? AND status = 'قيد الانتظار' LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if pending:
+            conn.rollback()
+            return None
+        cur = conn.execute(
+            "UPDATE balances SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+            (amount, user_id, amount),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        cur = conn.execute(
+            "INSERT INTO exchange_logs (guild_id, user_id, cosmo_amount, target_currency, received_amount, note, status, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'قيد الانتظار', ?)",
+            (guild_id, user_id, amount, currency, received_amount, note, timestamp),
+        )
+        request_id = cur.lastrowid
+        conn.commit()
+        return request_id
+
+def accept_exchange_request(request_id: int) -> bool:
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE exchange_logs SET status = 'تم القبول' WHERE id = ? AND status = 'قيد الانتظار'",
+            (request_id,),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+def deny_exchange_request(request_id: int):
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT user_id, cosmo_amount FROM exchange_logs WHERE id = ? AND status = 'قيد الانتظار'",
+            (request_id,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        cur = conn.execute(
+            "UPDATE exchange_logs SET status = 'مرفوض' WHERE id = ? AND status = 'قيد الانتظار'",
+            (request_id,),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        user_id, amount = row
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (user_id,))
+        conn.execute("UPDATE balances SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        conn.commit()
+        return row
 
 def parse_amount(amount_str: str) -> int:
     amount_str = str(amount_str).strip().lower()
