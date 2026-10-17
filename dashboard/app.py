@@ -387,7 +387,6 @@ def manage(guild_id):
             action = request.form.get("action")
             
             if action == "save_settings":
-                exchange_enabled = 1 if request.form.get("exchange_enabled") == "on" else 0
                 transfer_log = request.form.get("transfer_log") or None
                 delivery_log = request.form.get("delivery_log") or None
                 balance_log = request.form.get("balance_log") or None
@@ -396,17 +395,16 @@ def manage(guild_id):
 
                 cur.execute("""
                     INSERT INTO settings (
-                        guild_id, exchange_enabled, transfer_log, delivery_log,
+                        guild_id, transfer_log, delivery_log,
                         balance_log, exchange_success_log, ticket_log
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(guild_id) DO UPDATE SET
-                        exchange_enabled = excluded.exchange_enabled,
                         transfer_log = excluded.transfer_log,
                         delivery_log = excluded.delivery_log,
                         balance_log = excluded.balance_log,
                         exchange_success_log = excluded.exchange_success_log,
                         ticket_log = excluded.ticket_log
-                """, (guild_id, exchange_enabled, transfer_log, delivery_log, balance_log, exchange_success_log, ticket_log))
+                """, (guild_id, transfer_log, delivery_log, balance_log, exchange_success_log, ticket_log))
                 conn.commit()
                 flash("تم حفظ إعدادات السيرفر وجميع اللوجات بنجاح!", "success")
                 conn.close()
@@ -510,7 +508,7 @@ def manage(guild_id):
         s_row = cur.fetchone()
 
         spending_balance = s_row[0] if s_row and s_row[0] is not None else 0
-        exchange_enabled = s_row[1] if s_row and s_row[1] is not None else 1
+        exchange_enabled = 1 if database.is_global_exchange_enabled() else 0
         transfer_log = str(s_row[2] or "") if s_row else ""
         delivery_log = str(s_row[3] or "") if s_row else ""
         balance_log = str(s_row[4] or "") if s_row else ""
@@ -625,6 +623,7 @@ def profile():
         and math.isfinite(float(minimum)) and float(minimum) >= 0
     ]
 
+    global_exchange_enabled = database.is_global_exchange_enabled()
     eligible_guilds = []
     guilds_dict = {}
     if isinstance(user_guilds, list):
@@ -635,20 +634,18 @@ def profile():
                 continue
             guilds_dict[gid] = g.get("name", f"Server {gid}")
             manageable = guild_can_manage_exchange(g)
-            if manageable and gid in bot_guild_ids and currencies_data:
+            if global_exchange_enabled and manageable and gid in bot_guild_ids and currencies_data:
                 try:
                     s_conn, s_cur = get_guild_db(gid)
-                    s_cur.execute("SELECT exchange_enabled, delivery_log FROM settings WHERE guild_id = ?", (gid,))
+                    s_cur.execute("SELECT delivery_log FROM settings WHERE guild_id = ?", (gid,))
                     set_row = s_cur.fetchone()
-                    ex_enabled = set_row[0] if set_row and set_row[0] is not None else 1
-                    deliv_log_id = set_row[1] if set_row and len(set_row) > 1 else None
+                    deliv_log_id = set_row[0] if set_row else None
                     s_conn.close()
-                    if ex_enabled == 1:
-                        g_data = dict(g)
-                        g_data["currencies"] = currencies_data
-                        g_data["delivery_log"] = deliv_log_id
-                        g_data["currency_label"] = database.get_currency_label(gid)
-                        eligible_guilds.append(g_data)
+                    g_data = dict(g)
+                    g_data["currencies"] = currencies_data
+                    g_data["delivery_log"] = deliv_log_id
+                    g_data["currency_label"] = database.get_currency_label(gid)
+                    eligible_guilds.append(g_data)
                 except Exception as ex:
                     print(f"[DEBUG] Check eligible guild {gid} error: {ex}")
 
@@ -706,6 +703,9 @@ def profile():
 
     # 5. معالجة طلب التبديل (مثل أمر exchange)
     if request.method == "POST":
+        if not global_exchange_enabled:
+            flash("⛔ نظام التبديل مغلق عالميًا من سيرفر Cosmo حاليًا.", "danger")
+            return redirect(url_for("profile"))
         target_guild_id = request.form.get("guild_id", "")
         currency_name = request.form.get("currency_name", "").strip()
         amount_input = request.form.get("cosmo_amount", "").strip()
@@ -767,7 +767,16 @@ def profile():
         req_channel_id = global_req_row[0]
 
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        req_id = create_exchange_request(gid, user_id, parsed_amount, currency_name, total_received, note, now_str)
+        try:
+            req_id = create_exchange_request(gid, user_id, parsed_amount, currency_name, total_received, note, now_str)
+        except database.ExchangeSystemClosed:
+            g_conn.close()
+            flash("⛔ أُغلق نظام التبديل عالميًا قبل حفظ الطلب؛ لم يُخصم أي رصيد.", "danger")
+            return redirect(url_for("profile"))
+        except database.ExchangeCurrencyUnavailable:
+            g_conn.close()
+            flash("⚠️ تغيرت حالة العملة أو سعرها قبل حفظ الطلب؛ لم يُخصم أي رصيد. أعد تحميل الصفحة وحاول مجددًا.", "warning")
+            return redirect(url_for("profile"))
         if req_id is None:
             g_conn.close()
             if database.has_pending_exchange_request(user_id):
@@ -846,7 +855,8 @@ def profile():
         balance=balance,
         transfers=transfers,
         exchanges=exchanges,
-        guilds=eligible_guilds
+        guilds=eligible_guilds,
+        exchange_open=global_exchange_enabled
     )
 
 def run_dashboard():

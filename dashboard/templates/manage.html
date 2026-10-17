@@ -74,14 +74,18 @@
         </div>
 
         <div class="card p-4 mb-4">
-            <h5 class="text-white fw-bold mb-3">⚙️ قفل التبديل ورومات لوجات السيرفر</h5>
+            <h5 class="text-white fw-bold mb-3">⚙️ حالة التبديل العام ورومات لوجات السيرفر</h5>
             <form method="POST">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="save_settings">
                 
-                <div class="form-check form-switch mb-4">
-                    <input class="form-check-input" type="checkbox" name="exchange_enabled" id="exchangeSwitch" {% if settings.exchange_enabled == 1 %}checked{% endif %}>
-                    <label class="form-check-label text-white fw-semibold" for="exchangeSwitch">تفعيل التبديل في السيرفر</label>
+                <div class="alert {% if settings.exchange_enabled == 1 %}alert-success{% else %}alert-danger{% endif %} mb-4">
+                    {% if settings.exchange_enabled == 1 %}
+                        التبديل مفتوح عالميًا في جميع السيرفرات.
+                    {% else %}
+                        التبديل مغلق عالميًا في جميع السيرفرات.
+                    {% endif %}
+                    <div class="small mt-1">إدارة الفتح والإغلاق تتم من سيرفر Cosmo فقط عبر `/toggle_exchange_system`؛ أما لوجات هذا السيرفر فتظل محلية. إغلاق السوق يمنع الطلبات الجديدة فقط، والطلبات المعلقة تبقى للمعالجة.</div>
                 </div>
 
                 <!-- 1. لوج التحويلات -->

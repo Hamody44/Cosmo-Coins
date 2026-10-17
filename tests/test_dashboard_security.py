@@ -94,6 +94,7 @@ class DashboardSecurityTests(unittest.TestCase):
              patch("dashboard.app.get_bot_guild_ids", return_value={123}), \
              patch("dashboard.app.database.get_exchange_currencies", return_value=[("Gems", 2.0, 1, 0.0)]), \
              patch("dashboard.app.database.get_currency_label", return_value="Cosmo"), \
+             patch("dashboard.app.database.is_global_exchange_enabled", return_value=True), \
              patch("dashboard.app.get_guild_db", return_value=(Connection(), SettingsCursor())), \
              patch("dashboard.app.get_global_db", return_value=(Connection(), EmptyCursor())), \
              patch("dashboard.app.get_balance", return_value=1000):
@@ -151,6 +152,7 @@ class DashboardSecurityTests(unittest.TestCase):
              patch("dashboard.app.database.get_exchange_currencies", return_value=[("Gems", 2.0, 1, 0.0)]), \
              patch("dashboard.app.database.get_exchange_currency", return_value=("Gems", 2.0, 1, 0.0)), \
              patch("dashboard.app.database.get_currency_label", return_value="Cosmo"), \
+             patch("dashboard.app.database.is_global_exchange_enabled", return_value=True), \
              patch("dashboard.app.get_guild_db", return_value=(Connection(), SettingsCursor())), \
              patch("dashboard.app.get_global_db", return_value=(Connection(), GlobalCursor())), \
              patch("dashboard.app.get_balance", return_value=1000), \
@@ -165,6 +167,77 @@ class DashboardSecurityTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(create_request.call_args.args[:5], (123, 456, 200, "Gems", 400.0))
+
+    def test_profile_blocks_exchange_post_when_global_switch_is_closed(self):
+        class GuildResponse:
+            status_code = 200
+            def json(self):
+                return [{"id": "123", "name": "No Premium Guild", "owner": True, "permissions": "0"}]
+
+        with self.client.session_transaction() as session:
+            session["user"] = {"id": "456", "username": "test"}
+            session["access_token"] = "test-token"
+            session["csrf_token"] = "valid-csrf"
+
+        with patch("dashboard.app.requests.get", return_value=GuildResponse()), \
+             patch("dashboard.app.database.is_global_exchange_enabled", return_value=False), \
+             patch("dashboard.app.get_bot_guild_ids", return_value={123}), \
+             patch("dashboard.app.get_balance", return_value=1000), \
+             patch("dashboard.app.create_exchange_request") as create_request:
+            response = self.client.post("/profile", data={
+                "csrf_token": "valid-csrf", "guild_id": "123", "currency_name": "Gems",
+                "cosmo_amount": "200", "notes": "test",
+            })
+
+        self.assertEqual(response.status_code, 302)
+        create_request.assert_not_called()
+
+    def test_profile_handles_global_switch_closing_during_request_creation(self):
+        class Response:
+            status_code = 200
+            def json(self):
+                return [{"id": "123", "name": "Managed Guild", "owner": True, "permissions": "0"}]
+
+        class SettingsCursor:
+            def execute(self, *_args, **_kwargs):
+                pass
+            def fetchone(self):
+                return (None,)
+
+        class GlobalCursor:
+            def execute(self, *_args, **_kwargs):
+                pass
+            def fetchall(self):
+                return []
+            def fetchone(self):
+                return ("999",)
+
+        class Connection:
+            def close(self):
+                pass
+
+        with self.client.session_transaction() as session:
+            session["user"] = {"id": "456", "username": "test"}
+            session["access_token"] = "test-token"
+            session["csrf_token"] = "valid-csrf"
+
+        with patch("dashboard.app.requests.get", return_value=Response()), \
+             patch("dashboard.app.requests.post", return_value=Response()), \
+             patch("dashboard.app.get_bot_guild_ids", return_value={123}), \
+             patch("dashboard.app.database.get_exchange_currencies", return_value=[("Gems", 2.0, 1, 0.0)]), \
+             patch("dashboard.app.database.get_exchange_currency", return_value=("Gems", 2.0, 1, 0.0)), \
+             patch("dashboard.app.database.get_currency_label", return_value="Cosmo"), \
+             patch("dashboard.app.database.is_global_exchange_enabled", return_value=True), \
+             patch("dashboard.app.get_guild_db", return_value=(Connection(), SettingsCursor())), \
+             patch("dashboard.app.get_global_db", return_value=(Connection(), GlobalCursor())), \
+             patch("dashboard.app.get_balance", return_value=1000), \
+             patch("dashboard.app.create_exchange_request", side_effect=dashboard.database.ExchangeSystemClosed):
+            response = self.client.post("/profile", data={
+                "csrf_token": "valid-csrf", "guild_id": "123", "currency_name": "Gems",
+                "cosmo_amount": "200", "notes": "test",
+            })
+
+        self.assertEqual(response.status_code, 302)
 
     def test_session_key_is_not_the_known_weak_default(self):
         self.assertNotEqual(dashboard.app.secret_key, "cosmo_fixed_dashboard_secret_key_2026")
@@ -224,7 +297,8 @@ class DashboardSecurityTests(unittest.TestCase):
         )
         self.assertIn("ticket_log", save_sql)
         self.assertIn("ON CONFLICT(guild_id) DO UPDATE", save_sql)
-        self.assertEqual(save_params, (123, 0, None, None, None, None, "789"))
+        self.assertNotIn("exchange_enabled", save_sql)
+        self.assertEqual(save_params, (123, None, None, None, None, "789"))
         self.assertTrue(connection.committed)
         self.assertTrue(connection.closed)
 

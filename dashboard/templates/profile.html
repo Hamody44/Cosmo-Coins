@@ -55,7 +55,7 @@
                 </div>
             </div>
 
-            {% if guilds|length > 0 %}
+            {% if exchange_open and guilds|length > 0 %}
             <form method="POST" id="exchangeForm">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <!-- 1. اختيار السيرفر المستلم -->
@@ -102,7 +102,11 @@
             <div class="text-center py-5">
                 <div class="fs-1 mb-2">🔒</div>
                 <h5 class="text-white fw-bold">لا توجد سيرفرات مؤهلة حاليًا</h5>
-                <p class="text-muted-custom mb-0">تحتاج أن تكون مالكًا أو مسؤولًا في سيرفر يوجد به البوت ونظام التبديل فيه مفتوح؛ لا يلزم Premium.</p>
+                {% if not exchange_open %}
+                    <p class="text-muted-custom mb-0">نظام التبديل مغلق عالميًا من سيرفر Cosmo حاليًا؛ ستعود القائمة عند فتحه.</p>
+                {% else %}
+                    <p class="text-muted-custom mb-0">تحتاج أن تكون مالكًا أو مسؤولًا في سيرفر يوجد به البوت؛ لا يلزم Premium.</p>
+                {% endif %}
             </div>
             {% endif %}
         </div>

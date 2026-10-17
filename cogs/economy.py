@@ -8,7 +8,8 @@ from database import (
     is_blacklisted, is_bot_admin, global_cursor, get_guild_db, PRIMARY_OWNER_ID,
     send_global_action_log, transfer_balance, create_exchange_request,
     accept_exchange_request, deny_exchange_request, get_currency_label,
-    get_exchange_currencies, get_exchange_currency, has_pending_exchange_request
+    get_exchange_currencies, get_exchange_currency, has_pending_exchange_request,
+    is_global_exchange_enabled, ExchangeSystemClosed, ExchangeCurrencyUnavailable
 )
 
 def can_manage_exchange_request(ctx: commands.Context, origin_guild_id: int) -> bool:
@@ -164,6 +165,8 @@ class Economy(commands.Cog):
 
     @commands.hybrid_command(name="exchange_list", aliases=["قائمة_العملات"], description="عرض العملات العامة المتاحة للتبديل")
     async def exchange_list(self, ctx: commands.Context):
+        if not is_global_exchange_enabled():
+            return await ctx.send("⛔ نظام التبديل مغلق عالميًا من سيرفر Cosmo حاليًا.")
         rows = get_exchange_currencies(active_only=True)
         if not rows:
             return await ctx.send("⚠️ لا توجد عملات مفعّلة للتبديل حاليًا في الكتالوج العام.")
@@ -203,13 +206,11 @@ class Economy(commands.Cog):
     @commands.hybrid_command(name="exchange", aliases=["تبديل"], description="طلب تبديل عملات Cosmo إلى عملة أخرى")
     async def exchange(self, ctx: commands.Context, currency_name: str, amount: str, *, note: str = "لا يوجد"):
         currency_label = get_currency_label(ctx.guild.id if ctx.guild else None)
+        if not is_global_exchange_enabled():
+            return await ctx.send("⛔ نظام التبديل مغلق عالميًا من سيرفر Cosmo حاليًا.")
         g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute("SELECT exchange_enabled, delivery_log FROM settings WHERE guild_id = ?", (ctx.guild.id,))
+        g_cur.execute("SELECT delivery_log FROM settings WHERE guild_id = ?", (ctx.guild.id,))
         s_row = g_cur.fetchone()
-
-        if s_row and s_row[0] == 0:
-            g_conn.close()
-            return await ctx.send("⛔ نظام التبديل مقفل حالياً في هذا السيرفر من قبل الإدارة.")
 
         try:
             parsed_amount = parse_amount(amount)
@@ -239,7 +240,7 @@ class Economy(commands.Cog):
             g_conn.close()
             return await ctx.send(f"❌ تم رفض طلبك تلقائياً: المبلغ المستحق (`{total_received} {currency_name}`) أقل من الحد الأدنى وهو `{min_recv} {currency_name}`.")
 
-        delivery_log_id = s_row[1] if s_row and len(s_row) > 1 and s_row[1] else None
+        delivery_log_id = s_row[0] if s_row and s_row[0] else None
         g_conn.close()
 
         global_cursor.execute("SELECT value FROM global_settings WHERE key = 'global_request_log'")
@@ -253,7 +254,12 @@ class Economy(commands.Cog):
             return await ctx.send("❌ روم استقبال طلبات التبديل العام غير متاح حالياً.")
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        req_id = create_exchange_request(ctx.guild.id, ctx.author.id, parsed_amount, currency_name, total_received, note, now)
+        try:
+            req_id = create_exchange_request(ctx.guild.id, ctx.author.id, parsed_amount, currency_name, total_received, note, now)
+        except ExchangeSystemClosed:
+            return await ctx.send("⛔ أُغلق نظام التبديل عالميًا قبل حفظ الطلب؛ لم يُخصم أي رصيد.")
+        except ExchangeCurrencyUnavailable:
+            return await ctx.send("⚠️ تغيرت حالة العملة أو سعرها قبل حفظ الطلب؛ لم يُخصم أي رصيد. أعد تحميل `/exchange_list` ثم حاول مجددًا.")
         if req_id is None:
             if has_pending_exchange_request(ctx.author.id):
                 return await ctx.send("⏳ لديك طلب تبديل سابق قيد الانتظار؛ لم يُخصم أي مبلغ جديد. انتظر معالجته قبل إنشاء طلب آخر.")

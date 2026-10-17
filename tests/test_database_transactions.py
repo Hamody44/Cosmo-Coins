@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 import database
 
@@ -10,6 +11,7 @@ class FinancialTransactionTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         database.GLOBAL_DB_PATH = os.path.join(self.temp_dir.name, "global.db")
+        self.cosmo_db_path = os.path.join(self.temp_dir.name, "cosmo.db")
         with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
             conn.executescript(
                 """
@@ -26,8 +28,30 @@ class FinancialTransactionTests(unittest.TestCase):
                 );
                 """
             )
+        with database.sqlite3.connect(self.cosmo_db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE settings (guild_id INTEGER PRIMARY KEY, exchange_enabled INTEGER DEFAULT 1);
+                CREATE TABLE exchange_currencies (
+                    currency_name TEXT PRIMARY KEY, exchange_rate REAL, is_active INTEGER DEFAULT 1,
+                    min_received REAL DEFAULT 0
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO exchange_currencies (currency_name, exchange_rate, is_active, min_received) "
+                "VALUES ('Gems', 0.1, 1, 0)"
+            )
+
+        def get_test_guild_db(_guild_id):
+            conn = database.sqlite3.connect(self.cosmo_db_path, timeout=10)
+            return conn, conn.cursor()
+
+        self.guild_db_patch = patch.object(database, "get_guild_db", side_effect=get_test_guild_db)
+        self.guild_db_patch.start()
 
     def tearDown(self):
+        self.guild_db_patch.stop()
         self.temp_dir.cleanup()
 
     def balance(self, user_id):
@@ -55,6 +79,20 @@ class FinancialTransactionTests(unittest.TestCase):
         self.assertEqual(self.balance(11), 50)
         with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM exchange_logs").fetchone()[0], 1)
+
+    def test_exchange_rejects_stale_rate_or_inactive_currency_before_debit(self):
+        database.update_balance(16, 500)
+        with database.sqlite3.connect(self.cosmo_db_path) as conn:
+            conn.execute("UPDATE exchange_currencies SET exchange_rate = 0.2 WHERE currency_name = 'Gems'")
+        with self.assertRaises(database.ExchangeCurrencyUnavailable):
+            database.create_exchange_request(99, 16, 200, "Gems", 20.0, "stale quote", "now")
+        self.assertEqual(self.balance(16), 500)
+
+        with database.sqlite3.connect(self.cosmo_db_path) as conn:
+            conn.execute("UPDATE exchange_currencies SET is_active = 0 WHERE currency_name = 'Gems'")
+        with self.assertRaises(database.ExchangeCurrencyUnavailable):
+            database.create_exchange_request(99, 16, 200, "Gems", 40.0, "inactive currency", "later")
+        self.assertEqual(self.balance(16), 500)
 
     def test_exchange_rejection_refunds_exactly_once(self):
         database.update_balance(12, 300)

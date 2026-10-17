@@ -7,13 +7,145 @@ import random
 import asyncio
 import base64
 import math
+import re
+import unicodedata
 from datetime import datetime
 from database import (
     check_is_owner, is_bot_admin, is_guild_premium, parse_duration,
     parse_amount, get_guild_db, global_cursor, global_conn, PRIMARY_OWNER_ID,
     deduct_server_spending, update_balance, debit_balance, is_blacklisted, get_server_spending_balance,
-    send_global_action_log, COSMO_GUILD_ID, get_exchange_currency, get_currency_label
+    send_global_action_log, COSMO_GUILD_ID, get_currency_label,
+    set_exchange_currency_status, upsert_exchange_currency, delete_exchange_currency,
+    create_budget_payment_order, settle_budget_payment, is_auto_budget_payment_enabled,
+    set_auto_budget_payment_enabled, set_global_exchange_enabled,
+    PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID
 )
+
+PROBOT_ID = PROBOT_PAYMENT_BOT_ID
+ADAMC_ID = ADAMC_PAYMENT_BOT_ID
+AUTO_BUDGET_PAYMENT_TTL = 5 * 60
+MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
+
+def parse_budget_payment_confirmation(method: str, author_id: int, text: str):
+    """Parse only the user-provided receipt shape; caller must also validate message guild/channel/time."""
+    method = method.strip().lower()
+    expected_author = {"credit": PROBOT_ID, "adamc": ADAMC_ID}.get(method)
+    if not expected_author or int(author_id) != expected_author:
+        return None
+    if method == "credit":
+        pattern = re.compile(
+            r"(?:\*\*\s*)?ـ\s*(?P<sender>[^,*\n]+?)\s*,\s*قام\s+بتحويل\s+`?\$?(?P<amount>[\d,]+)`?\s+لـ\s*<@!?(?P<recipient>\d+)>"
+        )
+    else:
+        pattern = re.compile(
+            r"💰\s*\|\s*\*\*(?P<sender>[^*\n]+?)\*\*,\s*has transferred\s+\*\*\$?(?P<amount>[\d,]+)\*\*\s+to\s+<@!?(?P<recipient>\d+)>\.?",
+            re.IGNORECASE,
+        )
+    match = pattern.search(text or "")
+    if not match:
+        return None
+    try:
+        amount = int(match.group("amount").replace(",", ""))
+        recipient_id = int(match.group("recipient"))
+    except (TypeError, ValueError):
+        return None
+    sender = unicodedata.normalize("NFKC", match.group("sender")).strip().casefold()
+    if not sender or amount <= 0:
+        return None
+    return {"sender": sender, "amount": amount, "recipient_id": recipient_id}
+
+class AutoBudgetPaymentSelect(discord.ui.Select):
+    def __init__(self, bot, user_id: int, budget_amount: int, methods: list[str]):
+        self.bot = bot
+        self.user_id = user_id
+        self.budget_amount = budget_amount
+        labels = {
+            "credit": ("Credits عبر ProBot", "credit"),
+            "adamc": ("AdamC", "adamc"),
+            "crypto": ("كريبتو (LTC)", "crypto"),
+        }
+        options = [discord.SelectOption(label=labels[m][0], value=labels[m][1]) for m in methods]
+        super().__init__(placeholder="اختر وسيلة الدفع", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("هذه القائمة تخص الشخص الذي بدأ الطلب فقط.", ephemeral=True)
+
+        method = self.values[0]
+        if not is_auto_budget_payment_enabled(method):
+            return await interaction.response.send_message("⛔ وسيلة الدفع هذه مغلقة حاليًا. شغّل أمر الشراء من جديد بعد تفعيلها.", ephemeral=True)
+
+        if method == "crypto":
+            message = (
+                f"لإضافة الميزانية عبر كريبتو (LTC)، يرجى التواصل مع مطور البوت <@{PRIMARY_OWNER_ID}>.\n"
+                "لا يتم اعتماد تحويلات LTC أو إضافة الميزانية تلقائيًا عبر هذه الطريقة."
+            )
+            await interaction.response.edit_message(
+                content=message,
+                view=None,
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
+            return
+
+        if self.budget_amount % 5 != 0:
+            return await interaction.response.send_message(
+                "للحفاظ على سعر صرف صحيح بلا كسور، يجب أن تكون ميزانية الشحن من مضاعفات 5. ابدأ الأمر بمبلغ مناسب.",
+                ephemeral=True,
+            )
+
+        if method == "credit":
+            expected_payment = self.budget_amount * 6 // 5
+            if expected_payment > MAX_SQLITE_INTEGER:
+                return await interaction.response.send_message("المبلغ كبير جدًا ولا يمكن معالجته بأمان.", ephemeral=True)
+            command = f"#credit {PRIMARY_OWNER_ID} {expected_payment} with tax"
+            method_name = "ProBot Credits"
+        else:
+            expected_payment = self.budget_amount // 5
+            command = f"!transfer {PRIMARY_OWNER_ID} {expected_payment}"
+            method_name = "AdamC"
+
+        now = int(time.time())
+        expires_at = now + AUTO_BUDGET_PAYMENT_TTL
+        payer_name = unicodedata.normalize("NFKC", interaction.user.name).strip().casefold()
+        try:
+            order_id = create_budget_payment_order(
+                guild_id=interaction.guild_id,
+                user_id=interaction.user.id,
+                payer_name=payer_name,
+                channel_id=interaction.channel_id,
+                method=method,
+                budget_amount=self.budget_amount,
+                expected_payment=expected_payment,
+                created_at=now,
+                expires_at=expires_at,
+            )
+        except Exception as exc:
+            print(f"Auto budget order creation failed: {exc}")
+            return await interaction.response.send_message("تعذر إنشاء طلب الشحن الآن؛ لم يُنشأ طلب ولم تُضف ميزانية.", ephemeral=True)
+        if order_id is None:
+            if not is_auto_budget_payment_enabled(method):
+                return await interaction.response.send_message("أُغلقت وسيلة الدفع قبل إنشاء الطلب؛ لم يبدأ مؤقت ولم تُضف ميزانية.", ephemeral=True)
+            return await interaction.response.send_message(
+                "لديك طلب شحن آخر ما زال معلقًا في هذا السيرفر. انتظر انتهاء مهلة الخمس دقائق أو إتمامه قبل إنشاء طلب جديد.",
+                ephemeral=True,
+            )
+
+        message = (
+            f"💳 **طلب شحن ميزانية #{order_id} عبر {method_name}**\n"
+            f"• الميزانية المطلوبة: `{self.budget_amount:,}` Cosmo\n"
+            f"• المبلغ المطلوب تحويله إلى مالك البوت: `{expected_payment:,}`\n"
+            f"• أرسل الأمر التالي من حساب Discord نفسه الذي بدأ الطلب، وفي هذه القناة:\n"
+            f"```{command}```\n"
+            f"يجب أن يطابق اسم الدافع في رسالة التأكيد اسم حسابك في Discord، وأن يصل التأكيد من بوت الدفع الصحيح وبالمبلغ والمستلم المطابقين خلال 5 دقائق (ينتهي <t:{expires_at}:R>). "
+            "لا تعتمد على لقطة شاشة أو رسالة معاد توجيهها؛ لا تُضاف الميزانية إلا بعد مطابقة رسالة البوت الأصلية."
+        )
+        await interaction.response.edit_message(content=message, view=None)
+
+
+class AutoBudgetPaymentView(discord.ui.View):
+    def __init__(self, bot, user_id: int, budget_amount: int, methods: list[str]):
+        super().__init__(timeout=120)
+        self.add_item(AutoBudgetPaymentSelect(bot, user_id, budget_amount, methods))
 
 def can_manage_bot(ctx: commands.Context) -> bool:
     """
@@ -58,6 +190,65 @@ class Admin(commands.Cog):
 
     def cog_unload(self):
         self.auto_backup_task.cancel()
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if not message.guild or not getattr(message.author, "bot", False):
+            return
+        if message.author.id == PROBOT_ID:
+            method = "credit"
+        elif message.author.id == ADAMC_ID:
+            method = "adamc"
+        else:
+            return
+
+        parts = [message.content or ""]
+        for embed in message.embeds:
+            parts.extend([embed.title or "", embed.description or ""])
+            for field in embed.fields:
+                parts.extend([field.name or "", field.value or ""])
+        receipt = parse_budget_payment_confirmation(method, message.author.id, "\n".join(parts))
+        if not receipt or receipt["recipient_id"] != PRIMARY_OWNER_ID:
+            return
+
+        try:
+            result = settle_budget_payment(
+                guild_id=message.guild.id,
+                method=method,
+                channel_id=message.channel.id,
+                payer_name=receipt["sender"],
+                expected_payment=receipt["amount"],
+                payment_message_id=message.id,
+                payment_author_id=message.author.id,
+                payment_timestamp=int(message.created_at.timestamp()),
+                recipient_id=receipt["recipient_id"],
+            )
+        except Exception as exc:
+            print(f"Auto budget payment settlement failed: {exc}")
+            return
+        if not result:
+            return
+
+        currency_label = get_currency_label(message.guild.id)
+        provider = "ProBot Credits" if method == "credit" else "AdamC"
+        notice = (
+            f"✅ تم التحقق من رسالة **{provider}** الأصلية وإضافة "
+            f"`+{result['budget_amount']:,}` {currency_label} إلى ميزانية السيرفر. "
+            f"الرصيد الجديد: `{result['new_balance']:,}` {currency_label}."
+        )
+        try:
+            await message.channel.send(notice, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            pass
+        member = message.guild.get_member(result["user_id"])
+        if member:
+            try:
+                await member.send(
+                    f"✅ اكتمل شحن ميزانية **{message.guild.name}** بطلب `#{result['order_id']}`: "
+                    f"`+{result['budget_amount']:,}` {currency_label}."
+                )
+            except discord.HTTPException:
+                pass
 
     @tasks.loop(hours=24)
     async def auto_backup_task(self):
@@ -316,6 +507,80 @@ class Admin(commands.Cog):
             f"• **الميزانية السابقة:** `{current_budget:,}` {currency_label}\n"
             f"• **الميزانية المحددة الجديدة:** `{parsed:,}` {currency_label}"
         )
+
+    @commands.hybrid_command(
+        name="auto_add_server_budget",
+        aliases=["شحن_ميزانية_تلقائي"],
+        description="بدء طلب شحن ميزانية السيرفر عبر وسيلة دفع مفعلة"
+    )
+    async def auto_add_server_budget(self, ctx: commands.Context, amount: str):
+        if not can_manage_bot(ctx):
+            return await ctx.send("⛔ الأمر متاح لمالك السيرفر أو مسؤول لديه صلاحية إدارة السيرفر فقط.")
+        try:
+            budget_amount = parse_amount(amount)
+        except Exception:
+            return await ctx.send("❌ صيغة المبلغ غير صحيحة.")
+        if budget_amount <= 0 or budget_amount > MAX_SQLITE_INTEGER:
+            return await ctx.send("❌ أدخل ميزانية موجبة ضمن الحد الرقمي المدعوم.")
+
+        methods = [method for method in ("credit", "adamc", "crypto") if is_auto_budget_payment_enabled(method)]
+        if not methods:
+            return await ctx.send("⛔ الشحن التلقائي مغلق حاليًا. لا توجد وسيلة دفع مفعلة؛ تواصل مع مالك البوت.")
+        view = AutoBudgetPaymentView(self.bot, ctx.author.id, budget_amount, methods)
+        await ctx.send(
+            f"اختر طريقة الدفع لإضافة `{budget_amount:,}` Cosmo إلى ميزانية **{ctx.guild.name}**. "
+            "تُفعّل وسائل الدفع أو تُغلق عالميًا بواسطة مالك البوت.",
+            view=view,
+        )
+
+    @commands.hybrid_command(
+        name="toggle_auto_add_server_budget",
+        aliases=["تحكم_الشحن_التلقائي"],
+        description="فتح أو إغلاق وسيلة دفع للشحن التلقائي (مالك البوت فقط)"
+    )
+    async def toggle_auto_add_server_budget(self, ctx: commands.Context, method: str, enabled: bool):
+        if not await check_is_owner(self.bot, ctx):
+            return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
+        aliases = {
+            "credit": "credit", "credits": "credit", "كريديت": "credit",
+            "adamc": "adamc", "ادم سي": "adamc", "آدم سي": "adamc",
+            "crypto": "crypto", "ltc": "crypto", "كريبتو": "crypto",
+        }
+        method_key = aliases.get(method.strip().lower())
+        if not method_key:
+            return await ctx.send("❌ الطريقة غير معروفة. استخدم `credit` أو `adamc` أو `crypto`.")
+        if ctx.interaction:
+            await ctx.defer(ephemeral=True)
+        guild_ids = [guild.id for guild in self.bot.guilds]
+        try:
+            cancelled = await asyncio.to_thread(set_auto_budget_payment_enabled, method_key, enabled, guild_ids)
+        except Exception as exc:
+            print(f"Auto budget payment toggle failed: {exc}")
+            return await ctx.send("⚠️ تعذر تأكيد تغيير حالة الدفع أو إنهاء الطلبات المعلقة. أعد الفحص قبل إعادة فتح الوسيلة.")
+        state = "مفعلة ✅" if enabled else "مغلقة ⛔"
+        labels = {"credit": "ProBot Credits", "adamc": "AdamC", "crypto": "كريبتو (LTC)"}
+        for order in cancelled:
+            notice = (
+                f"⛔ أُلغي طلب الشحن التلقائي `#{order['order_id']}` لأن وسيلة الدفع "
+                f"**{labels[method_key]}** أُغلقت أو أُعيد فتحها. إذا كنت قد حولت بالفعل، "
+                "لا تكرر التحويل وتواصل مع مالك البوت للمراجعة اليدوية."
+            )
+            channel = self.bot.get_channel(order["channel_id"])
+            if channel:
+                try:
+                    await channel.send(notice, allowed_mentions=discord.AllowedMentions.none())
+                except discord.HTTPException:
+                    pass
+            member = self.bot.get_user(order["user_id"])
+            if member:
+                try:
+                    await member.send(notice)
+                except discord.HTTPException:
+                    pass
+        summary = f"⚙️ وسيلة الدفع **{labels[method_key]}** أصبحت {state} على مستوى البوت."
+        if cancelled:
+            summary += f" أُلغيت {len(cancelled)} طلبات شحن معلقة وأُبلغ أصحابها."
+        await ctx.send(summary)
 
     @commands.hybrid_command(
         name="add_server_budget", 
@@ -666,32 +931,23 @@ class Admin(commands.Cog):
         g_conn.close()
         await ctx.send(f"✅ تم ضبط روم لوج إضافة/خصم الرصيد على: {channel.mention}")
 
-    @commands.hybrid_command(name="toggle_exchange_system", aliases=["قفل_التبديل_العام"], description="قفل أو فتح نظام التبديل كاملاً في هذا السيرفر")
+    @commands.hybrid_command(name="toggle_exchange_system", aliases=["قفل_التبديل_العام"], description="قفل أو فتح نظام التبديل لجميع السيرفرات من سيرفر Cosmo")
     async def toggle_exchange_system(self, ctx: commands.Context, status: bool):
-        if not can_manage_bot(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية.")
-        val = 1 if status else 0
-        g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute("UPDATE settings SET exchange_enabled = ? WHERE guild_id = ?", (val, ctx.guild.id))
-        g_conn.commit()
-        g_conn.close()
-        msg = "مفتوحاً للجميع ✅" if status else "مقفلاً حالياً ⛔"
-        await ctx.send(f"⚙️ تم ضبط نظام التبديل ليكون: **{msg}**.")
+        if not can_manage_global_exchange(ctx):
+            return await ctx.send(f"⛔ قفل أو فتح التبديل العام متاح لإدارة سيرفر Cosmo فقط (`{COSMO_GUILD_ID}`).")
+        set_global_exchange_enabled(status)
+        msg = "مفتوحاً في جميع السيرفرات ✅" if status else "مقفلًا في جميع السيرفرات ⛔"
+        await ctx.send(f"⚙️ تم ضبط نظام التبديل العام ليكون: **{msg}**.")
 
-    @commands.hybrid_command(name="toggle_currency_status", aliases=["قفل_عملة"], description="قفل أو فتح تبديل عملة معينة في السيرفر")
+    @commands.hybrid_command(name="toggle_currency_status", aliases=["قفل_عملة"], description="قفل أو فتح تبديل عملة عامة لجميع السيرفرات من Cosmo")
     async def toggle_currency_status(self, ctx: commands.Context, currency_name: str, status: bool):
         if not can_manage_global_exchange(ctx):
             return await ctx.send(f"⛔ إدارة العملات العامة متاحة لإدارة سيرفر Cosmo فقط (`{COSMO_GUILD_ID}`).")
-        val = 1 if status else 0
-        existing = get_exchange_currency(currency_name)
-        if not existing:
+        existing_name = set_exchange_currency_status(currency_name, status)
+        if not existing_name:
             return await ctx.send(f"❌ العملة `{currency_name}` غير موجودة في الكتالوج العام.")
-        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
-        g_cur.execute("UPDATE exchange_currencies SET is_active = ? WHERE currency_name = ?", (val, existing[0]))
-        g_conn.commit()
-        g_conn.close()
         msg = "متاحة للتبديل ✅" if status else "معطلة ومقفلة ⛔"
-        await ctx.send(f"⚙️ العملة العامة **{existing[0]}** أصبحت الآن: **{msg}** في جميع السيرفرات.")
+        await ctx.send(f"⚙️ العملة العامة **{existing_name}** أصبحت الآن: **{msg}** في جميع السيرفرات.")
 
     @commands.hybrid_command(name="add_exchange_currency", aliases=["اضافة_عملة_تبديل"], description="إضافة أو تعديل عملة في كتالوج التبديل العام من سيرفر Cosmo")
     async def add_exchange_currency(self, ctx: commands.Context, currency_name: str, rate: float, min_received: float = 0.0):
@@ -702,35 +958,17 @@ class Admin(commands.Cog):
             return await ctx.send("❌ اسم العملة يجب أن يكون واضحاً وبحد أقصى 32 حرفاً ومن دون رموز الإشارات أو backticks.")
         if not math.isfinite(rate) or rate <= 0 or not math.isfinite(min_received) or min_received < 0:
             return await ctx.send("❌ يجب أن يكون السعر أكبر من صفر والحد الأدنى صفراً أو أكثر، وبقيم رقمية صالحة.")
-        existing = get_exchange_currency(currency_name)
-        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
-        if existing:
-            g_cur.execute(
-                "UPDATE exchange_currencies SET exchange_rate = ?, min_received = ? WHERE currency_name = ?",
-                (rate, min_received, existing[0]),
-            )
-            currency_name = existing[0]
-        else:
-            g_cur.execute(
-                "INSERT INTO exchange_currencies (currency_name, exchange_rate, is_active, min_received) VALUES (?, ?, 1, ?)",
-                (currency_name, rate, min_received),
-            )
-        g_conn.commit()
-        g_conn.close()
+        currency_name = upsert_exchange_currency(currency_name, rate, min_received)
         await ctx.send(f"✅ تم تحديث العملة العامة **{currency_name}** لكل السيرفرات:\n• السعر: `1 Cosmo = {rate:g} {currency_name}`\n• الحد الأدنى: `{min_received:g} {currency_name}`.")
 
     @commands.hybrid_command(name="delete_exchange_currency", aliases=["حذف_عملة_تبديل"], description="حذف عملة من كتالوج التبديل العام من سيرفر Cosmo")
     async def delete_exchange_currency(self, ctx: commands.Context, currency_name: str):
         if not can_manage_global_exchange(ctx):
             return await ctx.send(f"⛔ إدارة العملات العامة متاحة لإدارة سيرفر Cosmo فقط (`{COSMO_GUILD_ID}`).")
-        existing = get_exchange_currency(currency_name)
-        if not existing:
+        deleted_name = delete_exchange_currency(currency_name)
+        if not deleted_name:
             return await ctx.send(f"❌ العملة `{currency_name}` غير موجودة في الكتالوج العام.")
-        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
-        g_cur.execute("DELETE FROM exchange_currencies WHERE currency_name = ?", (existing[0],))
-        g_conn.commit()
-        g_conn.close()
-        await ctx.send(f"🗑️ تم حذف العملة العامة **{existing[0]}** من قائمة جميع السيرفرات.")
+        await ctx.send(f"🗑️ تم حذف العملة العامة **{deleted_name}** من قائمة جميع السيرفرات.")
 
     @commands.hybrid_command(name="set_admin_role", aliases=["رتبة_المسؤول"], description="تعيين رتبة مسؤولي البوت")
     async def set_admin_role(self, ctx: commands.Context, role: discord.Role):

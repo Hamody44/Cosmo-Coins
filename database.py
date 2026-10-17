@@ -13,6 +13,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 PRIMARY_OWNER_ID = 988840428591808584
 COSMO_GUILD_ID = 1540014549179039867
+PROBOT_PAYMENT_BOT_ID = 282859044593598464
+ADAMC_PAYMENT_BOT_ID = 1505622388975468684
 
 if not os.path.exists("guilds_data"):
     os.makedirs("guilds_data")
@@ -20,6 +22,8 @@ if not os.path.exists("guilds_data"):
 # قاعدة البيانات المركزية العامة
 GLOBAL_DB_PATH = os.path.abspath("global_cosmo.db")
 _balance_lock = threading.RLock()
+_auto_budget_payment_lock = threading.RLock()
+_exchange_state_lock = threading.RLock()
 global_conn = sqlite3.connect(GLOBAL_DB_PATH, check_same_thread=False, timeout=10)
 global_cursor = global_conn.cursor()
 
@@ -158,6 +162,25 @@ def get_guild_db(guild_id: int):
         timestamp TEXT
     )''')
 
+    cur.execute('''CREATE TABLE IF NOT EXISTS budget_payment_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        payer_name TEXT NOT NULL,
+        channel_id INTEGER NOT NULL,
+        method TEXT NOT NULL,
+        budget_amount INTEGER NOT NULL CHECK (budget_amount > 0),
+        expected_payment INTEGER NOT NULL CHECK (expected_payment > 0),
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        payment_message_id INTEGER UNIQUE,
+        payment_author_id INTEGER,
+        paid_at INTEGER
+    )''')
+    cur.execute('''CREATE INDEX IF NOT EXISTS idx_budget_payment_orders_pending
+                   ON budget_payment_orders(status, expires_at, method, channel_id)''')
+
     cur.execute('''CREATE TABLE IF NOT EXISTS auto_replies (
         trigger_word TEXT PRIMARY KEY,
         reply_content TEXT
@@ -243,6 +266,284 @@ def get_exchange_currency(currency_name: str):
         return g_cur.fetchone()
     finally:
         g_conn.close()
+
+def set_exchange_currency_status(currency_name: str, active: bool):
+    with _exchange_state_lock:
+        existing = get_exchange_currency(currency_name)
+        if not existing:
+            return None
+        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+        try:
+            g_cur.execute(
+                "UPDATE exchange_currencies SET is_active = ? WHERE currency_name = ?",
+                (1 if active else 0, existing[0]),
+            )
+            g_conn.commit()
+            return existing[0]
+        finally:
+            g_conn.close()
+
+def upsert_exchange_currency(currency_name: str, rate: float, min_received: float):
+    with _exchange_state_lock:
+        existing = get_exchange_currency(currency_name)
+        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+        try:
+            if existing:
+                g_cur.execute(
+                    "UPDATE exchange_currencies SET exchange_rate = ?, min_received = ? WHERE currency_name = ?",
+                    (rate, min_received, existing[0]),
+                )
+                result_name = existing[0]
+            else:
+                g_cur.execute(
+                    "INSERT INTO exchange_currencies (currency_name, exchange_rate, is_active, min_received) "
+                    "VALUES (?, ?, 1, ?)",
+                    (currency_name, rate, min_received),
+                )
+                result_name = currency_name
+            g_conn.commit()
+            return result_name
+        finally:
+            g_conn.close()
+
+def delete_exchange_currency(currency_name: str):
+    with _exchange_state_lock:
+        existing = get_exchange_currency(currency_name)
+        if not existing:
+            return None
+        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+        try:
+            g_cur.execute("DELETE FROM exchange_currencies WHERE currency_name = ?", (existing[0],))
+            g_conn.commit()
+            return existing[0]
+        finally:
+            g_conn.close()
+
+def is_global_exchange_enabled() -> bool:
+    """حالة التبديل العامة محفوظة في إعدادات سيرفر Cosmo؛ الحالة الافتراضية مفتوحة."""
+    with _exchange_state_lock:
+        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+        try:
+            g_cur.execute("SELECT exchange_enabled FROM settings WHERE guild_id = ?", (COSMO_GUILD_ID,))
+            row = g_cur.fetchone()
+            return row is None or row[0] is None or int(row[0]) != 0
+        finally:
+            g_conn.close()
+
+def set_global_exchange_enabled(enabled: bool):
+    """يحفظ حالة السوق العامة مركزيًا؛ يجب أن يمر أمر البوت بتفويض سيرفر Cosmo."""
+    with _exchange_state_lock:
+        g_conn, g_cur = get_guild_db(COSMO_GUILD_ID)
+        try:
+            g_cur.execute(
+                "INSERT INTO settings (guild_id, exchange_enabled) VALUES (?, ?) "
+                "ON CONFLICT(guild_id) DO UPDATE SET exchange_enabled = excluded.exchange_enabled",
+                (COSMO_GUILD_ID, 1 if enabled else 0),
+            )
+            g_conn.commit()
+        finally:
+            g_conn.close()
+
+AUTO_BUDGET_PAYMENT_METHODS = {"credit", "adamc", "crypto"}
+
+def is_auto_budget_payment_enabled(method: str) -> bool:
+    method = method.strip().lower()
+    if method not in AUTO_BUDGET_PAYMENT_METHODS:
+        return False
+    key = f"auto_budget_{method}_enabled"
+    with _auto_budget_payment_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        row = conn.execute("SELECT value FROM global_settings WHERE key = ?", (key,)).fetchone()
+        return bool(row and row[0] == 1)
+
+def _cancel_pending_budget_orders(guild_ids, method: str):
+    cancelled = []
+    for guild_id in sorted({int(gid) for gid in guild_ids if int(gid) > 0}):
+        g_conn, _ = get_guild_db(guild_id)
+        try:
+            g_conn.execute("BEGIN IMMEDIATE")
+            rows = g_conn.execute(
+                "SELECT id, user_id, channel_id FROM budget_payment_orders "
+                "WHERE guild_id = ? AND method = ? AND status = 'pending'",
+                (guild_id, method),
+            ).fetchall()
+            if rows:
+                g_conn.execute(
+                    "UPDATE budget_payment_orders SET status = 'cancelled' "
+                    "WHERE guild_id = ? AND method = ? AND status = 'pending'",
+                    (guild_id, method),
+                )
+                cancelled.extend(
+                    {"guild_id": guild_id, "order_id": int(row[0]), "user_id": int(row[1]), "channel_id": int(row[2])}
+                    for row in rows
+                )
+            g_conn.commit()
+        finally:
+            g_conn.close()
+    return cancelled
+
+def set_auto_budget_payment_enabled(method: str, enabled: bool, guild_ids=()):
+    method = method.strip().lower()
+    if method not in AUTO_BUDGET_PAYMENT_METHODS:
+        raise ValueError("طريقة الدفع غير معروفة.")
+    key = f"auto_budget_{method}_enabled"
+    with _auto_budget_payment_lock:
+        was_enabled = is_auto_budget_payment_enabled(method)
+        if enabled and was_enabled:
+            return []
+        if enabled:
+            # Expire any stale orders before re-enabling the method.
+            cancelled = _cancel_pending_budget_orders(guild_ids, method)
+            value = 1
+        else:
+            with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+                conn.execute(
+                    "INSERT INTO global_settings (key, value) VALUES (?, 0) "
+                    "ON CONFLICT(key) DO UPDATE SET value = 0",
+                    (key,),
+                )
+                conn.commit()
+            cancelled = _cancel_pending_budget_orders(guild_ids, method)
+            return cancelled
+
+        with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+            conn.execute(
+                "INSERT INTO global_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            conn.commit()
+        return cancelled
+
+def _create_budget_payment_order_locked(guild_id: int, user_id: int, payer_name: str, channel_id: int,
+                                         method: str, budget_amount: int, expected_payment: int,
+                                         created_at: int, expires_at: int):
+    method = method.strip().lower()
+    budget_amount, expected_payment = int(budget_amount), int(expected_payment)
+    if (method not in {"credit", "adamc"} or budget_amount <= 0
+            or budget_amount > 9_223_372_036_854_775_807 or budget_amount % 5 != 0):
+        return None
+    if not is_auto_budget_payment_enabled(method):
+        return None
+    expected_for_rate = budget_amount * 6 // 5 if method == "credit" else budget_amount // 5
+    if expected_payment != expected_for_rate or expected_payment <= 0 or expected_payment > 9_223_372_036_854_775_807:
+        return None
+    if not payer_name.strip() or guild_id <= 0 or user_id <= 0 or channel_id <= 0 or expires_at <= created_at:
+        return None
+    g_conn, _ = get_guild_db(guild_id)
+    try:
+        g_conn.execute("BEGIN IMMEDIATE")
+        g_conn.execute(
+            "UPDATE budget_payment_orders SET status = 'expired' "
+            "WHERE status = 'pending' AND expires_at < ?",
+            (created_at,),
+        )
+        pending = g_conn.execute(
+            "SELECT 1 FROM budget_payment_orders WHERE user_id = ? AND status = 'pending' LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if pending:
+            g_conn.rollback()
+            return None
+        cur = g_conn.execute(
+            "INSERT INTO budget_payment_orders "
+            "(guild_id, user_id, payer_name, channel_id, method, budget_amount, expected_payment, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild_id, user_id, payer_name.strip().casefold(), channel_id, method, budget_amount, expected_payment, created_at, expires_at),
+        )
+        order_id = cur.lastrowid
+        g_conn.commit()
+        return order_id
+    finally:
+        g_conn.close()
+
+def create_budget_payment_order(guild_id: int, user_id: int, payer_name: str, channel_id: int,
+                                method: str, budget_amount: int, expected_payment: int,
+                                created_at: int, expires_at: int):
+    with _auto_budget_payment_lock:
+        if not is_auto_budget_payment_enabled(method):
+            return None
+        return _create_budget_payment_order_locked(
+            guild_id, user_id, payer_name, channel_id, method,
+            budget_amount, expected_payment, created_at, expires_at,
+        )
+
+def _settle_budget_payment_locked(guild_id: int, method: str, channel_id: int, payer_name: str,
+                                  expected_payment: int, payment_message_id: int, payment_author_id: int,
+                                  payment_timestamp: int, recipient_id: int):
+    """تطابق إيصالًا واحدًا مع طلب حي وتضيف الميزانية وتؤشر الإيصال في معاملة واحدة."""
+    method = method.strip().lower()
+    payer_name = payer_name.strip().casefold()
+    provider_ids = {"credit": PROBOT_PAYMENT_BOT_ID, "adamc": ADAMC_PAYMENT_BOT_ID}
+    if (method not in provider_ids or not payer_name or guild_id <= 0 or channel_id <= 0
+            or int(payment_author_id) != provider_ids.get(method)
+            or int(recipient_id) != PRIMARY_OWNER_ID or int(payment_message_id) <= 0):
+        return None
+    g_conn, _ = get_guild_db(guild_id)
+    try:
+        g_conn.execute("BEGIN IMMEDIATE")
+        order = g_conn.execute(
+            "SELECT id, user_id, budget_amount, expected_payment FROM budget_payment_orders "
+            "WHERE guild_id = ? AND channel_id = ? AND method = ? AND payer_name = ? "
+            "AND expected_payment = ? AND status = 'pending' AND created_at <= ? AND expires_at >= ? "
+            "ORDER BY created_at ASC LIMIT 1",
+            (guild_id, channel_id, method, payer_name, int(expected_payment), int(payment_timestamp), int(payment_timestamp)),
+        ).fetchone()
+        if not order:
+            g_conn.rollback()
+            return None
+        order_id, user_id, budget_amount, _ = order
+        old_row = g_conn.execute(
+            "SELECT spending_balance FROM settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        old_balance = int(old_row[0]) if old_row and old_row[0] else 0
+        max_sqlite_int = 9_223_372_036_854_775_807
+        if old_balance > max_sqlite_int - int(budget_amount):
+            g_conn.rollback()
+            return None
+        try:
+            cur = g_conn.execute(
+                "UPDATE budget_payment_orders SET status = 'paid', payment_message_id = ?, "
+                "payment_author_id = ?, paid_at = ? WHERE id = ? AND status = 'pending'",
+                (int(payment_message_id), int(payment_author_id), int(payment_timestamp), order_id),
+            )
+        except sqlite3.IntegrityError:
+            g_conn.rollback()
+            return None
+        if cur.rowcount != 1:
+            g_conn.rollback()
+            return None
+        new_balance = old_balance + int(budget_amount)
+        g_conn.execute(
+            "INSERT INTO settings (guild_id, spending_balance) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET spending_balance = excluded.spending_balance",
+            (guild_id, new_balance),
+        )
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(payment_timestamp))
+        g_conn.execute(
+            "INSERT INTO budget_logs (action, amount, old_balance, new_balance, admin_id, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (f"إضافة تلقائية ({method})", int(budget_amount), old_balance, new_balance, int(user_id), timestamp),
+        )
+        g_conn.commit()
+        return {
+            "order_id": int(order_id), "user_id": int(user_id), "budget_amount": int(budget_amount),
+            "old_balance": old_balance, "new_balance": new_balance, "method": method,
+        }
+    finally:
+        g_conn.close()
+
+def settle_budget_payment(guild_id: int, method: str, channel_id: int, payer_name: str,
+                          expected_payment: int, payment_message_id: int, payment_author_id: int,
+                          payment_timestamp: int, recipient_id: int):
+    method = method.strip().lower()
+    with _auto_budget_payment_lock:
+        if not is_auto_budget_payment_enabled(method):
+            return None
+        return _settle_budget_payment_locked(
+            guild_id, method, channel_id, payer_name, expected_payment,
+            payment_message_id, payment_author_id, payment_timestamp, recipient_id,
+        )
 
 def is_bot_admin(ctx):
     if ctx.author.id == PRIMARY_OWNER_ID:
@@ -373,8 +674,14 @@ def has_pending_exchange_request(user_id: int) -> bool:
         ).fetchone()
         return row is not None
 
-def create_exchange_request(guild_id: int, user_id: int, amount: int, currency: str,
-                            received_amount: float, note: str, timestamp: str):
+class ExchangeSystemClosed(RuntimeError):
+    """Raised when the global exchange switch closes before a request is committed."""
+
+class ExchangeCurrencyUnavailable(RuntimeError):
+    """Raised when the selected global currency or quote changed before commit."""
+
+def _create_exchange_request_locked(guild_id: int, user_id: int, amount: int, currency: str,
+                                    received_amount: float, note: str, timestamp: str):
     amount = int(amount)
     if amount <= 0:
         return None
@@ -402,6 +709,35 @@ def create_exchange_request(guild_id: int, user_id: int, amount: int, currency: 
         request_id = cur.lastrowid
         conn.commit()
         return request_id
+
+def create_exchange_request(guild_id: int, user_id: int, amount: int, currency: str,
+                            received_amount: float, note: str, timestamp: str):
+    with _exchange_state_lock:
+        if not is_global_exchange_enabled():
+            raise ExchangeSystemClosed("التبديل مغلق عالميًا.")
+        try:
+            amount = int(amount)
+            received_amount = float(received_amount)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ExchangeCurrencyUnavailable("قيمة عرض العملة غير صالحة.") from exc
+        if amount <= 0 or amount > 9_223_372_036_854_775_807 or not math.isfinite(received_amount):
+            raise ExchangeCurrencyUnavailable("قيمة عرض العملة غير صالحة.")
+        currency_row = get_exchange_currency(currency)
+        if not currency_row or not currency_row[2]:
+            raise ExchangeCurrencyUnavailable("العملة لم تعد متاحة للتبديل.")
+        try:
+            rate = float(currency_row[1])
+            minimum = float(currency_row[3])
+            expected_received = round(amount * rate, 4)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ExchangeCurrencyUnavailable("تعذر التحقق من سعر العملة.") from exc
+        if (not math.isfinite(rate) or rate <= 0 or not math.isfinite(minimum) or minimum < 0
+                or not math.isclose(received_amount, expected_received, rel_tol=0, abs_tol=1e-9)
+                or expected_received < minimum):
+            raise ExchangeCurrencyUnavailable("تغير سعر العملة أو حدها الأدنى؛ أعد تحميل القائمة وحاول مجددًا.")
+        return _create_exchange_request_locked(
+            guild_id, user_id, amount, currency, received_amount, note, timestamp,
+        )
 
 def accept_exchange_request(request_id: int) -> bool:
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:

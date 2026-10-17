@@ -119,7 +119,8 @@ class HelpView(discord.ui.View):
                 ("💱 التبديل والبوست", (
                     "• `/accept_exchange <id>` و`/deny_exchange <id>` — معالجة طلبات التبديل.\n"
                     "• `/add_exchange_currency` و`/delete_exchange_currency` و`/toggle_currency_status` — إدارة الكتالوج العام من سيرفر Cosmo فقط.\n"
-                    "• `/toggle_exchange_system` — تشغيل أو إيقاف التبديل في السيرفر الحالي.\n"
+                    "• `/toggle_exchange_system <true|false>` — فتح أو قفل التبديل عالميًا من سيرفر Cosmo فقط.\n"
+                    "• الإغلاق يمنع الطلبات الجديدة؛ الطلبات المعلقة تبقى في قائمة الإدارة للقبول أو الرفض.\n"
                     "• `/setup_boost_rewards` و`/toggle_boost_system` — إعداد مكافآت البوست.\n"
                     "• `/fake_boost <1|2>` — اختبار مكافآت البوست."
                 )),
@@ -129,6 +130,11 @@ class HelpView(discord.ui.View):
                     "• `/set_balance_log` و`/set_boost_log` — قنوات سجلات الرصيد والبوست.\n"
                     "• `/set_delivery_log` و`/set_success_log` — قنوات التسليم والنجاح.\n"
                     "• `/set_transfer_log` — قناة سجل التحويلات."
+                )),
+                ("🏦 شحن ميزانية السيرفر", (
+                    "• `/auto_add_server_budget <amount>` — لمالك السيرفر أو مسؤوليه؛ اختر وسيلة دفع مفعلة.\n"
+                    "• تأكيد ProBot أو AdamC يُطابق آليًا خلال 5 دقائق؛ الخيار يتطلب مبلغًا من مضاعفات 5 Cosmo.\n"
+                    "• خيار LTC يوجّهك للتواصل مع مطور البوت ولا يؤكد تحويلًا أو يشحن آليًا."
                 )),
             ],
             "Cosmo System • إدارة السيرفر",
@@ -151,7 +157,9 @@ class HelpView(discord.ui.View):
                     "• `/set_bot_banner <file>` — تخصيص بنر البوت."
                 )),
                 ("🔒 مالك البوت فقط", (
-                    "• `/add_server_budget <amount>` و`/remove_server_budget <amount>` — إضافة أو خصم ميزانية سيرفر.\n"
+                    "• `/add_server_budget <amount>` و`/remove_server_budget <amount>` — إضافة أو خصم ميزانية سيرفر يدويًا.\n"
+                    "• `/toggle_auto_add_server_budget <credit|adamc|crypto> <true|false>` — تشغيل أو إيقاف وسيلة دفع الشحن التلقائي عالميًا.\n"
+                    "• إيقاف وسيلة دفع يلغي طلباتها المعلقة؛ من حوّل بالفعل عليه التواصل مع مالك البوت للمراجعة اليدوية.\n"
                     "• `/set_server_budget <guild_id> <amount>` — تعيين ميزانية سيرفر.\n"
                     "• `/premium_code <duration>` — إنشاء كود Premium.\n"
                     "• `/set_global_log` و`/disable_global_log` — إعداد سجل العمليات العام.\n"
