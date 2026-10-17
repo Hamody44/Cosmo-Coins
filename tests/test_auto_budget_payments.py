@@ -2,11 +2,13 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import database
 from cogs.admin import (
     ADAMC_ID,
+    AutoBudgetCommandButton,
     PRIMARY_OWNER_ID,
     PROBOT_ID,
     parse_budget_payment_confirmation,
@@ -129,6 +131,38 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         with sqlite3.connect(self.guild_db_path) as conn:
             self.assertEqual(conn.execute("SELECT status FROM budget_payment_orders WHERE id = ?", (order_id,)).fetchone()[0], "cancelled")
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM settings").fetchone()[0], 0)
+
+
+class AutoBudgetCommandButtonTests(unittest.IsolatedAsyncioTestCase):
+    async def test_button_returns_exact_command_ephemerally_to_requester(self):
+        command = "#credit 988840428591808584 120 with tax"
+        button = AutoBudgetCommandButton(user_id=42, command=command)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=42),
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        await button.callback(interaction)
+
+        interaction.response.send_message.assert_awaited_once_with(
+            f"انسخ الأمر التالي والصقه كما هو في مكان التحويل:\n```{command}```",
+            ephemeral=True,
+        )
+
+    async def test_button_does_not_reveal_command_to_another_user(self):
+        command = "!transfer 988840428591808584 25"
+        button = AutoBudgetCommandButton(user_id=42, command=command)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        await button.callback(interaction)
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "هذا الزر مخصص لصاحب طلب الشحن فقط.", ephemeral=True
+        )
+        self.assertNotIn(command, interaction.response.send_message.await_args.args[0])
 
 
 if __name__ == "__main__":

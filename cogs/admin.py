@@ -134,12 +134,38 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
             f"💳 **طلب شحن ميزانية #{order_id} عبر {method_name}**\n"
             f"• الميزانية المطلوبة: `{self.budget_amount:,}` Cosmo\n"
             f"• المبلغ المطلوب تحويله إلى مالك البوت: `{expected_payment:,}`\n"
-            f"• أرسل الأمر التالي من حساب Discord نفسه الذي بدأ الطلب، وفي هذه القناة:\n"
-            f"```{command}```\n"
+            "• اضغط زر **نسخ أمر التحويل** لعرض الأمر جاهزًا للنسخ. أرسله من حساب Discord نفسه الذي بدأ الطلب.\n"
             f"يجب أن يطابق اسم الدافع في رسالة التأكيد اسم حسابك في Discord، وأن يصل التأكيد من بوت الدفع الصحيح وبالمبلغ والمستلم المطابقين خلال 5 دقائق (ينتهي <t:{expires_at}:R>). "
             "لا تعتمد على لقطة شاشة أو رسالة معاد توجيهها؛ لا تُضاف الميزانية إلا بعد مطابقة رسالة البوت الأصلية."
         )
-        await interaction.response.edit_message(content=message, view=None)
+        await interaction.response.edit_message(
+            content=message,
+            view=AutoBudgetCommandView(self.user_id, command),
+        )
+
+
+class AutoBudgetCommandButton(discord.ui.Button):
+    def __init__(self, user_id: int, command: str):
+        super().__init__(label="نسخ أمر التحويل", style=discord.ButtonStyle.primary, emoji="📋")
+        self.user_id = user_id
+        self.command = command
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message(
+                "هذا الزر مخصص لصاحب طلب الشحن فقط.", ephemeral=True
+            )
+        await interaction.response.send_message(
+            "انسخ الأمر التالي والصقه كما هو في مكان التحويل:\n"
+            f"```{self.command}```",
+            ephemeral=True,
+        )
+
+
+class AutoBudgetCommandView(discord.ui.View):
+    def __init__(self, user_id: int, command: str):
+        super().__init__(timeout=AUTO_BUDGET_PAYMENT_TTL)
+        self.add_item(AutoBudgetCommandButton(user_id, command))
 
 
 class AutoBudgetPaymentView(discord.ui.View):
