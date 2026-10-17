@@ -82,7 +82,7 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         self.assertIsNone(database.create_budget_payment_order(101, 202, "payer", 303, "adamc", 10, 3, 1000, 1300))
         self.assertIsNone(database.create_budget_payment_order(101, 202, "payer", 303, "credit", 6, 7, 1000, 1300))
 
-    def test_payment_is_bound_to_sender_guild_channel_amount_and_five_minute_window(self):
+    def test_payment_is_bound_to_sender_guild_amount_and_five_minute_window_not_request_channel(self):
         database.set_auto_budget_payment_enabled("credit", True)
         order_id = database.create_budget_payment_order(
             guild_id=101, user_id=202, payer_name="Player.One", channel_id=303,
@@ -91,18 +91,18 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         )
         self.assertIsNotNone(order_id)
 
-        self.assertIsNone(database.settle_budget_payment(101, "credit", 304, "player.one", 6, 1, PROBOT_ID, 1100, PRIMARY_OWNER_ID))
+        self.assertIsNone(database.settle_budget_payment(102, "credit", 303, "player.one", 6, 1, PROBOT_ID, 1100, PRIMARY_OWNER_ID))
         self.assertIsNone(database.settle_budget_payment(101, "credit", 303, "someone.else", 6, 2, PROBOT_ID, 1100, PRIMARY_OWNER_ID))
         self.assertIsNone(database.settle_budget_payment(101, "credit", 303, "player.one", 7, 3, PROBOT_ID, 1100, PRIMARY_OWNER_ID))
         self.assertIsNone(database.settle_budget_payment(101, "credit", 303, "player.one", 6, 4, PROBOT_ID, 1301, PRIMARY_OWNER_ID))
         self.assertIsNone(database.settle_budget_payment(101, "credit", 303, "player.one", 6, 5, 123, 1100, PRIMARY_OWNER_ID))
         self.assertIsNone(database.settle_budget_payment(101, "credit", 303, "player.one", 6, 6, PROBOT_ID, 1100, 123))
 
-        result = database.settle_budget_payment(101, "credit", 303, "PLAYER.ONE", 6, 7, PROBOT_ID, 1300, PRIMARY_OWNER_ID)
+        result = database.settle_budget_payment(101, "credit", 304, "PLAYER.ONE", 6, 7, PROBOT_ID, 1300, PRIMARY_OWNER_ID)
         self.assertIsNotNone(result)
         self.assertEqual(result["order_id"], order_id)
         self.assertEqual(result["new_balance"], 5)
-        self.assertIsNone(database.settle_budget_payment(101, "credit", 303, "player.one", 6, 7, PROBOT_ID, 1300, PRIMARY_OWNER_ID))
+        self.assertIsNone(database.settle_budget_payment(101, "credit", 304, "player.one", 6, 7, PROBOT_ID, 1300, PRIMARY_OWNER_ID))
 
         with sqlite3.connect(self.guild_db_path) as conn:
             self.assertEqual(conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()[0], 5)

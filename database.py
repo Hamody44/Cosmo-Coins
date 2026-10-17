@@ -483,10 +483,10 @@ def _settle_budget_payment_locked(guild_id: int, method: str, channel_id: int, p
         g_conn.execute("BEGIN IMMEDIATE")
         order = g_conn.execute(
             "SELECT id, user_id, budget_amount, expected_payment FROM budget_payment_orders "
-            "WHERE guild_id = ? AND channel_id = ? AND method = ? AND payer_name = ? "
+            "WHERE guild_id = ? AND method = ? AND payer_name = ? "
             "AND expected_payment = ? AND status = 'pending' AND created_at <= ? AND expires_at >= ? "
             "ORDER BY created_at ASC LIMIT 1",
-            (guild_id, channel_id, method, payer_name, int(expected_payment), int(payment_timestamp), int(payment_timestamp)),
+            (guild_id, method, payer_name, int(expected_payment), int(payment_timestamp), int(payment_timestamp)),
         ).fetchone()
         if not order:
             g_conn.rollback()
