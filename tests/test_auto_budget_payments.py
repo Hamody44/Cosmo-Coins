@@ -11,6 +11,7 @@ from cogs.admin import (
     AutoBudgetCommandButton,
     PRIMARY_OWNER_ID,
     PROBOT_ID,
+    budget_history_action_label,
     parse_budget_payment_confirmation,
 )
 
@@ -107,6 +108,10 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         with sqlite3.connect(self.guild_db_path) as conn:
             self.assertEqual(conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()[0], 5)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 1)
+            self.assertEqual(
+                conn.execute("SELECT action FROM budget_logs").fetchone()[0],
+                "إضافة تلقائية (credit)",
+            )
             self.assertEqual(conn.execute("SELECT status FROM budget_payment_orders WHERE id = ?", (order_id,)).fetchone()[0], "paid")
 
     def test_only_one_pending_order_per_user_and_guild(self):
@@ -145,8 +150,7 @@ class AutoBudgetCommandButtonTests(unittest.IsolatedAsyncioTestCase):
         await button.callback(interaction)
 
         interaction.response.send_message.assert_awaited_once_with(
-            f"انسخ الأمر التالي والصقه كما هو في مكان التحويل:\n```{command}```",
-            ephemeral=True,
+            command, ephemeral=True,
         )
 
     async def test_button_does_not_reveal_command_to_another_user(self):
@@ -163,6 +167,23 @@ class AutoBudgetCommandButtonTests(unittest.IsolatedAsyncioTestCase):
             "هذا الزر مخصص لصاحب طلب الشحن فقط.", ephemeral=True
         )
         self.assertNotIn(command, interaction.response.send_message.await_args.args[0])
+
+
+class BudgetHistoryLabelTests(unittest.TestCase):
+    def test_automatic_topups_are_presented_as_additions_with_provider(self):
+        self.assertEqual(
+            budget_history_action_label("إضافة تلقائية (credit)"),
+            "💳 شحن تلقائي عبر ProBot Credits",
+        )
+        self.assertEqual(
+            budget_history_action_label("إضافة تلقائية (adamc)"),
+            "💳 شحن تلقائي عبر AdamC",
+        )
+
+    def test_manual_additions_deductions_and_direct_set_are_distinguished(self):
+        self.assertEqual(budget_history_action_label("إضافة"), "🟢 إضافة يدوية")
+        self.assertEqual(budget_history_action_label("خصم"), "🔴 خصم")
+        self.assertEqual(budget_history_action_label("تعيين مباشر"), "⚙️ تعيين مباشر")
 
 
 if __name__ == "__main__":

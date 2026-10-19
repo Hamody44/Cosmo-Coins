@@ -155,11 +155,7 @@ class AutoBudgetCommandButton(discord.ui.Button):
             return await interaction.response.send_message(
                 "هذا الزر مخصص لصاحب طلب الشحن فقط.", ephemeral=True
             )
-        await interaction.response.send_message(
-            "انسخ الأمر التالي والصقه كما هو في مكان التحويل:\n"
-            f"```{self.command}```",
-            ephemeral=True,
-        )
+        await interaction.response.send_message(self.command, ephemeral=True)
 
 
 class AutoBudgetCommandView(discord.ui.View):
@@ -196,6 +192,23 @@ def can_manage_global_exchange(ctx: commands.Context) -> bool:
         return True
     permissions = getattr(ctx.author, "guild_permissions", None)
     return bool(permissions and (permissions.administrator or permissions.manage_guild))
+
+
+def budget_history_action_label(action: str) -> str:
+    action = (action or "").strip()
+    labels = {
+        "إضافة": "🟢 إضافة يدوية",
+        "خصم": "🔴 خصم",
+        "تعيين مباشر": "⚙️ تعيين مباشر",
+        "إضافة تلقائية (credit)": "💳 شحن تلقائي عبر ProBot Credits",
+        "إضافة تلقائية (adamc)": "💳 شحن تلقائي عبر AdamC",
+    }
+    if action in labels:
+        return labels[action]
+    if action.startswith("إضافة تلقائية"):
+        return f"💳 {action}"
+    return f"📄 {action or 'عملية غير معروفة'}"
+
 
 async def schedule_double_announcement(channel: discord.TextChannel, guild_id: int, duration_sec: int):
     await asyncio.sleep(duration_sec)
@@ -722,9 +735,9 @@ class Admin(commands.Cog):
         )
 
         for log_id, action, amt, old_b, new_b, admin_id, t_stamp in rows:
-            action_icon = "🟢 إضافة" if action == "إضافة" else "🔴 خصم"
+            action_label = budget_history_action_label(action)
             details = (
-                f"• **نوع العملية:** {action_icon}\n"
+                f"• **نوع العملية:** {action_label}\n"
                 f"• **المبلغ:** `{amt:,}` {currency_label}\n"
                 f"• **الرصيد:** من `{old_b:,}` ➔ إلى `{new_b:,}`\n"
                 f"• **المسؤول:** <@{admin_id}> (`{admin_id}`)\n"
