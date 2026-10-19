@@ -33,15 +33,25 @@ def parse_budget_payment_confirmation(method: str, author_id: int, text: str):
     if not expected_author or int(author_id) != expected_author:
         return None
     if method == "credit":
-        pattern = re.compile(
-            r"(?:\*\*\s*)?ـ\s*(?P<sender>[^,*\n]+?)\s*,\s*قام\s+بتحويل\s+`?\$?(?P<amount>[\d,]+)`?\s+لـ\s*<@!?(?P<recipient>\d+)>"
-        )
+        patterns = [
+            re.compile(
+                r"(?:\*\*\s*)?ـ\s*(?P<sender>[^,*\n]+?)\s*,\s*قام\s+بتحويل\s+`?\$?(?P<amount>[\d,]+)`?\s+لـ\s*<@!?(?P<recipient>\d+)>"
+            ),
+            re.compile(
+                r"(?:\*\*\s*)?(?::moneybag:|💰)\s*\|\s*\*{0,2}(?P<sender>[^,*\n]+?)\*{0,2}\s*,\s*has transferred\s+\*{0,2}`?\$?(?P<amount>[\d,]+)`?\*{0,2}\s+to\s+<@!?(?P<recipient>\d+)>",
+                re.IGNORECASE,
+            ),
+        ]
     else:
-        pattern = re.compile(
-            r"💰\s*\|\s*\*\*(?P<sender>[^*\n]+?)\*\*,\s*has transferred\s+\*\*\$?(?P<amount>[\d,]+)\*\*\s+to\s+<@!?(?P<recipient>\d+)>\.?",
+        patterns = [re.compile(
+            r"💰\s*\|\s*\*\*(?P<sender>[^*\n]+?)\*\*,\s*has transferred\s+\*\*\$?(?P<amount>[\d,]+)\*\*\s+to\s+<@!?(?P<recipient>\d+)>",
             re.IGNORECASE,
-        )
-    match = pattern.search(text or "")
+        )]
+    match = None
+    for pattern in patterns:
+        match = pattern.search(text or "")
+        if match:
+            break
     if not match:
         return None
     try:
