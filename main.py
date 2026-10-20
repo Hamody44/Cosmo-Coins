@@ -16,7 +16,7 @@ import re
 from datetime import datetime
 
 # استيراد دالة تشغيل لوحة التحكم
-from dashboard.app import run_dashboard
+from dashboard.app import run_dashboard, set_discord_bot_context
 
 load_dotenv()
 
@@ -220,6 +220,7 @@ async def load_cogs():
 async def main():
     # 1. تشغيل سيرفر الداشبورد في خيط مستقل
     try:
+        set_discord_bot_context(bot, asyncio.get_running_loop())
         web_thread = threading.Thread(target=run_dashboard, daemon=True)
         web_thread.start()
         print("🌐 Dashboard thread started successfully on port 2009!")

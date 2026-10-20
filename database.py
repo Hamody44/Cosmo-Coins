@@ -7,6 +7,7 @@ import math
 import random
 import io
 import threading
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from contextlib import closing
 import discord
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -176,10 +177,30 @@ def get_guild_db(guild_id: int):
         status TEXT NOT NULL DEFAULT 'pending',
         payment_message_id INTEGER UNIQUE,
         payment_author_id INTEGER,
-        paid_at INTEGER
+        paid_at INTEGER,
+        provider_order_id TEXT,
+        provider_payment_id TEXT,
+        quote_usd TEXT,
+        pay_address TEXT,
+        pay_currency TEXT,
+        provider_status TEXT
     )''')
     cur.execute('''CREATE INDEX IF NOT EXISTS idx_budget_payment_orders_pending
                    ON budget_payment_orders(status, expires_at, method, channel_id)''')
+
+    payment_columns = {row[1] for row in cur.execute("PRAGMA table_info(budget_payment_orders)").fetchall()}
+    for column, definition in (
+        ("provider_order_id", "TEXT"),
+        ("provider_payment_id", "TEXT"),
+        ("quote_usd", "TEXT"),
+        ("pay_address", "TEXT"),
+        ("pay_currency", "TEXT"),
+        ("provider_status", "TEXT"),
+    ):
+        if column not in payment_columns:
+            cur.execute(f"ALTER TABLE budget_payment_orders ADD COLUMN {column} {definition}")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_payment_provider_order ON budget_payment_orders(provider_order_id)")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_payment_provider_payment ON budget_payment_orders(provider_payment_id)")
 
     cur.execute('''CREATE TABLE IF NOT EXISTS auto_replies (
         trigger_word TEXT PRIMARY KEY,
@@ -356,6 +377,10 @@ def is_auto_budget_payment_enabled(method: str) -> bool:
         return bool(row and row[0] == 1)
 
 def _cancel_pending_budget_orders(guild_ids, method: str):
+    # لا يمكن إلغاء فاتورة NOWPayments بأمان من المفتاح المحلي؛ الطلبات الصادرة
+    # تبقى قابلة للتسوية حتى انتهاء مهلة المزود، بينما يمنع الإغلاق إنشاء طلبات جديدة.
+    if method == "crypto":
+        return []
     cancelled = []
     for guild_id in sorted({int(gid) for gid in guild_ids if int(gid) > 0}):
         g_conn, _ = get_guild_db(guild_id)
@@ -438,7 +463,8 @@ def _create_budget_payment_order_locked(guild_id: int, user_id: int, payer_name:
             (created_at,),
         )
         pending = g_conn.execute(
-            "SELECT 1 FROM budget_payment_orders WHERE user_id = ? AND status = 'pending' LIMIT 1",
+            "SELECT 1 FROM budget_payment_orders WHERE user_id = ? "
+            "AND status IN ('pending', 'creating', 'processing') LIMIT 1",
             (user_id,),
         ).fetchone()
         if pending:
@@ -466,6 +492,272 @@ def create_budget_payment_order(guild_id: int, user_id: int, payer_name: str, ch
             guild_id, user_id, payer_name, channel_id, method,
             budget_amount, expected_payment, created_at, expires_at,
         )
+
+def create_crypto_budget_payment_order(
+    guild_id: int, user_id: int, payer_name: str, channel_id: int, budget_amount: int,
+    expected_litoshi: int, quote_usd: str, provider_order_id: str, created_at: int, expires_at: int,
+):
+    """Reserve a NOWPayments order before calling the provider; no balance changes here."""
+    guild_id, user_id, channel_id = int(guild_id), int(user_id), int(channel_id)
+    budget_amount, expected_litoshi = int(budget_amount), int(expected_litoshi)
+    created_at, expires_at = int(created_at), int(expires_at)
+    quote_usd, provider_order_id = str(quote_usd).strip(), str(provider_order_id).strip()
+    if (
+        guild_id <= 0 or user_id <= 0 or channel_id <= 0 or budget_amount <= 0
+        or budget_amount > 9_223_372_036_854_775_807 or expected_litoshi <= 0
+        or expected_litoshi > 9_223_372_036_854_775_807 or not quote_usd
+        or not provider_order_id or expires_at <= created_at
+    ):
+        return None
+    try:
+        quote_value = Decimal(quote_usd)
+        expected_quote = (Decimal(budget_amount) / Decimal(260_000_000)).quantize(
+            Decimal("0.00000001"), rounding=ROUND_UP
+        )
+        if not quote_value.is_finite() or quote_value != expected_quote:
+            return None
+    except InvalidOperation:
+        return None
+
+    with _auto_budget_payment_lock:
+        if not is_auto_budget_payment_enabled("crypto"):
+            return None
+        g_conn, _ = get_guild_db(guild_id)
+        try:
+            g_conn.execute("BEGIN IMMEDIATE")
+            g_conn.execute(
+                "UPDATE budget_payment_orders SET status = 'expired' "
+                "WHERE status = 'pending' AND expires_at <= ?",
+                (created_at,),
+            )
+            pending = g_conn.execute(
+                "SELECT 1 FROM budget_payment_orders WHERE user_id = ? "
+                "AND status IN ('pending', 'creating', 'processing') LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if pending:
+                g_conn.rollback()
+                return None
+            cur = g_conn.execute(
+                "INSERT INTO budget_payment_orders "
+                "(guild_id, user_id, payer_name, channel_id, method, budget_amount, expected_payment, "
+                "created_at, expires_at, status, provider_order_id, quote_usd, pay_currency) "
+                "VALUES (?, ?, ?, ?, 'crypto', ?, ?, ?, ?, 'creating', ?, ?, 'ltc')",
+                (
+                    guild_id, user_id, str(payer_name).strip().casefold(), channel_id,
+                    budget_amount, expected_litoshi, created_at, expires_at,
+                    provider_order_id, quote_usd,
+                ),
+            )
+            order_id = int(cur.lastrowid)
+            g_conn.commit()
+            return order_id
+        finally:
+            g_conn.close()
+
+def update_crypto_budget_payment_order(guild_id: int, order_id: int, provider_order_id: str, payment: dict):
+    """Attach the provider's exact payment id, address and amount to its reserved order."""
+    try:
+        payment_id = str(payment["payment_id"]).strip()
+        address = str(payment["pay_address"]).strip()
+        pay_currency = str(payment["pay_currency"]).strip().lower()
+        provider_status = str(payment["payment_status"]).strip().lower()
+        expected_litoshi = int(payment["pay_amount_litoshi"])
+        expires_at = int(payment["expires_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not payment_id or not address or pay_currency != "ltc" or expected_litoshi <= 0:
+        return False
+    g_conn, _ = get_guild_db(int(guild_id))
+    try:
+        g_conn.execute("BEGIN IMMEDIATE")
+        cur = g_conn.execute(
+            "UPDATE budget_payment_orders SET expected_payment = ?, provider_payment_id = ?, "
+            "pay_address = ?, pay_currency = 'ltc', provider_status = ?, expires_at = ?, "
+            "status = CASE WHEN status = 'creating' THEN 'pending' ELSE status END "
+            "WHERE id = ? AND method = 'crypto' AND provider_order_id = ? "
+            "AND status IN ('creating', 'pending', 'processing') "
+            "AND (provider_payment_id IS NULL OR provider_payment_id = ?)",
+            (
+                expected_litoshi, payment_id, address, provider_status, expires_at,
+                int(order_id), str(provider_order_id), payment_id,
+            ),
+        )
+        if cur.rowcount != 1:
+            g_conn.rollback()
+            return False
+        g_conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        g_conn.rollback()
+        return False
+    finally:
+        g_conn.close()
+
+def fail_crypto_budget_payment_order(guild_id: int, order_id: int, provider_order_id: str):
+    g_conn, _ = get_guild_db(int(guild_id))
+    try:
+        cur = g_conn.execute(
+            "UPDATE budget_payment_orders SET status = 'failed', provider_status = 'creation_failed' "
+            "WHERE id = ? AND method = 'crypto' AND provider_order_id = ? AND status = 'creating'",
+            (int(order_id), str(provider_order_id)),
+        )
+        g_conn.commit()
+        return cur.rowcount == 1
+    finally:
+        g_conn.close()
+
+def process_nowpayments_ipn(payload: dict):
+    """Validate one signed provider event and credit its guild budget exactly once."""
+    provider_order_id = str(payload.get("order_id", "")).strip()
+    match = re.fullmatch(r"cosmo:(\d{1,20}):([0-9a-f]{32})", provider_order_id)
+    payment_id = str(payload.get("payment_id", "")).strip()
+    provider_status = str(payload.get("payment_status", "")).strip().lower()
+    if not match or not payment_id:
+        return None
+    guild_id = int(match.group(1))
+    if guild_id <= 0:
+        return None
+
+    g_conn, _ = get_guild_db(guild_id)
+    try:
+        g_conn.execute("BEGIN IMMEDIATE")
+        order = g_conn.execute(
+            "SELECT id, user_id, channel_id, budget_amount, expected_payment, provider_payment_id, "
+            "quote_usd, pay_address, status FROM budget_payment_orders "
+            "WHERE guild_id = ? AND method = 'crypto' AND provider_order_id = ? LIMIT 1",
+            (guild_id, provider_order_id),
+        ).fetchone()
+        if not order:
+            g_conn.rollback()
+            return None
+        order_id, user_id, channel_id, budget_amount, expected_litoshi, saved_payment_id, quote_usd, pay_address, order_status = order
+        if saved_payment_id and str(saved_payment_id) != payment_id:
+            g_conn.rollback()
+            return None
+        if order_status == "paid":
+            g_conn.rollback()
+            return {"status": "duplicate", "order_id": int(order_id)}
+
+        if provider_status == "waiting":
+            if order_status not in {"pending", "creating", "processing"}:
+                g_conn.rollback()
+                return {"status": "needs_review", "order_id": int(order_id)}
+            g_conn.execute(
+                "UPDATE budget_payment_orders SET status = CASE WHEN status = 'creating' THEN 'pending' ELSE status END, "
+                "provider_status = ?, provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ?",
+                (provider_status, payment_id, order_id),
+            )
+            g_conn.commit()
+            return {"status": "processing" if order_status == "processing" else "pending", "order_id": int(order_id)}
+        if provider_status in {"confirming", "confirmed", "sending"}:
+            if order_status not in {"pending", "creating", "processing"}:
+                g_conn.rollback()
+                return {"status": "needs_review", "order_id": int(order_id)}
+            g_conn.execute(
+                "UPDATE budget_payment_orders SET status = 'processing', provider_status = ?, "
+                "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ?",
+                (provider_status, payment_id, order_id),
+            )
+            g_conn.commit()
+            return {"status": "processing", "order_id": int(order_id)}
+        if provider_status in {"expired", "failed"}:
+            g_conn.execute(
+                "UPDATE budget_payment_orders SET status = ?, provider_status = ? "
+                "WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
+                (provider_status, provider_status, order_id),
+            )
+            g_conn.commit()
+            return {"status": provider_status, "order_id": int(order_id)}
+        if provider_status in {"partially_paid", "wrong_asset_confirmed"}:
+            g_conn.execute(
+                "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = ? "
+                "WHERE id = ? AND status != 'paid'",
+                (provider_status, order_id),
+            )
+            g_conn.commit()
+            return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+        if provider_status != "finished" or order_status not in {"pending", "creating", "processing"}:
+            g_conn.rollback()
+            return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+
+        try:
+            pay_currency = str(payload.get("pay_currency", "")).strip().lower()
+            network = str(payload.get("network") or pay_currency).strip().lower()
+            price_currency = str(payload.get("price_currency", "")).strip().lower()
+            outcome_currency = str(payload.get("outcome_currency", "")).strip().lower()
+            quote_received = Decimal(str(payload.get("price_amount")))
+            quote_expected = Decimal(str(quote_usd))
+            pay_amount = Decimal(str(payload.get("pay_amount")))
+            actually_paid = Decimal(str(payload.get("actually_paid")))
+            outcome_amount = Decimal(str(payload.get("outcome_amount")))
+            pay_litoshi = int((pay_amount * 100_000_000).to_integral_value(rounding=ROUND_DOWN))
+            paid_litoshi = int((actually_paid * 100_000_000).to_integral_value(rounding=ROUND_DOWN))
+        except (InvalidOperation, TypeError, ValueError):
+            quote_received = quote_expected = Decimal("0")
+            outcome_amount = Decimal("0")
+            pay_currency = price_currency = network = outcome_currency = ""
+            pay_litoshi = paid_litoshi = 0
+
+        quote_matches = (
+            quote_received.is_finite() and quote_expected.is_finite()
+            and abs(quote_received - quote_expected) <= Decimal("0.00000001")
+        )
+        payment_matches = (
+            pay_currency == "ltc" and network in {"ltc", "litecoin"}
+            and price_currency == "usd" and quote_matches
+            and outcome_currency in {"ltc", "litecoin"}
+            and outcome_amount.is_finite() and outcome_amount > 0
+            and pay_litoshi == int(expected_litoshi) and paid_litoshi == int(expected_litoshi)
+            and pay_address and str(payload.get("pay_address", "")).strip() == str(pay_address)
+            and payload.get("parent_payment_id") in (None, "", 0, "0")
+        )
+        if not payment_matches:
+            g_conn.execute(
+                "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = ?, "
+                "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ? AND status != 'paid'",
+                (provider_status, payment_id, order_id),
+            )
+            g_conn.commit()
+            return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+
+        old_row = g_conn.execute(
+            "SELECT spending_balance FROM settings WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+        old_balance = int(old_row[0] or 0) if old_row else 0
+        max_sqlite_int = 9_223_372_036_854_775_807
+        if old_balance > max_sqlite_int - int(budget_amount):
+            g_conn.rollback()
+            return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+        cur = g_conn.execute(
+            "UPDATE budget_payment_orders SET status = 'paid', provider_status = 'finished', "
+            "provider_payment_id = ?, paid_at = ? WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
+            (payment_id, int(time.time()), order_id),
+        )
+        if cur.rowcount != 1:
+            g_conn.rollback()
+            return None
+        new_balance = old_balance + int(budget_amount)
+        g_conn.execute(
+            "INSERT INTO settings (guild_id, spending_balance) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET spending_balance = excluded.spending_balance",
+            (guild_id, new_balance),
+        )
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        g_conn.execute(
+            "INSERT INTO budget_logs (action, amount, old_balance, new_balance, admin_id, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("إضافة تلقائية (crypto)", int(budget_amount), old_balance, new_balance, int(user_id), timestamp),
+        )
+        g_conn.commit()
+        return {
+            "status": "paid", "order_id": int(order_id), "guild_id": guild_id,
+            "user_id": int(user_id), "channel_id": int(channel_id),
+            "budget_amount": int(budget_amount), "old_balance": old_balance,
+            "new_balance": new_balance,
+        }
+    finally:
+        g_conn.close()
 
 def _settle_budget_payment_locked(guild_id: int, method: str, channel_id: int, payer_name: str,
                                   expected_payment: int, payment_message_id: int, payment_author_id: int,
@@ -665,6 +957,76 @@ def transfer_balance(sender_id: int, receiver_id: int, amount: int, timestamp: s
         )
         conn.commit()
         return True
+
+def transfer_balance_to_server_budget(user_id: int, guild_id: int, amount: int, timestamp: str | None = None):
+    """Atomically debit global personal Cosmo and credit one guild budget."""
+    user_id, guild_id, amount = int(user_id), int(guild_id), int(amount)
+    max_sqlite_int = 9_223_372_036_854_775_807
+    if user_id <= 0 or guild_id <= 0 or amount <= 0 or amount > max_sqlite_int:
+        raise ValueError("بيانات تحويل رصيد Cosmo غير صالحة.")
+
+    guild_conn, _ = get_guild_db(guild_id)
+    try:
+        guild_conn.commit()
+        guild_path = guild_conn.execute("PRAGMA database_list").fetchone()[2]
+    finally:
+        guild_conn.close()
+    if not guild_path or guild_path == ":memory:":
+        raise RuntimeError("لا يمكن تنفيذ تحويل ذري على قاعدة بيانات مؤقتة.")
+
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("ATTACH DATABASE ? AS guild", (os.path.abspath(guild_path),))
+        main_path = conn.execute("PRAGMA main.database_list").fetchone()[2]
+        main_journal = str(conn.execute("PRAGMA main.journal_mode").fetchone()[0]).lower()
+        guild_journal = str(conn.execute("PRAGMA guild.journal_mode").fetchone()[0]).lower()
+        if not main_path or main_path == ":memory:" or "wal" in {main_journal, guild_journal}:
+            raise RuntimeError("قاعدة البيانات لا تسمح بمعاملة آمنة متعددة الملفات؛ لم يُخصم أي رصيد.")
+
+        conn.execute("BEGIN IMMEDIATE")
+        balance_row = conn.execute("SELECT balance FROM main.balances WHERE user_id = ?", (user_id,)).fetchone()
+        if not balance_row or int(balance_row[0] or 0) < amount:
+            conn.rollback()
+            return None
+        old_balance = int(balance_row[0] or 0)
+        budget_row = conn.execute(
+            "SELECT spending_balance FROM guild.settings WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+        old_budget = int(budget_row[0] or 0) if budget_row else 0
+        if old_budget > max_sqlite_int - amount:
+            conn.rollback()
+            raise OverflowError("ميزانية السيرفر ستتجاوز الحد الرقمي المدعوم.")
+
+        debit = conn.execute(
+            "UPDATE main.balances SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+            (amount, user_id, amount),
+        )
+        if debit.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.execute(
+            "INSERT INTO guild.settings (guild_id, spending_balance) VALUES (?, 0) "
+            "ON CONFLICT(guild_id) DO NOTHING",
+            (guild_id,),
+        )
+        new_budget = old_budget + amount
+        conn.execute(
+            "UPDATE guild.settings SET spending_balance = ? WHERE guild_id = ?",
+            (new_budget, guild_id),
+        )
+        timestamp = timestamp or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        conn.execute(
+            "INSERT INTO guild.budget_logs (action, amount, old_balance, new_balance, admin_id, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("إضافة من رصيد Cosmo", amount, old_budget, new_budget, user_id, timestamp),
+        )
+        conn.commit()
+        return {
+            "amount": amount,
+            "old_personal_balance": old_balance,
+            "new_personal_balance": old_balance - amount,
+            "old_budget": old_budget,
+            "new_budget": new_budget,
+        }
 
 def has_pending_exchange_request(user_id: int) -> bool:
     with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:

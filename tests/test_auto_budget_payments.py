@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -24,6 +25,7 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         database.GLOBAL_DB_PATH = self.global_db_path
         with sqlite3.connect(self.global_db_path) as conn:
             conn.execute("CREATE TABLE global_settings (key TEXT PRIMARY KEY, value INTEGER)")
+            conn.execute("CREATE TABLE balances (user_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0)")
 
         def get_test_guild_db(_guild_id):
             conn = sqlite3.connect(self.guild_db_path, timeout=10)
@@ -45,7 +47,9 @@ class AutoBudgetPaymentTests(unittest.TestCase):
                     method TEXT NOT NULL, budget_amount INTEGER NOT NULL,
                     expected_payment INTEGER NOT NULL, created_at INTEGER NOT NULL,
                     expires_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-                    payment_message_id INTEGER UNIQUE, payment_author_id INTEGER, paid_at INTEGER
+                    payment_message_id INTEGER UNIQUE, payment_author_id INTEGER, paid_at INTEGER,
+                    provider_order_id TEXT, provider_payment_id TEXT, quote_usd TEXT,
+                    pay_address TEXT, pay_currency TEXT, provider_status TEXT
                 );
                 """
             )
@@ -141,6 +145,73 @@ class AutoBudgetPaymentTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT status FROM budget_payment_orders WHERE id = ?", (order_id,)).fetchone()[0], "cancelled")
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM settings").fetchone()[0], 0)
 
+    def test_personal_cosmo_transfer_is_atomic_and_written_to_budget_history(self):
+        guild_conn, _ = database.get_guild_db(101)
+        guild_conn.close()
+        with sqlite3.connect(self.global_db_path) as conn:
+            conn.execute("INSERT INTO balances (user_id, balance) VALUES (202, 100)")
+        with sqlite3.connect(self.guild_db_path) as conn:
+            conn.execute("INSERT INTO settings (guild_id, spending_balance) VALUES (101, 20)")
+
+        result = database.transfer_balance_to_server_budget(202, 101, 35, "2026-10-19 12:00:00")
+
+        self.assertEqual(result["new_personal_balance"], 65)
+        self.assertEqual(result["old_budget"], 20)
+        self.assertEqual(result["new_budget"], 55)
+        with sqlite3.connect(self.global_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT balance FROM balances WHERE user_id = 202").fetchone()[0], 65)
+        with sqlite3.connect(self.guild_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()[0], 55)
+            self.assertEqual(
+                conn.execute("SELECT action, amount, admin_id FROM budget_logs").fetchone(),
+                ("إضافة من رصيد Cosmo", 35, 202),
+            )
+
+    def test_insufficient_personal_cosmo_does_not_change_either_balance(self):
+        guild_conn, _ = database.get_guild_db(101)
+        guild_conn.close()
+        with sqlite3.connect(self.global_db_path) as conn:
+            conn.execute("INSERT INTO balances (user_id, balance) VALUES (202, 10)")
+        with sqlite3.connect(self.guild_db_path) as conn:
+            conn.execute("INSERT INTO settings (guild_id, spending_balance) VALUES (101, 20)")
+
+        self.assertIsNone(database.transfer_balance_to_server_budget(202, 101, 11))
+        with sqlite3.connect(self.global_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT balance FROM balances WHERE user_id = 202").fetchone()[0], 10)
+        with sqlite3.connect(self.guild_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()[0], 20)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 0)
+
+    def test_concurrent_personal_transfers_cannot_double_spend(self):
+        guild_conn, _ = database.get_guild_db(101)
+        guild_conn.close()
+        with sqlite3.connect(self.global_db_path) as conn:
+            conn.execute("INSERT INTO balances (user_id, balance) VALUES (202, 100)")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: database.transfer_balance_to_server_budget(202, 101, 80), range(2)))
+
+        self.assertEqual(sum(result is not None for result in results), 1)
+        with sqlite3.connect(self.global_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT balance FROM balances WHERE user_id = 202").fetchone()[0], 20)
+        with sqlite3.connect(self.guild_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()[0], 80)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 1)
+
+    def test_personal_transfer_fails_closed_if_either_database_uses_wal(self):
+        guild_conn, _ = database.get_guild_db(101)
+        guild_conn.close()
+        with sqlite3.connect(self.global_db_path) as conn:
+            conn.execute("INSERT INTO balances (user_id, balance) VALUES (202, 100)")
+            conn.commit()
+            conn.execute("PRAGMA journal_mode=WAL")
+
+        with self.assertRaises(RuntimeError):
+            database.transfer_balance_to_server_budget(202, 101, 40)
+        with sqlite3.connect(self.global_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT balance FROM balances WHERE user_id = 202").fetchone()[0], 100)
+        with sqlite3.connect(self.guild_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 0)
+
 
 class AutoBudgetCommandButtonTests(unittest.IsolatedAsyncioTestCase):
     async def test_button_returns_exact_command_ephemerally_to_requester(self):
@@ -183,6 +254,8 @@ class BudgetHistoryLabelTests(unittest.TestCase):
             budget_history_action_label("إضافة تلقائية (adamc)"),
             "💳 شحن تلقائي عبر AdamC",
         )
+        self.assertIn("NOWPayments", budget_history_action_label("إضافة تلقائية (crypto)"))
+        self.assertIn("الشخصي", budget_history_action_label("إضافة من رصيد Cosmo"))
 
     def test_manual_additions_deductions_and_direct_set_are_distinguished(self):
         self.assertEqual(budget_history_action_label("إضافة"), "🟢 إضافة يدوية")

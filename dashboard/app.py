@@ -1,4 +1,5 @@
 import os
+import asyncio
 import sqlite3
 import sys
 import secrets
@@ -25,6 +26,7 @@ from database import (
     get_guild_db, PRIMARY_OWNER_ID, get_balance, parse_amount,
     create_exchange_request, deny_exchange_request,
 )
+from nowpayments import verify_ipn_signature
 
 load_dotenv(os.path.join(project_root, ".env"))
 
@@ -158,11 +160,74 @@ def inject_csrf_token():
 
 @app.before_request
 def enforce_csrf_for_posts():
+    if request.endpoint == "nowpayments_ipn":
+        return
     if request.method == "POST":
         expected = session.get("csrf_token", "")
         supplied = request.form.get("csrf_token", "")
         if not expected or not supplied or not hmac.compare_digest(expected, supplied):
             abort(400, description="رمز حماية النموذج غير صالح أو منتهي.")
+
+_discord_bot = None
+_discord_loop = None
+
+def set_discord_bot_context(bot, loop):
+    """Expose the running bot loop to the Flask webhook thread for payment notices."""
+    global _discord_bot, _discord_loop
+    _discord_bot, _discord_loop = bot, loop
+
+async def _send_nowpayments_notice(result):
+    if not _discord_bot or not result.get("channel_id"):
+        return
+    channel = _discord_bot.get_channel(int(result["channel_id"]))
+    if channel is None:
+        try:
+            channel = await _discord_bot.fetch_channel(int(result["channel_id"]))
+        except Exception as exc:
+            app.logger.warning("NOWPayments notice channel unavailable: %s", exc)
+            return
+    if result.get("status") == "paid":
+        text = (
+            f"✅ تأكد دفع LTC من NOWPayments للطلب `#{result['order_id']}`؛ "
+            f"أُضيفت `{result['budget_amount']:,}` إلى ميزانية السيرفر. "
+            f"الميزانية: `{result['old_balance']:,}` ← `{result['new_balance']:,}`."
+        )
+    else:
+        text = (
+            f"⚠️ وصل إشعار LTC للطلب `#{result.get('order_id', '?')}` لكنه يحتاج مراجعة يدوية؛ "
+            "لم تُضف الميزانية تلقائيًا. لا تعِد الدفع قبل مراجعة الإدارة."
+        )
+    try:
+        await channel.send(text)
+    except Exception as exc:
+        app.logger.warning("NOWPayments notice send failed: %s", exc)
+
+def _schedule_nowpayments_notice(result):
+    if _discord_loop and _discord_loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(_send_nowpayments_notice(result), _discord_loop)
+        future.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
+
+@app.route("/nowpayments/ipn", methods=["POST"])
+def nowpayments_ipn():
+    if not os.getenv("NOWPAYMENTS_IPN_SECRET", "").strip():
+        return "IPN secret is not configured", 503
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return "Invalid JSON", 400
+    signature = request.headers.get("x-nowpayments-sig", "")
+    if not verify_ipn_signature(payload, signature):
+        return "Invalid signature", 401
+    try:
+        result = database.process_nowpayments_ipn(payload)
+    except Exception:
+        app.logger.exception("NOWPayments IPN settlement failed")
+        return "Temporary settlement error", 500
+    if result is None:
+        app.logger.warning("Signed NOWPayments IPN did not match a budget order")
+        return "", 200
+    if result.get("status") in {"paid", "needs_review"}:
+        _schedule_nowpayments_notice(result)
+    return "", 200
 
 def user_can_manage_guild(access_token: str, guild_id: int) -> bool:
     """تحقق من صلاحيات OAuth الفعلية، لا من رقم السيرفر المرسل في URL فقط."""
