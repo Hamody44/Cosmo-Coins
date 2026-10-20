@@ -35,6 +35,15 @@ ADAMC_ID = ADAMC_PAYMENT_BOT_ID
 AUTO_BUDGET_PAYMENT_TTL = 5 * 60
 MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
+def available_budget_payment_methods(is_manager: bool, personal_balance: int, budget_amount: int) -> list[str]:
+    """Build checkout choices; LTC is intentionally hidden from the budget top-up menu."""
+    if not is_manager:
+        return ["cosmo"] if personal_balance >= budget_amount else []
+    methods = [method for method in ("credit", "adamc") if is_auto_budget_payment_enabled(method)]
+    if personal_balance >= budget_amount:
+        methods.append("cosmo")
+    return methods
+
 def parse_budget_payment_confirmation(method: str, author_id: int, text: str):
     """Parse only the user-provided receipt shape; caller must also validate message guild/channel/time."""
     method = method.strip().lower()
@@ -710,20 +719,12 @@ class Admin(commands.Cog):
 
         is_manager = can_manage_bot(ctx)
         personal_balance = get_balance(ctx.author.id)
-        if not is_manager:
-            if personal_balance < budget_amount:
-                return await ctx.send(
-                    f"⛔ لست مالك السيرفر أو مسؤولًا. يمكن لأي عضو شحن الميزانية من رصيد Cosmo الشخصي فقط، "
-                    f"لكن رصيدك `{personal_balance:,}` أقل من المطلوب `{budget_amount:,}`."
-                )
-            methods = ["cosmo"]
-        else:
-            methods = [method for method in ("credit", "adamc") if is_auto_budget_payment_enabled(method)]
-            dashboard_url = os.getenv("DASHBOARD_URL", "").strip().rstrip("/")
-            if is_auto_budget_payment_enabled("crypto") and nowpayments_is_configured() and dashboard_url.startswith("https://"):
-                methods.append("crypto")
-            if personal_balance >= budget_amount:
-                methods.append("cosmo")
+        methods = available_budget_payment_methods(is_manager, personal_balance, budget_amount)
+        if not is_manager and not methods:
+            return await ctx.send(
+                f"⛔ لست مالك السيرفر أو مسؤولًا. يمكن لأي عضو شحن الميزانية من رصيد Cosmo الشخصي فقط، "
+                f"لكن رصيدك `{personal_balance:,}` أقل من المطلوب `{budget_amount:,}`."
+            )
         if not methods:
             return await ctx.send("⛔ لا توجد وسيلة دفع مفعّلة أو مكتملة الإعداد حاليًا؛ تواصل مع مالك البوت.")
         view = AutoBudgetPaymentView(self.bot, ctx.author.id, budget_amount, methods)

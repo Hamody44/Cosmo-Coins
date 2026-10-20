@@ -12,6 +12,7 @@ from cogs.admin import (
     AutoBudgetCommandButton,
     PRIMARY_OWNER_ID,
     PROBOT_ID,
+    available_budget_payment_methods,
     budget_history_action_label,
     parse_budget_payment_confirmation,
 )
@@ -59,6 +60,17 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         self.guild_db_patch.start()
         self.addCleanup(self.guild_db_patch.stop)
         self.addCleanup(self.temp_dir.cleanup)
+
+    def test_crypto_is_hidden_from_budget_checkout_methods(self):
+        with patch("cogs.admin.is_auto_budget_payment_enabled", return_value=True):
+            manager_methods = available_budget_payment_methods(True, 0, 100)
+            member_methods = available_budget_payment_methods(False, 100, 100)
+            insufficient_member_methods = available_budget_payment_methods(False, 99, 100)
+
+        self.assertEqual(manager_methods, ["credit", "adamc"])
+        self.assertEqual(member_methods, ["cosmo"])
+        self.assertEqual(insufficient_member_methods, [])
+        self.assertNotIn("crypto", manager_methods)
 
     def test_provider_message_examples_parse_only_for_expected_bot_ids(self):
         probot_text = "**ـ new.3mk, قام بتحويل `$100000000` لـ <@!988840428591808584> ** |:moneybag:"

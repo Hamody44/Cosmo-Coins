@@ -283,18 +283,20 @@ class Tickets(commands.Cog):
         g_conn.close()
         await ctx.send(f"✅ تم ضبط روم لوج التذاكر على: {channel.mention}")
 
-    @commands.hybrid_command(name="rename", aliases=["تغيير_اسم_التكت"], description="تغيير اسم التذكرة مع الحفاظ عليها داخل النظام")
+    @commands.hybrid_command(name="rename", aliases=["تغيير_اسم_التكت"], description="إعادة تسمية التذكرة (مالك السيرفر أو مسؤول التذاكر فقط)")
     async def rename_ticket(self, ctx: commands.Context, new_name: str):
+        if not ctx.guild:
+            return await ctx.send("⛔ استخدم هذا الأمر داخل التذكرة في السيرفر.")
         g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute("SELECT user_id FROM tickets WHERE channel_id = ?", (ctx.channel.id,))
+        g_cur.execute("SELECT 1 FROM tickets WHERE channel_id = ?", (ctx.channel.id,))
         row = g_cur.fetchone()
         g_conn.close()
 
         if not row:
             return await ctx.send("❌ هذا الروم ليس تذكرة مسجلة في النظام.")
 
-        if not can_manage_tickets(ctx) and ctx.author.id != row[0]:
-            return await ctx.send("⛔ ليس لديك صلاحية لتغيير اسم هذه التذكرة.")
+        if not can_manage_tickets(ctx):
+            return await ctx.send("⛔ إعادة تسمية التذكرة متاحة لمالك السيرفر أو مسؤولي التذاكر فقط.")
 
         cleaned_name = new_name.strip().replace(" ", "-")[:32]
         await ctx.channel.edit(name=cleaned_name)

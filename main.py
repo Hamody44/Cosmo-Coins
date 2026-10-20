@@ -3,6 +3,8 @@ import asyncio
 import threading
 import subprocess
 import urllib.request
+import json
+import ipaddress
 import stat
 import discord
 from discord.ext import commands, tasks
@@ -27,6 +29,35 @@ intents.reactions = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 bot.owner_id = PRIMARY_OWNER_ID
+
+def _lookup_public_ip(version: int) -> str:
+    host = "api.ipify.org" if version == 4 else "api6.ipify.org"
+    with urllib.request.urlopen(f"https://{host}?format=json", timeout=4) as response:
+        payload = json.loads(response.read(256).decode("utf-8"))
+    parsed = ipaddress.ip_address(str(payload.get("ip", "")).strip())
+    if parsed.version != version:
+        raise ValueError("address family mismatch")
+    return str(parsed)
+
+
+async def log_public_server_ips():
+    versions = (4, 6)
+    results = await asyncio.gather(
+        *(asyncio.to_thread(_lookup_public_ip, version) for version in versions),
+        return_exceptions=True,
+    )
+    available = [
+        f"IPv{version}={result}"
+        for version, result in zip(versions, results)
+        if isinstance(result, str)
+    ]
+    if available:
+        print("🌐 Server Public IP (current outbound): " + " | ".join(available))
+        print("أضف عنوان/عناوين الخروج أعلاه إلى NOWPayments > Settings > Whitelist > IP addresses.")
+        print("⚠️ إذا لم توفر الاستضافة IP خروج ثابتًا فقد يتغير العنوان ويحتاج تحديث القائمة البيضاء.")
+    else:
+        print("⚠️ تعذر تحديد Server Public IP؛ لم يتأثر تشغيل البوت. تحقق من اتصال الإنترنت أو عنوان الخروج الثابت للاستضافة.")
+
 
 def run_tunnel():
     token = os.getenv("CLOUDFLARE_TUNNEL_TOKEN")
@@ -218,6 +249,8 @@ async def load_cogs():
             print(f"Loaded Cog: {filename}")
 
 async def main():
+    await log_public_server_ips()
+
     # 1. تشغيل سيرفر الداشبورد في خيط مستقل
     try:
         set_discord_bot_context(bot, asyncio.get_running_loop())
