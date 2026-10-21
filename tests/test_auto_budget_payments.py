@@ -61,9 +61,9 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         self.addCleanup(self.guild_db_patch.stop)
         self.addCleanup(self.temp_dir.cleanup)
 
-    def test_btcpay_checkout_is_shown_only_when_configured_and_minimum_is_met(self):
+    def test_ltcpay_checkout_is_shown_only_when_configured_and_minimum_is_met(self):
         with patch("cogs.admin.is_auto_budget_payment_enabled", return_value=True), patch(
-            "cogs.admin.btcpay_is_configured", return_value=True
+            "cogs.admin.ltc_pay_is_configured", return_value=True
         ), patch.dict(os.environ, {"DASHBOARD_URL": "https://cosmo.example.test"}):
             manager_methods = available_budget_payment_methods(True, 0, 26_000_000)
             below_minimum = available_budget_payment_methods(True, 0, 25_999_999)
@@ -75,9 +75,9 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         self.assertEqual(member_methods, ["cosmo"])
         self.assertEqual(insufficient_member_methods, [])
 
-    def test_btcpay_checkout_is_hidden_when_not_configured(self):
+    def test_ltcpay_checkout_is_hidden_when_not_configured(self):
         with patch("cogs.admin.is_auto_budget_payment_enabled", return_value=True), patch(
-            "cogs.admin.btcpay_is_configured", return_value=False
+            "cogs.admin.ltc_pay_is_configured", return_value=False
         ), patch.dict(os.environ, {"DASHBOARD_URL": "https://cosmo.example.test"}):
             self.assertNotIn("crypto", available_budget_payment_methods(True, 0, 26_000_000))
 
@@ -275,7 +275,7 @@ class BudgetHistoryLabelTests(unittest.TestCase):
             budget_history_action_label("إضافة تلقائية (adamc)"),
             "💳 شحن تلقائي عبر AdamC",
         )
-        self.assertIn("BTCPay", budget_history_action_label("إضافة تلقائية (crypto)"))
+        self.assertIn("LTCPay", budget_history_action_label("إضافة تلقائية (crypto)"))
         self.assertIn("الشخصي", budget_history_action_label("إضافة من رصيد Cosmo"))
 
     def test_manual_additions_deductions_and_direct_set_are_distinguished(self):

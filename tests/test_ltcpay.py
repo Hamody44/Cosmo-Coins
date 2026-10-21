@@ -10,36 +10,36 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import database
-import btcpay
+import ltcpay
 
 
-class BTCPayClientTests(unittest.TestCase):
+class LTCPayClientTests(unittest.TestCase):
     def setUp(self):
         self.env = patch.dict(
             os.environ,
             {
-                "BTCPAY_URL": "https://pay.example.test",
-                "BTCPAY_STORE_ID": "Store123",
-                "BTCPAY_API_KEY": "test-api-key",
-                "BTCPAY_WEBHOOK_SECRET": "test-webhook-secret",
+                "LTCPAY_URL": "https://pay.example.test",
+                "LTCPAY_STORE_ID": "Store123",
+                "LTCPAY_API_KEY": "test-api-key",
+                "LTCPAY_WEBHOOK_SECRET": "test-webhook-secret",
             },
         )
         self.env.start()
         self.addCleanup(self.env.stop)
 
     def test_budget_rate_and_minimum_are_exact(self):
-        self.assertEqual(btcpay.usd_for_budget(195_000_000), Decimal("0.75000000"))
-        self.assertEqual(btcpay.usd_for_budget(26_000_000), Decimal("0.10000000"))
-        self.assertEqual(btcpay.MIN_CRYPTO_BUDGET, 26_000_000)
-        with self.assertRaises(btcpay.BTCPayError):
-            btcpay.usd_for_budget(25_999_999)
+        self.assertEqual(ltcpay.usd_for_budget(195_000_000), Decimal("0.75000000"))
+        self.assertEqual(ltcpay.usd_for_budget(26_000_000), Decimal("0.10000000"))
+        self.assertEqual(ltcpay.MIN_CRYPTO_BUDGET, 26_000_000)
+        with self.assertRaises(ltcpay.LTCPayError):
+            ltcpay.usd_for_budget(25_999_999)
 
     def test_configuration_requires_store_credentials_and_webhook_secret(self):
-        self.assertTrue(btcpay.is_configured())
-        with patch.dict(os.environ, {"BTCPAY_WEBHOOK_SECRET": ""}):
-            self.assertFalse(btcpay.is_configured())
-        with patch.dict(os.environ, {"BTCPAY_URL": "http://public.example.test"}):
-            self.assertFalse(btcpay.is_configured())
+        self.assertTrue(ltcpay.is_configured())
+        with patch.dict(os.environ, {"LTCPAY_WEBHOOK_SECRET": ""}):
+            self.assertFalse(ltcpay.is_configured())
+        with patch.dict(os.environ, {"LTCPAY_URL": "http://public.example.test"}):
+            self.assertFalse(ltcpay.is_configured())
 
     def test_create_ltc_invoice_uses_usd_and_ltc_only(self):
         response = SimpleNamespace(
@@ -48,47 +48,52 @@ class BTCPayClientTests(unittest.TestCase):
                 "id": "Invoice123", "storeId": "Store123", "currency": "USD",
                 "amount": "0.75", "checkoutLink": "https://pay.example.test/i/Invoice123",
                 "expirationTime": 1_900_000_000, "status": "New",
-                "metadata": {"orderId": "cosmo:101:" + "a" * 32},
+                "metadata": {"orderId": "cosmo:101:" + "a" * 32, "discord_user_id": "202"},
+                "checkout": {"paymentMethods": ["LTC-CHAIN"]},
             },
         )
-        with patch("btcpay.requests.request", return_value=response) as request:
-            invoice = btcpay.create_ltc_invoice(
-                price_usd=Decimal("0.75"), provider_order_id="cosmo:101:" + "a" * 32,
+        with patch("ltcpay.requests.request", return_value=response) as request:
+            invoice = ltcpay.create_ltc_invoice(
+                price_usd=Decimal("0.75"), provider_order_id="cosmo:101:" + "a" * 32, discord_user_id=202,
             )
         body = request.call_args.kwargs["json"]
         self.assertEqual(body["currency"], "USD")
         self.assertEqual(body["amount"], "0.75000000")
         self.assertEqual(body["checkout"]["paymentMethods"], ["LTC-CHAIN"])
+        self.assertEqual(body["checkout"]["speedPolicy"], "MediumSpeed")
+        self.assertEqual(body["metadata"]["discord_user_id"], "202")
         self.assertEqual(body["checkout"]["defaultPaymentMethod"], "LTC-CHAIN")
         self.assertEqual(invoice["payment_id"], "Invoice123")
         self.assertEqual(invoice["pay_address"], "https://pay.example.test/i/Invoice123")
         self.assertEqual(invoice["metadata_order_id"], "cosmo:101:" + "a" * 32)
+        self.assertEqual(invoice["metadata_user_id"], "202")
         self.assertTrue(request.call_args.kwargs["headers"]["Authorization"].startswith("token "))
 
     def test_create_invoice_fails_closed_on_store_amount_metadata_or_checkout_link_mismatch(self):
         wrong_store = {
             "id": "Invoice123", "storeId": "OtherStore", "currency": "USD", "amount": "0.75",
             "checkoutLink": "https://pay.example.test/i/Invoice123", "expirationTime": 1_900_000_000,
-            "metadata": {"orderId": "cosmo:101:" + "a" * 32},
+            "metadata": {"orderId": "cosmo:101:" + "a" * 32, "discord_user_id": "202"},
+            "checkout": {"paymentMethods": ["LTC-CHAIN"]},
         }
-        with patch("btcpay.requests.request", return_value=SimpleNamespace(status_code=200, json=lambda: wrong_store)):
-            with self.assertRaises(btcpay.BTCPayError):
-                btcpay.create_ltc_invoice(price_usd=Decimal("0.75"), provider_order_id="cosmo:101:" + "a" * 32)
+        with patch("ltcpay.requests.request", return_value=SimpleNamespace(status_code=200, json=lambda: wrong_store)):
+            with self.assertRaises(ltcpay.LTCPayError):
+                ltcpay.create_ltc_invoice(price_usd=Decimal("0.75"), provider_order_id="cosmo:101:" + "a" * 32, discord_user_id=202)
 
         external_link = dict(wrong_store, storeId="Store123", checkoutLink="https://evil.example/i")
-        with patch("btcpay.requests.request", return_value=SimpleNamespace(status_code=200, json=lambda: external_link)):
-            with self.assertRaises(btcpay.BTCPayError):
-                btcpay.create_ltc_invoice(price_usd=Decimal("0.75"), provider_order_id="cosmo:101:" + "a" * 32)
+        with patch("ltcpay.requests.request", return_value=SimpleNamespace(status_code=200, json=lambda: external_link)):
+            with self.assertRaises(ltcpay.LTCPayError):
+                ltcpay.create_ltc_invoice(price_usd=Decimal("0.75"), provider_order_id="cosmo:101:" + "a" * 32, discord_user_id=202)
 
     def test_webhook_signature_verifies_exact_raw_body(self):
         raw = b'{"type":"InvoiceSettled","invoiceId":"Invoice123"}'
         signature = "sha256=" + hmac.new(b"test-webhook-secret", raw, hashlib.sha256).hexdigest()
-        self.assertTrue(btcpay.verify_webhook_signature(raw, signature))
-        self.assertFalse(btcpay.verify_webhook_signature(raw + b" ", signature))
-        self.assertFalse(btcpay.verify_webhook_signature(raw, "sha256=" + "0" * 64))
+        self.assertTrue(ltcpay.verify_webhook_signature(raw, signature))
+        self.assertFalse(ltcpay.verify_webhook_signature(raw + b" ", signature))
+        self.assertFalse(ltcpay.verify_webhook_signature(raw, "sha256=" + "0" * 64))
 
 
-class BTCPaySettlementTests(unittest.TestCase):
+class LTCPaySettlementTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.guild_db_path = os.path.join(self.temp_dir.name, "guild.db")
@@ -158,24 +163,24 @@ class BTCPaySettlementTests(unittest.TestCase):
         invoice = {
             "id": self.invoice_id, "storeId": "Store123", "amount": "0.75", "paidAmount": "0.75",
             "currency": "USD", "status": "Settled", "additionalStatus": "None",
-            "metadata": {"orderId": self.provider_order_id},
+            "metadata": {"orderId": self.provider_order_id, "discord_user_id": "202"},
             "checkout": {"paymentMethods": ["LTC-CHAIN"]},
         }
         invoice.update(overrides)
         return invoice
 
     def test_settled_ltc_invoice_credits_budget_and_history_exactly_once(self):
-        processing = database.process_btcpay_webhook(
+        processing = database.process_ltcpay_webhook(
             self.event(type="InvoiceProcessing"), self.invoice(status="Processing", paidAmount="0.75")
         )
         self.assertEqual(processing["status"], "processing")
         with sqlite3.connect(self.guild_db_path) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 0)
 
-        result = database.process_btcpay_webhook(self.event(), self.invoice())
+        result = database.process_ltcpay_webhook(self.event(), self.invoice())
         self.assertEqual(result["status"], "paid")
         self.assertEqual(result["new_balance"], 195_000_000)
-        duplicate = database.process_btcpay_webhook(self.event(), self.invoice())
+        duplicate = database.process_ltcpay_webhook(self.event(), self.invoice())
         self.assertEqual(duplicate["status"], "duplicate")
         with sqlite3.connect(self.guild_db_path) as conn:
             self.assertEqual(conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()[0], 195_000_000)
@@ -188,10 +193,11 @@ class BTCPaySettlementTests(unittest.TestCase):
             (self.event(), self.invoice(additionalStatus="PaidOver")),
             (self.event(), self.invoice(checkout={"paymentMethods": ["BTC-CHAIN"]})),
             (self.event(storeId="OtherStore"), self.invoice()),
-            (self.event(), self.invoice(metadata={"orderId": "cosmo:102:" + "c" * 32})),
+            (self.event(), self.invoice(metadata={"orderId": "cosmo:102:" + "c" * 32, "discord_user_id": "202"})),
+            (self.event(), self.invoice(metadata={"orderId": self.provider_order_id, "discord_user_id": "999"})),
         )
         for event, invoice in cases:
-            result = database.process_btcpay_webhook(event, invoice)
+            result = database.process_ltcpay_webhook(event, invoice)
             self.assertTrue(result is None or result["status"] == "needs_review")
 
         with sqlite3.connect(self.guild_db_path) as conn:
@@ -210,7 +216,7 @@ class BTCPaySettlementTests(unittest.TestCase):
         self.assertIsNone(wrong_quote)
 
     def test_expired_invoice_is_never_credited(self):
-        result = database.process_btcpay_webhook(
+        result = database.process_ltcpay_webhook(
             self.event(type="InvoiceExpired"), self.invoice(status="Expired", additionalStatus="None")
         )
         self.assertEqual(result["status"], "expired")
@@ -219,7 +225,7 @@ class BTCPaySettlementTests(unittest.TestCase):
 
     def test_disabling_ltc_blocks_new_orders_but_existing_invoice_can_settle(self):
         database.set_auto_budget_payment_enabled("crypto", False, [101])
-        self.assertEqual(database.process_btcpay_webhook(self.event(), self.invoice())["status"], "paid")
+        self.assertEqual(database.process_ltcpay_webhook(self.event(), self.invoice())["status"], "paid")
         self.assertIsNone(
             database.create_crypto_budget_payment_order(
                 101, 203, "other", 304, 100_000_000, "0.38461539",
@@ -228,7 +234,7 @@ class BTCPaySettlementTests(unittest.TestCase):
         )
 
 
-class BTCPayWebhookRouteTests(unittest.TestCase):
+class LTCPayWebhookRouteTests(unittest.TestCase):
     def test_valid_signed_event_fetches_canonical_invoice_and_bad_signature_is_rejected(self):
         import dashboard.app as dashboard_app
 
@@ -239,21 +245,21 @@ class BTCPayWebhookRouteTests(unittest.TestCase):
         signature = "sha256=" + hmac.new(b"route-secret", raw, hashlib.sha256).hexdigest()
         with patch.dict(
             os.environ,
-            {"BTCPAY_WEBHOOK_SECRET": "route-secret", "BTCPAY_API_KEY": "test", "BTCPAY_STORE_ID": "Store123"},
+            {"LTCPAY_WEBHOOK_SECRET": "route-secret", "LTCPAY_API_KEY": "test", "LTCPAY_STORE_ID": "Store123"},
         ), patch.object(dashboard_app, "active_store_id", return_value="Store123"), patch.object(
             dashboard_app, "get_invoice", return_value={"id": "Invoice123", "storeId": "Store123"}
         ) as fetch_invoice, patch.object(
-            dashboard_app.database, "process_btcpay_webhook", return_value={"status": "processing"}
+            dashboard_app.database, "process_ltcpay_webhook", return_value={"status": "processing"}
         ) as process:
             client = dashboard_app.app.test_client()
             response = client.post(
-                "/btcpay/webhook", data=raw, content_type="application/json", headers={"BTCPAY-SIG": signature}
+                "/ltcpay/webhook", data=raw, content_type="application/json", headers={"BTCPAY-SIG": signature}
             )
             self.assertEqual(response.status_code, 200)
             fetch_invoice.assert_called_once_with("Invoice123")
             process.assert_called_once()
             bad = client.post(
-                "/btcpay/webhook", data=raw, content_type="application/json", headers={"BTCPAY-SIG": "sha256=" + "0" * 64}
+                "/ltcpay/webhook", data=raw, content_type="application/json", headers={"BTCPAY-SIG": "sha256=" + "0" * 64}
             )
             self.assertEqual(bad.status_code, 401)
 

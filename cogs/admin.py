@@ -24,9 +24,9 @@ from database import (
     set_auto_budget_payment_enabled, set_global_exchange_enabled,
     PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID
 )
-from btcpay import (
-    BTCPayError, INVOICE_TTL_SECONDS, MIN_CRYPTO_BUDGET, MIN_CRYPTO_USD,
-    create_ltc_invoice, format_usd, is_configured as btcpay_is_configured, usd_for_budget,
+from ltcpay import (
+    LTCPayError, INVOICE_TTL_SECONDS, MIN_CRYPTO_BUDGET, MIN_CRYPTO_USD,
+    create_ltc_invoice, format_usd, is_configured as ltc_pay_is_configured, usd_for_budget,
 )
 
 PROBOT_ID = PROBOT_PAYMENT_BOT_ID
@@ -35,7 +35,7 @@ AUTO_BUDGET_PAYMENT_TTL = 5 * 60
 MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
 def available_budget_payment_methods(is_manager: bool, personal_balance: int, budget_amount: int) -> list[str]:
-    """Build checkout choices while requiring the configured BTCPay integration and its USD floor."""
+    """Build checkout choices while requiring configured LTCPay and its USD floor."""
     if not is_manager:
         return ["cosmo"] if personal_balance >= budget_amount else []
     methods = [method for method in ("credit", "adamc") if is_auto_budget_payment_enabled(method)]
@@ -43,7 +43,7 @@ def available_budget_payment_methods(is_manager: bool, personal_balance: int, bu
     if (
         budget_amount >= MIN_CRYPTO_BUDGET
         and is_auto_budget_payment_enabled("crypto")
-        and btcpay_is_configured()
+        and ltc_pay_is_configured()
         and dashboard_url.startswith("https://")
     ):
         methods.append("crypto")
@@ -161,9 +161,9 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
                     f"⛔ الحد الأدنى للشحن عبر LTC هو ${MIN_CRYPTO_USD:.2f}، أي {MIN_CRYPTO_BUDGET:,} Cosmo.",
                     ephemeral=True,
                 )
-            if not btcpay_is_configured() or not dashboard_url.startswith("https://"):
+            if not ltc_pay_is_configured() or not dashboard_url.startswith("https://"):
                 return await interaction.response.send_message(
-                    "⛔ تكامل BTCPay غير مكتمل الإعداد؛ لم يُنشأ طلب ولم تُضف ميزانية.",
+                    "⛔ تكامل LTCPay غير مكتمل الإعداد؛ لم يُنشأ طلب ولم تُضف ميزانية.",
                     ephemeral=True,
                 )
             await interaction.response.defer(ephemeral=True)
@@ -184,11 +184,12 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
                     now + INVOICE_TTL_SECONDS,
                 )
                 if order_id is None:
-                    raise BTCPayError("لديك طلب شحن آخر قيد الإنشاء أو الانتظار في هذا السيرفر، أو أُغلقت وسيلة LTC.")
+                    raise LTCPayError("لديك طلب شحن آخر قيد الإنشاء أو الانتظار في هذا السيرفر، أو أُغلقت وسيلة LTC.")
                 invoice = await asyncio.to_thread(
                     create_ltc_invoice,
                     price_usd=price_usd,
                     provider_order_id=provider_order_id,
+                    discord_user_id=interaction.user.id,
                     item_description=f"Cosmo server budget {self.budget_amount}",
                 )
                 saved = await asyncio.to_thread(
@@ -199,7 +200,7 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
                     invoice,
                 )
                 if not saved:
-                    raise BTCPayError("تعذر ربط فاتورة BTCPay بطلب الميزانية؛ لم نعرض رابط الدفع لتجنب دفع غير قابل للتسوية.")
+                    raise LTCPayError("تعذر ربط فاتورة LTCPay بطلب الميزانية؛ لم نعرض رابط الدفع لتجنب دفع غير قابل للتسوية.")
             except Exception as exc:
                 if "order_id" in locals() and order_id is not None:
                     try:
@@ -211,8 +212,8 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
                         )
                     except Exception:
                         pass
-                print(f"BTCPay budget invoice creation failed: {exc}")
-                message = str(exc) if isinstance(exc, BTCPayError) else "تعذر إنشاء فاتورة LTC الآن. لم تُعتمد أي ميزانية؛ حاول لاحقًا أو تواصل مع مالك البوت."
+                print(f"LTCPay budget invoice creation failed: {exc}")
+                message = str(exc) if isinstance(exc, LTCPayError) else "تعذر إنشاء فاتورة LTC الآن. لم تُعتمد أي ميزانية؛ حاول لاحقًا أو تواصل مع مالك البوت."
                 await interaction.followup.send(f"⚠️ {message}", ephemeral=True)
                 try:
                     await interaction.message.edit(content="تعذر إنشاء فاتورة LTC؛ لم تُضف ميزانية. يمكنك إعادة المحاولة لاحقًا.", view=None)
@@ -222,13 +223,13 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
 
             expires_at = int(invoice["expires_at"])
             message = (
-                f"💸 **طلب LTC #{order_id} — BTCPay**\n"
+                f"💸 **طلب LTC #{order_id} — LTCPay**\n"
                 f"• الميزانية: `{self.budget_amount:,}` Cosmo\n"
                 f"• القيمة: **${format_usd(price_usd)}** (بسعر 1 USD = 260,000,000 Cosmo)\n"
                 f"• الحد الأدنى: **${MIN_CRYPTO_USD:.2f} / {MIN_CRYPTO_BUDGET:,} Cosmo**\n"
-                f"• [افتح فاتورة BTCPay لإتمام الدفع]({invoice['pay_address']})\n"
+                f"• [افتح فاتورة LTCPay لإتمام الدفع]({invoice['pay_address']})\n"
                 "ستعرض الفاتورة مبلغ LTC المطلوب وعنوان إيداع فريدًا. أرسل Litecoin على شبكة Litecoin فقط. "
-                f"تنتهي الفاتورة <t:{expires_at}:R>، ولا تُضاف الميزانية حتى يؤكد BTCPay حالتها `Settled` على السلسلة."
+                f"تنتهي الفاتورة <t:{expires_at}:R>، ولا تُضاف الميزانية حتى يؤكد LTCPay حالتها `Settled` بعد تأكيدها على السلسلة."
             )
             await interaction.followup.send(message, ephemeral=True)
             try:
@@ -352,7 +353,7 @@ def budget_history_action_label(action: str) -> str:
         "تعيين مباشر": "⚙️ تعيين مباشر",
         "إضافة تلقائية (credit)": "💳 شحن تلقائي عبر ProBot Credits",
         "إضافة تلقائية (adamc)": "💳 شحن تلقائي عبر AdamC",
-        "إضافة تلقائية (crypto)": "Ł شحن تلقائي عبر LTC / BTCPay",
+        "إضافة تلقائية (crypto)": "Ł شحن تلقائي عبر LTC / LTCPay",
         "إضافة من رصيد Cosmo": "🪙 تحويل من رصيد Cosmo الشخصي",
     }
     if action in labels:
@@ -779,7 +780,7 @@ class Admin(commands.Cog):
         if cancelled:
             summary += f" أُلغيت {len(cancelled)} طلبات شحن معلقة وأُبلغ أصحابها."
         if method_key == "crypto" and not enabled:
-            summary += " لن تُقبل طلبات LTC جديدة؛ الفواتير الصادرة تبقى قابلة للتسوية من BTCPay."
+            summary += " لن تُقبل طلبات LTC جديدة؛ الفواتير الصادرة تبقى قابلة للتسوية من LTCPay."
         await ctx.send(summary)
 
     @commands.hybrid_command(

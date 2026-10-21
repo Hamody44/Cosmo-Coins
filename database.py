@@ -377,7 +377,7 @@ def is_auto_budget_payment_enabled(method: str) -> bool:
         return bool(row and row[0] == 1)
 
 def _cancel_pending_budget_orders(guild_ids, method: str):
-    # لا يمكن إلغاء فاتورة BTCPay بأمان من المفتاح المحلي؛ الطلبات الصادرة
+    # لا يمكن إلغاء فاتورة LTCPay بأمان من المفتاح المحلي؛ الطلبات الصادرة
     # تبقى قابلة للتسوية حتى انتهاء مهلة المزود، بينما يمنع الإغلاق إنشاء طلبات جديدة.
     if method == "crypto":
         return []
@@ -497,7 +497,7 @@ def create_crypto_budget_payment_order(
     guild_id: int, user_id: int, payer_name: str, channel_id: int, budget_amount: int,
     quote_usd: str, provider_order_id: str, created_at: int, expires_at: int,
 ):
-    """Reserve an LTC-only BTCPay invoice before the external invoice is created."""
+    """Reserve an LTC-only LTCPay invoice before the external invoice is created."""
     guild_id, user_id, channel_id = int(guild_id), int(user_id), int(channel_id)
     budget_amount = int(budget_amount)
     created_at, expires_at = int(created_at), int(expires_at)
@@ -562,7 +562,7 @@ def create_crypto_budget_payment_order(
 
 
 def update_crypto_budget_payment_order(guild_id: int, order_id: int, provider_order_id: str, invoice: dict):
-    """Attach the BTCPay invoice ID and checked checkout URL to its reserved order."""
+    """Attach the LTCPay invoice ID and checked checkout URL to its reserved order."""
     try:
         invoice_id = str(invoice["payment_id"]).strip()
         checkout_url = str(invoice["pay_address"]).strip()
@@ -624,8 +624,8 @@ def fail_crypto_budget_payment_order(guild_id: int, order_id: int, provider_orde
         g_conn.close()
 
 
-def process_btcpay_webhook(event: dict, invoice: dict):
-    """Settle one verified BTCPay invoice event after fetching its canonical invoice state."""
+def process_ltcpay_webhook(event: dict, invoice: dict):
+    """Settle one signed LTCPay event after fetching its canonical invoice state."""
     event_type = str(event.get("type", "")).strip()
     invoice_id = str(event.get("invoiceId", "")).strip()
     event_store_id = str(event.get("storeId", "")).strip()
@@ -634,7 +634,7 @@ def process_btcpay_webhook(event: dict, invoice: dict):
     if not invoice_id or canonical_invoice_id != invoice_id or not event_store_id or canonical_store_id != event_store_id:
         return None
 
-    # The local order reference is encoded in the signed and fetched BTCPay invoice metadata.
+    # The local order reference is encoded in the signed event and fetched LTCPay invoice metadata.
     metadata = invoice.get("metadata") if isinstance(invoice.get("metadata"), dict) else {}
     provider_order_id = str(metadata.get("orderId", "")).strip()
     match = re.fullmatch(r"cosmo:(\d{1,20}):([0-9a-f]{32})", provider_order_id)
@@ -685,6 +685,7 @@ def process_btcpay_webhook(event: dict, invoice: dict):
             and method_ok
             and isinstance(invoice.get("metadata"), dict)
             and str(invoice["metadata"].get("orderId", "")) == provider_order_id
+            and str(invoice["metadata"].get("discord_user_id", "")) == str(user_id)
         )
 
         if event_type == "InvoiceProcessing" and str(invoice.get("status", "")).lower() == "processing":
