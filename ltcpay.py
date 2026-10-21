@@ -185,14 +185,28 @@ def create_ltc_invoice(*, price_usd: Decimal, provider_order_id: str, discord_us
         isinstance(methods, list) and len(methods) == 1
         and str(methods[0]).upper() in LTC_PAYMENT_METHOD_IDS
     )
+    mismatches = []
+    if not invoice_id or canonical_id != invoice_id:
+        mismatches.append("معرّف الفاتورة")
+    if returned_store != store_id:
+        mismatches.append("معرّف المتجر")
+    if returned_currency != "USD" or not returned_amount.is_finite() or returned_amount != amount:
+        mismatches.append("العملة أو المبلغ")
     if (
-        not invoice_id or canonical_id != invoice_id or returned_store != store_id or returned_currency != "USD"
-        or returned_amount != amount or parsed_checkout.scheme != "https"
+        parsed_checkout.scheme != "https"
         or parsed_checkout.netloc.lower() != parsed_base.netloc.lower()
-        or not parsed_checkout.path or metadata_order_id != str(provider_order_id)
-        or metadata_user_id != discord_user_id or not methods_match
+        or not parsed_checkout.path
     ):
-        raise LTCPayError("بيانات فاتورة LTCPay لا تطابق الطلب أو طريقة الدفع؛ لم نعرض رابط الدفع.")
+        mismatches.append("رابط الدفع")
+    if metadata_order_id != str(provider_order_id):
+        mismatches.append("رقم الطلب في metadata")
+    if metadata_user_id != discord_user_id:
+        mismatches.append("معرّف المستخدم في metadata")
+    if not methods_match:
+        mismatches.append("طرق الدفع المسموحة؛ يجب أن تكون LTC فقط")
+    if mismatches:
+        fields = "، ".join(mismatches)
+        raise LTCPayError(f"لم نتمكن من مطابقة فاتورة LTCPay في الحقول التالية: {fields}. لم نعرض رابط الدفع.")
     return {
         "payment_id": invoice_id,
         "pay_address": checkout_url,

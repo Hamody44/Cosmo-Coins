@@ -96,12 +96,12 @@ class LTCPayClientTests(unittest.TestCase):
             "checkout": {"paymentMethods": ["LTC"]},
         }
         with patch("ltcpay.requests.request", return_value=SimpleNamespace(status_code=200, json=lambda: wrong_store)):
-            with self.assertRaises(ltcpay.LTCPayError):
+            with self.assertRaisesRegex(ltcpay.LTCPayError, "معرّف المتجر"):
                 ltcpay.create_ltc_invoice(price_usd=Decimal("0.75"), provider_order_id="cosmo:101:" + "a" * 32, discord_user_id=202)
 
         external_link = dict(wrong_store, storeId="Store123", checkoutLink="https://evil.example/i")
         with patch("ltcpay.requests.request", return_value=SimpleNamespace(status_code=200, json=lambda: external_link)):
-            with self.assertRaises(ltcpay.LTCPayError):
+            with self.assertRaisesRegex(ltcpay.LTCPayError, "رابط الدفع"):
                 ltcpay.create_ltc_invoice(price_usd=Decimal("0.75"), provider_order_id="cosmo:101:" + "a" * 32, discord_user_id=202)
 
     def test_webhook_signature_verifies_exact_raw_body(self):
