@@ -42,7 +42,15 @@ class LTCPayClientTests(unittest.TestCase):
             self.assertFalse(ltcpay.is_configured())
 
     def test_create_ltc_invoice_uses_usd_and_ltc_only(self):
-        response = SimpleNamespace(
+        created_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "id": "Invoice123", "storeId": "Store123", "currency": "USD",
+                "amount": "0.75", "checkoutLink": "https://pay.example.test/i/Invoice123",
+                "expirationTime": 1_900_000_000, "status": "New",
+            },
+        )
+        invoice_response = SimpleNamespace(
             status_code=200,
             json=lambda: {
                 "id": "Invoice123", "storeId": "Store123", "currency": "USD",
@@ -52,11 +60,11 @@ class LTCPayClientTests(unittest.TestCase):
                 "checkout": {"paymentMethods": ["LTC"]},
             },
         )
-        with patch("ltcpay.requests.request", return_value=response) as request:
+        with patch("ltcpay.requests.request", side_effect=[created_response, invoice_response]) as request:
             invoice = ltcpay.create_ltc_invoice(
                 price_usd=Decimal("0.75"), provider_order_id="cosmo:101:" + "a" * 32, discord_user_id=202,
             )
-        body = request.call_args.kwargs["json"]
+        body = request.call_args_list[0].kwargs["json"]
         self.assertEqual(body["currency"], "USD")
         self.assertEqual(body["amount"], "0.75000000")
         self.assertEqual(body["checkout"]["paymentMethods"], ["LTC"])
@@ -67,7 +75,9 @@ class LTCPayClientTests(unittest.TestCase):
         self.assertEqual(invoice["pay_address"], "https://pay.example.test/i/Invoice123")
         self.assertEqual(invoice["metadata_order_id"], "cosmo:101:" + "a" * 32)
         self.assertEqual(invoice["metadata_user_id"], "202")
-        self.assertTrue(request.call_args.kwargs["headers"]["Authorization"].startswith("token "))
+        self.assertTrue(request.call_args_list[0].kwargs["headers"]["Authorization"].startswith("token "))
+        self.assertTrue(request.call_args_list[1].args[0] == "GET")
+        self.assertIn("includePaymentMethods", request.call_args_list[1].kwargs["params"])
 
     def test_provider_422_includes_short_validation_reason(self):
         response = SimpleNamespace(
@@ -200,6 +210,13 @@ class LTCPaySettlementTests(unittest.TestCase):
         result = database.process_ltcpay_webhook(
             self.event(), self.invoice(checkout={"paymentMethods": ["LTC-CHAIN"]})
         )
+        self.assertEqual(result["status"], "paid")
+
+    def test_single_ltc_method_at_invoice_root_is_accepted(self):
+        invoice = self.invoice()
+        invoice.pop("checkout")
+        invoice["paymentMethods"] = ["LTC"]
+        result = database.process_ltcpay_webhook(self.event(), invoice)
         self.assertEqual(result["status"], "paid")
 
     def test_nonexact_unexpected_store_or_non_ltc_funded_invoices_go_to_review(self):

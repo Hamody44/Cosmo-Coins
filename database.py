@@ -668,7 +668,7 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
             return {"status": "duplicate", "order_id": int(order_id)}
 
         checkout = invoice.get("checkout") if isinstance(invoice.get("checkout"), dict) else {}
-        methods = checkout.get("paymentMethods")
+        methods = checkout.get("paymentMethods") if "paymentMethods" in checkout else invoice.get("paymentMethods")
         method_ok = (
             isinstance(methods, list) and len(methods) == 1
             and str(methods[0]).upper() in {"LTC", "LTC-CHAIN"}

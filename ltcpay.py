@@ -153,21 +153,32 @@ def create_ltc_invoice(*, price_usd: Decimal, provider_order_id: str, discord_us
             "defaultLanguage": "en",
         },
     }
-    invoice = _api_request("POST", f"/api/v1/stores/{store_id}/invoices", json_body=payload)
+    created_invoice = _api_request("POST", f"/api/v1/stores/{store_id}/invoices", json_body=payload)
     try:
-        invoice_id = str(invoice["id"]).strip()
-        checkout_url = str(invoice["checkoutLink"]).strip()
-        returned_store = str(invoice["storeId"]).strip()
-        returned_currency = str(invoice["currency"]).strip().upper()
-        returned_amount = Decimal(str(invoice["amount"]))
-        expiry = int(invoice["expirationTime"])
-        metadata = invoice.get("metadata")
+        invoice_id = str(created_invoice["id"]).strip()
+        if not invoice_id:
+            raise ValueError("missing invoice id")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LTCPayError("لم يُرجع LTCPay معرّف الفاتورة؛ لم نعرض رابط دفع.") from exc
+
+    # Some Greenfield-compatible providers return only a compact create response.
+    # Fetch the canonical invoice before exposing its checkout link or trusting its fields.
+    invoice = get_invoice(invoice_id)
+    try:
+        canonical_id = str(invoice.get("id", invoice_id)).strip()
+        checkout_url = str(invoice.get("checkoutLink") or created_invoice.get("checkoutLink") or "").strip()
+        returned_store = str(invoice.get("storeId") or created_invoice.get("storeId") or "").strip()
+        returned_currency = str(invoice.get("currency") or created_invoice.get("currency") or "").strip().upper()
+        returned_amount = Decimal(str(invoice.get("amount", created_invoice.get("amount"))))
+        expiry = int(invoice.get("expirationTime", created_invoice.get("expirationTime")))
+        metadata = invoice.get("metadata") if isinstance(invoice.get("metadata"), dict) else created_invoice.get("metadata")
         metadata_order_id = str(metadata.get("orderId", "")).strip() if isinstance(metadata, dict) else ""
         metadata_user_id = str(metadata.get("discord_user_id", "")).strip() if isinstance(metadata, dict) else ""
-        checkout = invoice.get("checkout")
-        methods = checkout.get("paymentMethods") if isinstance(checkout, dict) else None
+        methods = _invoice_payment_methods(invoice)
+        if methods is None:
+            methods = _invoice_payment_methods(created_invoice)
     except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
-        raise LTCPayError("لم يُرجع LTCPay بيانات الفاتورة المطلوبة؛ لم نعرض رابط دفع.") from exc
+        raise LTCPayError("تعذر التحقق من بيانات فاتورة LTCPay؛ لم نعرض رابط دفع.") from exc
     parsed_checkout = urlsplit(checkout_url)
     parsed_base = urlsplit(base_url)
     methods_match = (
@@ -175,7 +186,7 @@ def create_ltc_invoice(*, price_usd: Decimal, provider_order_id: str, discord_us
         and str(methods[0]).upper() in LTC_PAYMENT_METHOD_IDS
     )
     if (
-        not invoice_id or returned_store != store_id or returned_currency != "USD"
+        not invoice_id or canonical_id != invoice_id or returned_store != store_id or returned_currency != "USD"
         or returned_amount != amount or parsed_checkout.scheme != "https"
         or parsed_checkout.netloc.lower() != parsed_base.netloc.lower()
         or not parsed_checkout.path or metadata_order_id != str(provider_order_id)
@@ -186,13 +197,20 @@ def create_ltc_invoice(*, price_usd: Decimal, provider_order_id: str, discord_us
         "payment_id": invoice_id,
         "pay_address": checkout_url,
         "pay_currency": "ltc",
-        "provider_status": str(invoice.get("status", "New")),
+        "provider_status": str(invoice.get("status", created_invoice.get("status", "New"))),
         "expires_at": expiry,
         "amount_usd": returned_amount,
         "store_id": returned_store,
         "metadata_order_id": metadata_order_id,
         "metadata_user_id": metadata_user_id,
     }
+
+
+def _invoice_payment_methods(invoice: dict):
+    checkout = invoice.get("checkout")
+    if isinstance(checkout, dict) and "paymentMethods" in checkout:
+        return checkout.get("paymentMethods")
+    return invoice.get("paymentMethods")
 
 
 def get_invoice(invoice_id: str) -> dict:
