@@ -69,6 +69,15 @@ class LTCPayClientTests(unittest.TestCase):
         self.assertEqual(invoice["metadata_user_id"], "202")
         self.assertTrue(request.call_args.kwargs["headers"]["Authorization"].startswith("token "))
 
+    def test_provider_422_includes_short_validation_reason(self):
+        response = SimpleNamespace(
+            status_code=422,
+            json=lambda: {"message": "No enabled payment method for this store"},
+        )
+        with patch("ltcpay.requests.request", return_value=response):
+            with self.assertRaisesRegex(ltcpay.LTCPayError, "No enabled payment method"):
+                ltcpay._api_request("POST", "/api/v1/stores/Store123/invoices", json_body={})
+
     def test_create_invoice_fails_closed_on_store_amount_metadata_or_checkout_link_mismatch(self):
         wrong_store = {
             "id": "Invoice123", "storeId": "OtherStore", "currency": "USD", "amount": "0.75",

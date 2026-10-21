@@ -69,6 +69,30 @@ def format_usd(amount: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
+def _provider_error_detail(response) -> str:
+    """Extract a short validation message, never logging the raw response body."""
+    try:
+        payload = response.json()
+    except (ValueError, AttributeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    detail = payload.get("message") or payload.get("detail") or payload.get("error")
+    if isinstance(detail, dict):
+        detail = detail.get("message") or detail.get("detail")
+    if not detail and isinstance(payload.get("errors"), dict):
+        parts = []
+        for key, value in list(payload["errors"].items())[:3]:
+            if isinstance(value, list):
+                value = "; ".join(str(item) for item in value[:2])
+            parts.append(f"{key}: {value}")
+        detail = " | ".join(parts)
+    if not isinstance(detail, (str, int, float)):
+        return ""
+    detail = " ".join(str(detail).split())
+    return detail[:320]
+
+
 def _api_request(method: str, endpoint: str, *, params=None, json_body=None):
     base_url, store_id, api_key, _, valid_host = _config()
     if not valid_host or not re.fullmatch(r"[A-Za-z0-9]+", store_id) or not api_key:
@@ -85,7 +109,9 @@ def _api_request(method: str, endpoint: str, *, params=None, json_body=None):
     except requests.RequestException as exc:
         raise LTCPayError("تعذر الاتصال بخادم LTCPay الآن. لم تُضف أي ميزانية؛ أعد المحاولة لاحقًا.") from exc
     if response.status_code not in {200, 201}:
-        raise LTCPayError(f"رفض خادم LTCPay الطلب برمز HTTP {response.status_code}.")
+        detail = _provider_error_detail(response)
+        suffix = f" سبب الخادم: {detail}" if detail else " راجع إعدادات المتجر وطريقة الدفع LTC."
+        raise LTCPayError(f"رفض خادم LTCPay الطلب برمز HTTP {response.status_code}.{suffix}")
     try:
         payload = response.json()
     except ValueError as exc:
