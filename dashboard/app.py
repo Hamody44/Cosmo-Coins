@@ -26,7 +26,7 @@ from database import (
     get_guild_db, PRIMARY_OWNER_ID, get_balance, parse_amount,
     create_exchange_request, deny_exchange_request,
 )
-from nowpayments import verify_ipn_signature
+from btcpay import active_store_id, get_invoice, verify_webhook_signature
 
 load_dotenv(os.path.join(project_root, ".env"))
 
@@ -160,7 +160,7 @@ def inject_csrf_token():
 
 @app.before_request
 def enforce_csrf_for_posts():
-    if request.endpoint == "nowpayments_ipn":
+    if request.endpoint == "btcpay_webhook":
         return
     if request.method == "POST":
         expected = session.get("csrf_token", "")
@@ -176,7 +176,7 @@ def set_discord_bot_context(bot, loop):
     global _discord_bot, _discord_loop
     _discord_bot, _discord_loop = bot, loop
 
-async def _send_nowpayments_notice(result):
+async def _send_btcpay_notice(result):
     if not _discord_bot or not result.get("channel_id"):
         return
     channel = _discord_bot.get_channel(int(result["channel_id"]))
@@ -184,50 +184,63 @@ async def _send_nowpayments_notice(result):
         try:
             channel = await _discord_bot.fetch_channel(int(result["channel_id"]))
         except Exception as exc:
-            app.logger.warning("NOWPayments notice channel unavailable: %s", exc)
+            app.logger.warning("BTCPay notice channel unavailable: %s", exc)
             return
     if result.get("status") == "paid":
         text = (
-            f"✅ تأكد دفع LTC من NOWPayments للطلب `#{result['order_id']}`؛ "
+            f"✅ أكد BTCPay تسوية فاتورة LTC للطلب `#{result['order_id']}`؛ "
             f"أُضيفت `{result['budget_amount']:,}` إلى ميزانية السيرفر. "
             f"الميزانية: `{result['old_balance']:,}` ← `{result['new_balance']:,}`."
         )
     else:
         text = (
-            f"⚠️ وصل إشعار LTC للطلب `#{result.get('order_id', '?')}` لكنه يحتاج مراجعة يدوية؛ "
+            f"⚠️ فاتورة LTC للطلب `#{result.get('order_id', '?')}` تحتاج مراجعة يدوية؛ "
             "لم تُضف الميزانية تلقائيًا. لا تعِد الدفع قبل مراجعة الإدارة."
         )
     try:
         await channel.send(text)
     except Exception as exc:
-        app.logger.warning("NOWPayments notice send failed: %s", exc)
+        app.logger.warning("BTCPay notice send failed: %s", exc)
 
-def _schedule_nowpayments_notice(result):
+
+def _schedule_btcpay_notice(result):
     if _discord_loop and _discord_loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(_send_nowpayments_notice(result), _discord_loop)
+        future = asyncio.run_coroutine_threadsafe(_send_btcpay_notice(result), _discord_loop)
         future.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
 
-@app.route("/nowpayments/ipn", methods=["POST"])
-def nowpayments_ipn():
-    if not os.getenv("NOWPAYMENTS_IPN_SECRET", "").strip():
-        return "IPN secret is not configured", 503
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return "Invalid JSON", 400
-    signature = request.headers.get("x-nowpayments-sig", "")
-    if not verify_ipn_signature(payload, signature):
+
+@app.route("/btcpay/webhook", methods=["POST"])
+def btcpay_webhook():
+    if not os.getenv("BTCPAY_WEBHOOK_SECRET", "").strip() or not os.getenv("BTCPAY_API_KEY", "").strip():
+        return "BTCPay webhook is not configured", 503
+    raw_body = request.get_data(cache=True, as_text=False)
+    signature = request.headers.get("BTCPAY-SIG", "")
+    if not verify_webhook_signature(raw_body, signature):
         return "Invalid signature", 401
     try:
-        result = database.process_nowpayments_ipn(payload)
+        event = request.get_json(silent=True)
     except Exception:
-        app.logger.exception("NOWPayments IPN settlement failed")
+        event = None
+    if not isinstance(event, dict):
+        return "Invalid JSON", 400
+    event_type = str(event.get("type", ""))
+    if event_type not in {"InvoiceProcessing", "InvoiceSettled", "InvoiceExpired", "InvoiceInvalid"}:
+        return "", 200
+    if str(event.get("storeId", "")) != active_store_id() or not event.get("invoiceId"):
+        return "Invalid store or invoice", 400
+    try:
+        invoice = get_invoice(str(event["invoiceId"]))
+        result = database.process_btcpay_webhook(event, invoice)
+    except Exception:
+        app.logger.exception("BTCPay webhook settlement failed")
         return "Temporary settlement error", 500
     if result is None:
-        app.logger.warning("Signed NOWPayments IPN did not match a budget order")
+        app.logger.warning("Signed BTCPay webhook did not match a budget order")
         return "", 200
     if result.get("status") in {"paid", "needs_review"}:
-        _schedule_nowpayments_notice(result)
+        _schedule_btcpay_notice(result)
     return "", 200
+
 
 def user_can_manage_guild(access_token: str, guild_id: int) -> bool:
     """تحقق من صلاحيات OAuth الفعلية، لا من رقم السيرفر المرسل في URL فقط."""

@@ -61,16 +61,25 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         self.addCleanup(self.guild_db_patch.stop)
         self.addCleanup(self.temp_dir.cleanup)
 
-    def test_crypto_is_hidden_from_budget_checkout_methods(self):
-        with patch("cogs.admin.is_auto_budget_payment_enabled", return_value=True):
-            manager_methods = available_budget_payment_methods(True, 0, 100)
-            member_methods = available_budget_payment_methods(False, 100, 100)
+    def test_btcpay_checkout_is_shown_only_when_configured_and_minimum_is_met(self):
+        with patch("cogs.admin.is_auto_budget_payment_enabled", return_value=True), patch(
+            "cogs.admin.btcpay_is_configured", return_value=True
+        ), patch.dict(os.environ, {"DASHBOARD_URL": "https://cosmo.example.test"}):
+            manager_methods = available_budget_payment_methods(True, 0, 26_000_000)
+            below_minimum = available_budget_payment_methods(True, 0, 25_999_999)
+            member_methods = available_budget_payment_methods(False, 26_000_000, 26_000_000)
             insufficient_member_methods = available_budget_payment_methods(False, 99, 100)
 
-        self.assertEqual(manager_methods, ["credit", "adamc"])
+        self.assertEqual(manager_methods, ["credit", "adamc", "crypto"])
+        self.assertEqual(below_minimum, ["credit", "adamc"])
         self.assertEqual(member_methods, ["cosmo"])
         self.assertEqual(insufficient_member_methods, [])
-        self.assertNotIn("crypto", manager_methods)
+
+    def test_btcpay_checkout_is_hidden_when_not_configured(self):
+        with patch("cogs.admin.is_auto_budget_payment_enabled", return_value=True), patch(
+            "cogs.admin.btcpay_is_configured", return_value=False
+        ), patch.dict(os.environ, {"DASHBOARD_URL": "https://cosmo.example.test"}):
+            self.assertNotIn("crypto", available_budget_payment_methods(True, 0, 26_000_000))
 
     def test_provider_message_examples_parse_only_for_expected_bot_ids(self):
         probot_text = "**ـ new.3mk, قام بتحويل `$100000000` لـ <@!988840428591808584> ** |:moneybag:"
@@ -266,7 +275,7 @@ class BudgetHistoryLabelTests(unittest.TestCase):
             budget_history_action_label("إضافة تلقائية (adamc)"),
             "💳 شحن تلقائي عبر AdamC",
         )
-        self.assertIn("NOWPayments", budget_history_action_label("إضافة تلقائية (crypto)"))
+        self.assertIn("BTCPay", budget_history_action_label("إضافة تلقائية (crypto)"))
         self.assertIn("الشخصي", budget_history_action_label("إضافة من رصيد Cosmo"))
 
     def test_manual_additions_deductions_and_direct_set_are_distinguished(self):

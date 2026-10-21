@@ -377,7 +377,7 @@ def is_auto_budget_payment_enabled(method: str) -> bool:
         return bool(row and row[0] == 1)
 
 def _cancel_pending_budget_orders(guild_ids, method: str):
-    # لا يمكن إلغاء فاتورة NOWPayments بأمان من المفتاح المحلي؛ الطلبات الصادرة
+    # لا يمكن إلغاء فاتورة BTCPay بأمان من المفتاح المحلي؛ الطلبات الصادرة
     # تبقى قابلة للتسوية حتى انتهاء مهلة المزود، بينما يمنع الإغلاق إنشاء طلبات جديدة.
     if method == "crypto":
         return []
@@ -495,18 +495,18 @@ def create_budget_payment_order(guild_id: int, user_id: int, payer_name: str, ch
 
 def create_crypto_budget_payment_order(
     guild_id: int, user_id: int, payer_name: str, channel_id: int, budget_amount: int,
-    expected_litoshi: int, quote_usd: str, provider_order_id: str, created_at: int, expires_at: int,
+    quote_usd: str, provider_order_id: str, created_at: int, expires_at: int,
 ):
-    """Reserve a NOWPayments order before calling the provider; no balance changes here."""
+    """Reserve an LTC-only BTCPay invoice before the external invoice is created."""
     guild_id, user_id, channel_id = int(guild_id), int(user_id), int(channel_id)
-    budget_amount, expected_litoshi = int(budget_amount), int(expected_litoshi)
+    budget_amount = int(budget_amount)
     created_at, expires_at = int(created_at), int(expires_at)
     quote_usd, provider_order_id = str(quote_usd).strip(), str(provider_order_id).strip()
     if (
-        guild_id <= 0 or user_id <= 0 or channel_id <= 0 or budget_amount <= 0
-        or budget_amount > 9_223_372_036_854_775_807 or expected_litoshi <= 0
-        or expected_litoshi > 9_223_372_036_854_775_807 or not quote_usd
-        or not provider_order_id or expires_at <= created_at
+        guild_id <= 0 or user_id <= 0 or channel_id <= 0 or budget_amount < 26_000_000
+        or budget_amount > 9_223_372_036_854_775_807 or not quote_usd
+        or not re.fullmatch(r"cosmo:\d{1,20}:[0-9a-f]{32}", provider_order_id)
+        or expires_at <= created_at
     ):
         return None
     try:
@@ -514,9 +514,14 @@ def create_crypto_budget_payment_order(
         expected_quote = (Decimal(budget_amount) / Decimal(260_000_000)).quantize(
             Decimal("0.00000001"), rounding=ROUND_UP
         )
-        if not quote_value.is_finite() or quote_value != expected_quote:
+        expected_usd_units = int((quote_value * Decimal(100_000_000)).to_integral_value())
+        if (
+            not quote_value.is_finite() or quote_value != expected_quote
+            or quote_value < Decimal("0.10") or expected_usd_units <= 0
+            or expected_usd_units > 9_223_372_036_854_775_807
+        ):
             return None
-    except InvalidOperation:
+    except (InvalidOperation, ValueError, OverflowError):
         return None
 
     with _auto_budget_payment_lock:
@@ -545,7 +550,7 @@ def create_crypto_budget_payment_order(
                 "VALUES (?, ?, ?, ?, 'crypto', ?, ?, ?, ?, 'creating', ?, ?, 'ltc')",
                 (
                     guild_id, user_id, str(payer_name).strip().casefold(), channel_id,
-                    budget_amount, expected_litoshi, created_at, expires_at,
+                    budget_amount, expected_usd_units, created_at, expires_at,
                     provider_order_id, quote_usd,
                 ),
             )
@@ -555,33 +560,43 @@ def create_crypto_budget_payment_order(
         finally:
             g_conn.close()
 
-def update_crypto_budget_payment_order(guild_id: int, order_id: int, provider_order_id: str, payment: dict):
-    """Attach the provider's exact payment id, address and amount to its reserved order."""
+
+def update_crypto_budget_payment_order(guild_id: int, order_id: int, provider_order_id: str, invoice: dict):
+    """Attach the BTCPay invoice ID and checked checkout URL to its reserved order."""
     try:
-        payment_id = str(payment["payment_id"]).strip()
-        address = str(payment["pay_address"]).strip()
-        pay_currency = str(payment["pay_currency"]).strip().lower()
-        provider_status = str(payment["payment_status"]).strip().lower()
-        expected_litoshi = int(payment["pay_amount_litoshi"])
-        expires_at = int(payment["expires_at"])
-    except (KeyError, TypeError, ValueError):
+        invoice_id = str(invoice["payment_id"]).strip()
+        checkout_url = str(invoice["pay_address"]).strip()
+        currency = str(invoice["pay_currency"]).strip().lower()
+        provider_status = str(invoice["provider_status"]).strip()
+        expires_at = int(invoice["expires_at"])
+        store_id = str(invoice["store_id"]).strip()
+        amount = Decimal(str(invoice["amount_usd"]))
+        metadata_order_id = str(invoice["metadata_order_id"]).strip()
+    except (KeyError, TypeError, ValueError, InvalidOperation):
         return False
-    if not payment_id or not address or pay_currency != "ltc" or expected_litoshi <= 0:
+    if (
+        not invoice_id or not checkout_url.startswith("https://") or currency != "ltc"
+        or not store_id or amount < Decimal("0.10") or metadata_order_id != str(provider_order_id)
+    ):
         return False
     g_conn, _ = get_guild_db(int(guild_id))
     try:
         g_conn.execute("BEGIN IMMEDIATE")
+        order = g_conn.execute(
+            "SELECT quote_usd FROM budget_payment_orders "
+            "WHERE id = ? AND guild_id = ? AND method = 'crypto' AND provider_order_id = ? "
+            "AND status = 'creating'",
+            (int(order_id), int(guild_id), str(provider_order_id)),
+        ).fetchone()
+        if not order or Decimal(str(order[0])) != amount:
+            g_conn.rollback()
+            return False
         cur = g_conn.execute(
-            "UPDATE budget_payment_orders SET expected_payment = ?, provider_payment_id = ?, "
-            "pay_address = ?, pay_currency = 'ltc', provider_status = ?, expires_at = ?, "
-            "status = CASE WHEN status = 'creating' THEN 'pending' ELSE status END "
-            "WHERE id = ? AND method = 'crypto' AND provider_order_id = ? "
-            "AND status IN ('creating', 'pending', 'processing') "
-            "AND (provider_payment_id IS NULL OR provider_payment_id = ?)",
-            (
-                expected_litoshi, payment_id, address, provider_status, expires_at,
-                int(order_id), str(provider_order_id), payment_id,
-            ),
+            "UPDATE budget_payment_orders SET provider_payment_id = ?, pay_address = ?, "
+            "pay_currency = 'ltc', provider_status = ?, expires_at = ?, status = 'pending' "
+            "WHERE id = ? AND guild_id = ? AND method = 'crypto' AND provider_order_id = ? "
+            "AND status = 'creating' AND provider_payment_id IS NULL",
+            (invoice_id, checkout_url, provider_status, expires_at, int(order_id), int(guild_id), str(provider_order_id)),
         )
         if cur.rowcount != 1:
             g_conn.rollback()
@@ -593,6 +608,7 @@ def update_crypto_budget_payment_order(guild_id: int, order_id: int, provider_or
         return False
     finally:
         g_conn.close()
+
 
 def fail_crypto_budget_payment_order(guild_id: int, order_id: int, provider_order_id: str):
     g_conn, _ = get_guild_db(int(guild_id))
@@ -607,13 +623,22 @@ def fail_crypto_budget_payment_order(guild_id: int, order_id: int, provider_orde
     finally:
         g_conn.close()
 
-def process_nowpayments_ipn(payload: dict):
-    """Validate one signed provider event and credit its guild budget exactly once."""
-    provider_order_id = str(payload.get("order_id", "")).strip()
+
+def process_btcpay_webhook(event: dict, invoice: dict):
+    """Settle one verified BTCPay invoice event after fetching its canonical invoice state."""
+    event_type = str(event.get("type", "")).strip()
+    invoice_id = str(event.get("invoiceId", "")).strip()
+    event_store_id = str(event.get("storeId", "")).strip()
+    canonical_invoice_id = str(invoice.get("id", "")).strip()
+    canonical_store_id = str(invoice.get("storeId", "")).strip()
+    if not invoice_id or canonical_invoice_id != invoice_id or not event_store_id or canonical_store_id != event_store_id:
+        return None
+
+    # The local order reference is encoded in the signed and fetched BTCPay invoice metadata.
+    metadata = invoice.get("metadata") if isinstance(invoice.get("metadata"), dict) else {}
+    provider_order_id = str(metadata.get("orderId", "")).strip()
     match = re.fullmatch(r"cosmo:(\d{1,20}):([0-9a-f]{32})", provider_order_id)
-    payment_id = str(payload.get("payment_id", "")).strip()
-    provider_status = str(payload.get("payment_status", "")).strip().lower()
-    if not match or not payment_id:
+    if not match:
         return None
     guild_id = int(match.group(1))
     if guild_id <= 0:
@@ -624,99 +649,95 @@ def process_nowpayments_ipn(payload: dict):
         g_conn.execute("BEGIN IMMEDIATE")
         order = g_conn.execute(
             "SELECT id, user_id, channel_id, budget_amount, expected_payment, provider_payment_id, "
-            "quote_usd, pay_address, status FROM budget_payment_orders "
+            "quote_usd, status, provider_order_id FROM budget_payment_orders "
             "WHERE guild_id = ? AND method = 'crypto' AND provider_order_id = ? LIMIT 1",
             (guild_id, provider_order_id),
         ).fetchone()
         if not order:
             g_conn.rollback()
             return None
-        order_id, user_id, channel_id, budget_amount, expected_litoshi, saved_payment_id, quote_usd, pay_address, order_status = order
-        if saved_payment_id and str(saved_payment_id) != payment_id:
+        order_id, user_id, channel_id, budget_amount, expected_usd_units, saved_invoice_id, quote_usd, order_status, saved_order_id = order
+        if str(saved_order_id) != provider_order_id:
+            g_conn.rollback()
+            return None
+        if saved_invoice_id and str(saved_invoice_id) != invoice_id:
             g_conn.rollback()
             return None
         if order_status == "paid":
             g_conn.rollback()
             return {"status": "duplicate", "order_id": int(order_id)}
 
-        if provider_status == "waiting":
-            if order_status not in {"pending", "creating", "processing"}:
+        checkout = invoice.get("checkout") if isinstance(invoice.get("checkout"), dict) else {}
+        methods = checkout.get("paymentMethods")
+        method_ok = isinstance(methods, list) and [str(item).upper() for item in methods] == ["LTC-CHAIN"]
+        try:
+            invoice_amount = Decimal(str(invoice.get("amount")))
+            paid_amount = Decimal(str(invoice.get("paidAmount")))
+            expected_quote = Decimal(str(quote_usd))
+            expected_units = int((expected_quote * Decimal(100_000_000)).to_integral_value())
+        except (InvalidOperation, TypeError, ValueError, OverflowError):
+            invoice_amount = paid_amount = expected_quote = Decimal("0")
+            expected_units = 0
+        identity_matches = (
+            str(invoice.get("currency", "")).upper() == "USD"
+            and invoice_amount.is_finite() and invoice_amount == expected_quote
+            and expected_units == int(expected_usd_units)
+            and method_ok
+            and isinstance(invoice.get("metadata"), dict)
+            and str(invoice["metadata"].get("orderId", "")) == provider_order_id
+        )
+
+        if event_type == "InvoiceProcessing" and str(invoice.get("status", "")).lower() == "processing":
+            if not identity_matches or order_status not in {"pending", "creating", "processing"}:
                 g_conn.rollback()
-                return {"status": "needs_review", "order_id": int(order_id)}
+                return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
             g_conn.execute(
-                "UPDATE budget_payment_orders SET status = CASE WHEN status = 'creating' THEN 'pending' ELSE status END, "
-                "provider_status = ?, provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ?",
-                (provider_status, payment_id, order_id),
-            )
-            g_conn.commit()
-            return {"status": "processing" if order_status == "processing" else "pending", "order_id": int(order_id)}
-        if provider_status in {"confirming", "confirmed", "sending"}:
-            if order_status not in {"pending", "creating", "processing"}:
-                g_conn.rollback()
-                return {"status": "needs_review", "order_id": int(order_id)}
-            g_conn.execute(
-                "UPDATE budget_payment_orders SET status = 'processing', provider_status = ?, "
-                "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ?",
-                (provider_status, payment_id, order_id),
+                "UPDATE budget_payment_orders SET status = 'processing', provider_status = 'Processing', "
+                "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
+                (invoice_id, order_id),
             )
             g_conn.commit()
             return {"status": "processing", "order_id": int(order_id)}
-        if provider_status in {"expired", "failed"}:
+
+        if event_type == "InvoiceExpired" and str(invoice.get("status", "")).lower() == "expired":
+            additional = str(invoice.get("additionalStatus", "None")).casefold()
+            status = "needs_review" if additional in {"paidpartial", "paidover", "paidlate", "marked"} else "expired"
             g_conn.execute(
-                "UPDATE budget_payment_orders SET status = ?, provider_status = ? "
+                "UPDATE budget_payment_orders SET status = ?, provider_status = 'Expired', "
+                "provider_payment_id = COALESCE(provider_payment_id, ?) "
                 "WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
-                (provider_status, provider_status, order_id),
+                (status, invoice_id, order_id),
             )
             g_conn.commit()
-            return {"status": provider_status, "order_id": int(order_id)}
-        if provider_status in {"partially_paid", "wrong_asset_confirmed"}:
+            if status == "needs_review":
+                return {"status": status, "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+            return {"status": status, "order_id": int(order_id)}
+
+        if event_type == "InvoiceInvalid" and str(invoice.get("status", "")).lower() == "invalid":
             g_conn.execute(
-                "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = ? "
-                "WHERE id = ? AND status != 'paid'",
-                (provider_status, order_id),
+                "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = 'Invalid', "
+                "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ? AND status != 'paid'",
+                (invoice_id, order_id),
             )
             g_conn.commit()
             return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
-        if provider_status != "finished" or order_status not in {"pending", "creating", "processing"}:
+
+        if event_type != "InvoiceSettled" or str(invoice.get("status", "")).lower() != "settled":
             g_conn.rollback()
-            return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+            return None
 
-        try:
-            pay_currency = str(payload.get("pay_currency", "")).strip().lower()
-            network = str(payload.get("network") or pay_currency).strip().lower()
-            price_currency = str(payload.get("price_currency", "")).strip().lower()
-            outcome_currency = str(payload.get("outcome_currency", "")).strip().lower()
-            quote_received = Decimal(str(payload.get("price_amount")))
-            quote_expected = Decimal(str(quote_usd))
-            pay_amount = Decimal(str(payload.get("pay_amount")))
-            actually_paid = Decimal(str(payload.get("actually_paid")))
-            outcome_amount = Decimal(str(payload.get("outcome_amount")))
-            pay_litoshi = int((pay_amount * 100_000_000).to_integral_value(rounding=ROUND_DOWN))
-            paid_litoshi = int((actually_paid * 100_000_000).to_integral_value(rounding=ROUND_DOWN))
-        except (InvalidOperation, TypeError, ValueError):
-            quote_received = quote_expected = Decimal("0")
-            outcome_amount = Decimal("0")
-            pay_currency = price_currency = network = outcome_currency = ""
-            pay_litoshi = paid_litoshi = 0
-
-        quote_matches = (
-            quote_received.is_finite() and quote_expected.is_finite()
-            and abs(quote_received - quote_expected) <= Decimal("0.00000001")
-        )
+        additional = invoice.get("additionalStatus")
         payment_matches = (
-            pay_currency == "ltc" and network in {"ltc", "litecoin"}
-            and price_currency == "usd" and quote_matches
-            and outcome_currency in {"ltc", "litecoin"}
-            and outcome_amount.is_finite() and outcome_amount > 0
-            and pay_litoshi == int(expected_litoshi) and paid_litoshi == int(expected_litoshi)
-            and pay_address and str(payload.get("pay_address", "")).strip() == str(pay_address)
-            and payload.get("parent_payment_id") in (None, "", 0, "0")
+            identity_matches and method_ok
+            and (additional is None or str(additional).casefold() == "none")
+            and paid_amount.is_finite() and paid_amount == invoice_amount
+            and order_status in {"pending", "creating", "processing"}
         )
         if not payment_matches:
             g_conn.execute(
-                "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = ?, "
+                "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = 'Settled_review', "
                 "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ? AND status != 'paid'",
-                (provider_status, payment_id, order_id),
+                (invoice_id, order_id),
             )
             g_conn.commit()
             return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
@@ -730,9 +751,9 @@ def process_nowpayments_ipn(payload: dict):
             g_conn.rollback()
             return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
         cur = g_conn.execute(
-            "UPDATE budget_payment_orders SET status = 'paid', provider_status = 'finished', "
+            "UPDATE budget_payment_orders SET status = 'paid', provider_status = 'Settled', "
             "provider_payment_id = ?, paid_at = ? WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
-            (payment_id, int(time.time()), order_id),
+            (invoice_id, int(time.time()), order_id),
         )
         if cur.rowcount != 1:
             g_conn.rollback()
@@ -758,6 +779,7 @@ def process_nowpayments_ipn(payload: dict):
         }
     finally:
         g_conn.close()
+
 
 def _settle_budget_payment_locked(guild_id: int, method: str, channel_id: int, payer_name: str,
                                   expected_payment: int, payment_message_id: int, payment_author_id: int,

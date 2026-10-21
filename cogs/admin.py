@@ -24,10 +24,9 @@ from database import (
     set_auto_budget_payment_enabled, set_global_exchange_enabled,
     PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID
 )
-from nowpayments import (
-    FIXED_RATE_TTL_SECONDS, NowPaymentsError, UnderMinimumPayment, amount_to_litoshi,
-    create_ltc_payment, format_ltc, format_usd, is_configured as nowpayments_is_configured,
-    quote_ltc_amount, usd_for_budget,
+from btcpay import (
+    BTCPayError, INVOICE_TTL_SECONDS, MIN_CRYPTO_BUDGET, MIN_CRYPTO_USD,
+    create_ltc_invoice, format_usd, is_configured as btcpay_is_configured, usd_for_budget,
 )
 
 PROBOT_ID = PROBOT_PAYMENT_BOT_ID
@@ -36,10 +35,18 @@ AUTO_BUDGET_PAYMENT_TTL = 5 * 60
 MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
 def available_budget_payment_methods(is_manager: bool, personal_balance: int, budget_amount: int) -> list[str]:
-    """Build checkout choices; LTC is intentionally hidden from the budget top-up menu."""
+    """Build checkout choices while requiring the configured BTCPay integration and its USD floor."""
     if not is_manager:
         return ["cosmo"] if personal_balance >= budget_amount else []
     methods = [method for method in ("credit", "adamc") if is_auto_budget_payment_enabled(method)]
+    dashboard_url = os.getenv("DASHBOARD_URL", "").strip().rstrip("/")
+    if (
+        budget_amount >= MIN_CRYPTO_BUDGET
+        and is_auto_budget_payment_enabled("crypto")
+        and btcpay_is_configured()
+        and dashboard_url.startswith("https://")
+    ):
+        methods.append("crypto")
     if personal_balance >= budget_amount:
         methods.append("cosmo")
     return methods
@@ -149,9 +156,14 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
 
         if method == "crypto":
             dashboard_url = os.getenv("DASHBOARD_URL", "").strip().rstrip("/")
-            if not nowpayments_is_configured() or not dashboard_url.startswith("https://"):
+            if self.budget_amount < MIN_CRYPTO_BUDGET:
                 return await interaction.response.send_message(
-                    "⛔ تكامل NOWPayments غير مكتمل الإعداد؛ لم يُنشأ طلب ولم تُضاف ميزانية.",
+                    f"⛔ الحد الأدنى للشحن عبر LTC هو ${MIN_CRYPTO_USD:.2f}، أي {MIN_CRYPTO_BUDGET:,} Cosmo.",
+                    ephemeral=True,
+                )
+            if not btcpay_is_configured() or not dashboard_url.startswith("https://"):
+                return await interaction.response.send_message(
+                    "⛔ تكامل BTCPay غير مكتمل الإعداد؛ لم يُنشأ طلب ولم تُضف ميزانية.",
                     ephemeral=True,
                 )
             await interaction.response.defer(ephemeral=True)
@@ -159,8 +171,6 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
             now = int(time.time())
             provider_order_id = f"cosmo:{interaction.guild_id}:{uuid.uuid4().hex}"
             try:
-                estimated_ltc = await asyncio.to_thread(quote_ltc_amount, price_usd)
-                expected_litoshi = amount_to_litoshi(estimated_ltc, round_up=True)
                 order_id = await asyncio.to_thread(
                     create_crypto_budget_payment_order,
                     interaction.guild_id,
@@ -168,40 +178,28 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
                     unicodedata.normalize("NFKC", interaction.user.name).strip(),
                     interaction.channel_id,
                     self.budget_amount,
-                    expected_litoshi,
                     format(price_usd, "f"),
                     provider_order_id,
                     now,
-                    now + FIXED_RATE_TTL_SECONDS,
+                    now + INVOICE_TTL_SECONDS,
                 )
                 if order_id is None:
-                    raise NowPaymentsError("لديك طلب شحن آخر قيد الإنشاء أو الانتظار في هذا السيرفر، أو أُغلقت وسيلة LTC.")
-                payment = await asyncio.to_thread(
-                    create_ltc_payment,
+                    raise BTCPayError("لديك طلب شحن آخر قيد الإنشاء أو الانتظار في هذا السيرفر، أو أُغلقت وسيلة LTC.")
+                invoice = await asyncio.to_thread(
+                    create_ltc_invoice,
                     price_usd=price_usd,
-                    estimated_ltc=estimated_ltc,
                     provider_order_id=provider_order_id,
-                    callback_url=f"{dashboard_url}/nowpayments/ipn",
+                    item_description=f"Cosmo server budget {self.budget_amount}",
                 )
                 saved = await asyncio.to_thread(
                     update_crypto_budget_payment_order,
                     interaction.guild_id,
                     order_id,
                     provider_order_id,
-                    payment,
+                    invoice,
                 )
                 if not saved:
-                    raise NowPaymentsError("تعذر ربط فاتورة المزود بطلب الميزانية؛ لن نعرض عنوان الدفع لتجنب دفع غير قابل للتسوية.")
-            except UnderMinimumPayment as exc:
-                await interaction.followup.send(
-                    f"❌ مبلغ الميزانية أصغر من الحد الأدنى الحالي لـ NOWPayments. {exc} ارفع مبلغ Cosmo ثم أعد المحاولة.",
-                    ephemeral=True,
-                )
-                try:
-                    await interaction.message.edit(content="لم يُنشأ طلب LTC لأن المبلغ دون الحد الأدنى للمزود.", view=None)
-                except discord.HTTPException:
-                    pass
-                return
+                    raise BTCPayError("تعذر ربط فاتورة BTCPay بطلب الميزانية؛ لم نعرض رابط الدفع لتجنب دفع غير قابل للتسوية.")
             except Exception as exc:
                 if "order_id" in locals() and order_id is not None:
                     try:
@@ -213,29 +211,28 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
                         )
                     except Exception:
                         pass
-                print(f"NOWPayments order creation failed: {exc}")
-                message = str(exc) if isinstance(exc, NowPaymentsError) else "تعذر إنشاء طلب LTC الآن. لم تُعتمد أي ميزانية؛ حاول لاحقًا أو تواصل مع مالك البوت."
+                print(f"BTCPay budget invoice creation failed: {exc}")
+                message = str(exc) if isinstance(exc, BTCPayError) else "تعذر إنشاء فاتورة LTC الآن. لم تُعتمد أي ميزانية؛ حاول لاحقًا أو تواصل مع مالك البوت."
                 await interaction.followup.send(f"⚠️ {message}", ephemeral=True)
                 try:
-                    await interaction.message.edit(content="تعذر إنشاء طلب LTC؛ لم تُضف ميزانية. يمكنك إعادة المحاولة لاحقًا.", view=None)
+                    await interaction.message.edit(content="تعذر إنشاء فاتورة LTC؛ لم تُضف ميزانية. يمكنك إعادة المحاولة لاحقًا.", view=None)
                 except discord.HTTPException:
                     pass
                 return
 
-            expires_at = int(payment["expires_at"])
-            pay_amount = format_ltc(payment["pay_amount_litoshi"])
+            expires_at = int(invoice["expires_at"])
             message = (
-                f"💸 **طلب LTC #{order_id} — NOWPayments**\n"
+                f"💸 **طلب LTC #{order_id} — BTCPay**\n"
                 f"• الميزانية: `{self.budget_amount:,}` Cosmo\n"
-                f"• السعر حسب 1 USD = 260,000,000 Cosmo: **${format_usd(price_usd)}**\n"
-                f"• أرسل بالضبط: **{pay_amount} LTC**\n"
-                f"• عنوان الإيداع: `{payment['pay_address']}`\n"
-                "⚠️ أرسل **Litecoin (LTC) على شبكة Litecoin فقط** إلى عنوان هذا الطلب؛ لا ترسل أي عملة أو شبكة أخرى. "
-                f"السعر الثابت صالح حتى <t:{expires_at}:R> (10 دقائق)، ولا تُضاف الميزانية إلا بعد تأكيد الحالة `finished` من NOWPayments."
+                f"• القيمة: **${format_usd(price_usd)}** (بسعر 1 USD = 260,000,000 Cosmo)\n"
+                f"• الحد الأدنى: **${MIN_CRYPTO_USD:.2f} / {MIN_CRYPTO_BUDGET:,} Cosmo**\n"
+                f"• [افتح فاتورة BTCPay لإتمام الدفع]({invoice['pay_address']})\n"
+                "ستعرض الفاتورة مبلغ LTC المطلوب وعنوان إيداع فريدًا. أرسل Litecoin على شبكة Litecoin فقط. "
+                f"تنتهي الفاتورة <t:{expires_at}:R>، ولا تُضاف الميزانية حتى يؤكد BTCPay حالتها `Settled` على السلسلة."
             )
             await interaction.followup.send(message, ephemeral=True)
             try:
-                await interaction.message.edit(content="✅ أُرسلت تفاصيل طلب LTC بشكل خاص إلى صاحب الطلب.", view=None)
+                await interaction.message.edit(content="✅ أُرسل رابط فاتورة LTC بشكل خاص إلى صاحب الطلب.", view=None)
             except discord.HTTPException:
                 pass
             return
@@ -355,7 +352,7 @@ def budget_history_action_label(action: str) -> str:
         "تعيين مباشر": "⚙️ تعيين مباشر",
         "إضافة تلقائية (credit)": "💳 شحن تلقائي عبر ProBot Credits",
         "إضافة تلقائية (adamc)": "💳 شحن تلقائي عبر AdamC",
-        "إضافة تلقائية (crypto)": "Ł شحن تلقائي عبر LTC / NOWPayments",
+        "إضافة تلقائية (crypto)": "Ł شحن تلقائي عبر LTC / BTCPay",
         "إضافة من رصيد Cosmo": "🪙 تحويل من رصيد Cosmo الشخصي",
     }
     if action in labels:
@@ -782,7 +779,7 @@ class Admin(commands.Cog):
         if cancelled:
             summary += f" أُلغيت {len(cancelled)} طلبات شحن معلقة وأُبلغ أصحابها."
         if method_key == "crypto" and not enabled:
-            summary += " لن تُقبل طلبات LTC جديدة؛ الفواتير الصادرة تبقى قابلة للتسوية حتى انتهاء صلاحية السعر الثابت أو اكتمال الدفع."
+            summary += " لن تُقبل طلبات LTC جديدة؛ الفواتير الصادرة تبقى قابلة للتسوية من BTCPay."
         await ctx.send(summary)
 
     @commands.hybrid_command(
