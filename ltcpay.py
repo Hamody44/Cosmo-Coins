@@ -15,7 +15,8 @@ MIN_CRYPTO_USD = Decimal("0.10")
 MIN_CRYPTO_BUDGET = 26_000_000
 INVOICE_TTL_SECONDS = 10 * 60
 REQUEST_TIMEOUT_SECONDS = 12
-PAYMENT_METHOD = "LTC-CHAIN"
+PAYMENT_METHOD = "LTC"
+LTC_PAYMENT_METHOD_IDS = {"LTC", "LTC-CHAIN"}
 
 
 class LTCPayError(RuntimeError):
@@ -146,7 +147,6 @@ def create_ltc_invoice(*, price_usd: Decimal, provider_order_id: str, discord_us
         "checkout": {
             "speedPolicy": "MediumSpeed",
             "paymentMethods": [PAYMENT_METHOD],
-            "defaultPaymentMethod": PAYMENT_METHOD,
             "expirationMinutes": INVOICE_TTL_SECONDS // 60,
             "monitoringMinutes": 1440,
             "paymentTolerance": 0,
@@ -170,7 +170,10 @@ def create_ltc_invoice(*, price_usd: Decimal, provider_order_id: str, discord_us
         raise LTCPayError("لم يُرجع LTCPay بيانات الفاتورة المطلوبة؛ لم نعرض رابط دفع.") from exc
     parsed_checkout = urlsplit(checkout_url)
     parsed_base = urlsplit(base_url)
-    methods_match = isinstance(methods, list) and [str(item).upper() for item in methods] == [PAYMENT_METHOD]
+    methods_match = (
+        isinstance(methods, list) and len(methods) == 1
+        and str(methods[0]).upper() in LTC_PAYMENT_METHOD_IDS
+    )
     if (
         not invoice_id or returned_store != store_id or returned_currency != "USD"
         or returned_amount != amount or parsed_checkout.scheme != "https"

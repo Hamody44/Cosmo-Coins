@@ -49,7 +49,7 @@ class LTCPayClientTests(unittest.TestCase):
                 "amount": "0.75", "checkoutLink": "https://pay.example.test/i/Invoice123",
                 "expirationTime": 1_900_000_000, "status": "New",
                 "metadata": {"orderId": "cosmo:101:" + "a" * 32, "discord_user_id": "202"},
-                "checkout": {"paymentMethods": ["LTC-CHAIN"]},
+                "checkout": {"paymentMethods": ["LTC"]},
             },
         )
         with patch("ltcpay.requests.request", return_value=response) as request:
@@ -59,10 +59,10 @@ class LTCPayClientTests(unittest.TestCase):
         body = request.call_args.kwargs["json"]
         self.assertEqual(body["currency"], "USD")
         self.assertEqual(body["amount"], "0.75000000")
-        self.assertEqual(body["checkout"]["paymentMethods"], ["LTC-CHAIN"])
+        self.assertEqual(body["checkout"]["paymentMethods"], ["LTC"])
         self.assertEqual(body["checkout"]["speedPolicy"], "MediumSpeed")
         self.assertEqual(body["metadata"]["discord_user_id"], "202")
-        self.assertEqual(body["checkout"]["defaultPaymentMethod"], "LTC-CHAIN")
+        self.assertNotIn("defaultPaymentMethod", body["checkout"])
         self.assertEqual(invoice["payment_id"], "Invoice123")
         self.assertEqual(invoice["pay_address"], "https://pay.example.test/i/Invoice123")
         self.assertEqual(invoice["metadata_order_id"], "cosmo:101:" + "a" * 32)
@@ -83,7 +83,7 @@ class LTCPayClientTests(unittest.TestCase):
             "id": "Invoice123", "storeId": "OtherStore", "currency": "USD", "amount": "0.75",
             "checkoutLink": "https://pay.example.test/i/Invoice123", "expirationTime": 1_900_000_000,
             "metadata": {"orderId": "cosmo:101:" + "a" * 32, "discord_user_id": "202"},
-            "checkout": {"paymentMethods": ["LTC-CHAIN"]},
+            "checkout": {"paymentMethods": ["LTC"]},
         }
         with patch("ltcpay.requests.request", return_value=SimpleNamespace(status_code=200, json=lambda: wrong_store)):
             with self.assertRaises(ltcpay.LTCPayError):
@@ -173,7 +173,7 @@ class LTCPaySettlementTests(unittest.TestCase):
             "id": self.invoice_id, "storeId": "Store123", "amount": "0.75", "paidAmount": "0.75",
             "currency": "USD", "status": "Settled", "additionalStatus": "None",
             "metadata": {"orderId": self.provider_order_id, "discord_user_id": "202"},
-            "checkout": {"paymentMethods": ["LTC-CHAIN"]},
+            "checkout": {"paymentMethods": ["LTC"]},
         }
         invoice.update(overrides)
         return invoice
@@ -195,6 +195,12 @@ class LTCPaySettlementTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()[0], 195_000_000)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT status FROM budget_payment_orders WHERE id = ?", (self.order_id,)).fetchone()[0], "paid")
+
+    def test_greenfield_ltc_chain_alias_is_accepted_as_the_single_ltc_method(self):
+        result = database.process_ltcpay_webhook(
+            self.event(), self.invoice(checkout={"paymentMethods": ["LTC-CHAIN"]})
+        )
+        self.assertEqual(result["status"], "paid")
 
     def test_nonexact_unexpected_store_or_non_ltc_funded_invoices_go_to_review(self):
         cases = (

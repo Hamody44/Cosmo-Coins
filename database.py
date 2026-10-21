@@ -669,7 +669,10 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
 
         checkout = invoice.get("checkout") if isinstance(invoice.get("checkout"), dict) else {}
         methods = checkout.get("paymentMethods")
-        method_ok = isinstance(methods, list) and [str(item).upper() for item in methods] == ["LTC-CHAIN"]
+        method_ok = (
+            isinstance(methods, list) and len(methods) == 1
+            and str(methods[0]).upper() in {"LTC", "LTC-CHAIN"}
+        )
         try:
             invoice_amount = Decimal(str(invoice.get("amount")))
             paid_amount = Decimal(str(invoice.get("paidAmount")))
