@@ -254,6 +254,91 @@ class LTCPaySettlementTests(unittest.TestCase):
         settled = database.process_ltcpay_webhook(self.event(), self.invoice())
         self.assertEqual(settled["status"], "paid")
 
+    def test_settled_snapshot_missing_paid_amount_uses_stored_quote_and_credits(self):
+        incomplete = database.process_ltcpay_webhook(
+            self.event(), self.invoice(paidAmount=None)
+        )
+        self.assertEqual(incomplete["status"], "paid")
+        self.assertEqual(incomplete["new_balance"], 195_000_000)
+        with sqlite3.connect(self.guild_db_path) as conn:
+            self.assertEqual(
+                conn.execute("SELECT status FROM budget_payment_orders WHERE id = ?", (self.order_id,)).fetchone()[0],
+                "paid",
+            )
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 1)
+
+    def test_settled_snapshot_missing_method_list_uses_saved_ltc_checkout(self):
+        incomplete = database.process_ltcpay_webhook(
+            self.event(), self.invoice(checkout={})
+        )
+        self.assertEqual(incomplete["status"], "paid")
+        self.assertEqual(incomplete["new_balance"], 195_000_000)
+        with sqlite3.connect(self.guild_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 1)
+
+    def test_expired_order_is_credited_if_provider_later_confirms_settled(self):
+        expired = database.process_ltcpay_webhook(
+            self.event(type="InvoiceExpired"),
+            self.invoice(status="Expired", additionalStatus="None"),
+        )
+        self.assertEqual(expired["status"], "expired")
+
+        result = database.process_ltcpay_webhook(
+            self.event(), self.invoice(additionalStatus="PaidLate")
+        )
+        self.assertEqual(result["status"], "paid")
+        self.assertEqual(result["new_balance"], 195_000_000)
+
+    def test_full_paid_late_expired_invoice_is_credited_without_waiting_for_settled(self):
+        result = database.process_ltcpay_webhook(
+            self.event(type="InvoiceExpired"),
+            self.invoice(status="Expired", additionalStatus="PaidLate"),
+        )
+        self.assertEqual(result["status"], "paid")
+        self.assertEqual(result["new_balance"], 195_000_000)
+
+    def test_underpaid_late_invoice_still_requires_manual_review(self):
+        result = database.process_ltcpay_webhook(
+            self.event(type="InvoiceExpired"),
+            self.invoice(status="Expired", additionalStatus="PaidLate", paidAmount="0.70"),
+        )
+        self.assertEqual(result["status"], "needs_review")
+        with sqlite3.connect(self.guild_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 0)
+
+    def test_provider_marked_settled_invoice_is_credited_automatically(self):
+        result = database.process_ltcpay_webhook(
+            self.event(), self.invoice(additionalStatus="Marked")
+        )
+        self.assertEqual(result["status"], "paid")
+
+    def test_settled_snapshot_can_omit_noncritical_fields_when_local_order_is_bound(self):
+        invoice = self.invoice(
+            amount=None,
+            paidAmount=None,
+            currency=None,
+            checkout={},
+            metadata={"orderId": self.provider_order_id},
+        )
+        result = database.process_ltcpay_webhook(self.event(), invoice)
+        self.assertEqual(result["status"], "paid")
+
+    def test_previous_settlement_review_recovers_only_after_full_verification(self):
+        with sqlite3.connect(self.guild_db_path) as conn:
+            conn.execute(
+                "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = 'Settled_review' "
+                "WHERE id = ?",
+                (self.order_id,),
+            )
+
+        settled = database.process_ltcpay_webhook(self.event(), self.invoice())
+        self.assertEqual(settled["status"], "paid")
+        self.assertEqual(settled["new_balance"], 195_000_000)
+        duplicate = database.process_ltcpay_webhook(self.event(), self.invoice())
+        self.assertEqual(duplicate["status"], "duplicate")
+        with sqlite3.connect(self.guild_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 1)
+
     def test_greenfield_ltc_chain_alias_is_accepted_as_the_single_ltc_method(self):
         result = database.process_ltcpay_webhook(
             self.event(), self.invoice(checkout={"paymentMethods": ["LTC-CHAIN"]})

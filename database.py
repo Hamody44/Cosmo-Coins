@@ -664,8 +664,7 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
 
     # Prefer the provider order reference, but fall back to our stored invoice
     # ID when a compatible provider omits custom metadata from GET responses.
-    # The invoice ID was saved before payment and is never accepted by itself:
-    # all amount, status, store, currency, and LTC checks below still apply.
+    # The saved invoice ID is tied to one local order before checkout is shown.
     metadata = invoice.get("metadata") if isinstance(invoice.get("metadata"), dict) else {}
     provider_order_id = str(metadata.get("orderId", "")).strip()
     linked_by_invoice_id = False
@@ -688,7 +687,7 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
         g_conn.execute("BEGIN IMMEDIATE")
         order = g_conn.execute(
             "SELECT id, user_id, channel_id, budget_amount, expected_payment, provider_payment_id, "
-            "quote_usd, status, provider_order_id FROM budget_payment_orders "
+            "quote_usd, status, provider_order_id, provider_status, pay_currency FROM budget_payment_orders "
             "WHERE guild_id = ? AND method = 'crypto' AND provider_order_id = ? LIMIT 1",
             (guild_id, provider_order_id),
         ).fetchone()
@@ -702,7 +701,7 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
                 "guild_id": guild_id,
                 "provider_order_id": provider_order_id,
             }
-        order_id, user_id, channel_id, budget_amount, expected_usd_units, saved_invoice_id, quote_usd, order_status, saved_order_id = order
+        order_id, user_id, channel_id, budget_amount, expected_usd_units, saved_invoice_id, quote_usd, order_status, saved_order_id, previous_provider_status, saved_pay_currency = order
         if str(saved_order_id) != provider_order_id:
             g_conn.rollback()
             return None
@@ -712,28 +711,48 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
         if order_status == "paid":
             g_conn.rollback()
             return {"status": "duplicate", "order_id": int(order_id)}
+        can_settle_order = order_status in {"pending", "creating", "processing", "expired"} or (
+            order_status == "needs_review"
+            and previous_provider_status in {"Settled_review", "Expired", "Invalid"}
+        )
 
         checkout = invoice.get("checkout") if isinstance(invoice.get("checkout"), dict) else {}
         methods = checkout.get("paymentMethods") if "paymentMethods" in checkout else invoice.get("paymentMethods")
-        method_ok = (
-            isinstance(methods, list) and len(methods) == 1
-            and str(methods[0]).upper() in {"LTC", "LTC-CHAIN"}
-        )
+        if methods is None or methods == []:
+            # Our checkout creation pins every crypto order to LTC. Reuse that
+            # saved fact when the provider omits its method list in the GET.
+            method_ok = str(saved_pay_currency or "").casefold() == "ltc"
+        else:
+            method_ok = (
+                isinstance(methods, list) and len(methods) == 1
+                and str(methods[0]).upper() in {"LTC", "LTC-CHAIN"}
+            )
         try:
-            invoice_amount = Decimal(str(invoice.get("amount")))
-            paid_amount = Decimal(str(invoice.get("paidAmount")))
             expected_quote = Decimal(str(quote_usd))
+            raw_invoice_amount = invoice.get("amount")
+            raw_paid_amount = invoice.get("paidAmount")
+            # Amount and payment amount are immutable once the provider has
+            # reached Settled. When omitted, use the USD quote stored before
+            # checkout; a present but malformed value is still rejected.
+            invoice_amount = expected_quote if raw_invoice_amount in (None, "") else Decimal(str(raw_invoice_amount))
+            paid_amount = invoice_amount if raw_paid_amount in (None, "") else Decimal(str(raw_paid_amount))
             expected_units = int((expected_quote * Decimal(100_000_000)).to_integral_value())
         except (InvalidOperation, TypeError, ValueError, OverflowError):
             invoice_amount = paid_amount = expected_quote = Decimal("0")
             expected_units = 0
+        raw_currency = str(invoice.get("currency") or "").strip().upper()
+        currency_matches = raw_currency in {"", "USD"}
+        local_invoice_matches = bool(saved_invoice_id and str(saved_invoice_id) == invoice_id)
+        metadata_user_id = str(metadata.get("discord_user_id", "")).strip()
+        metadata_user_matches = not metadata_user_id or metadata_user_id == str(user_id)
         identity_matches = (
-            str(invoice.get("currency", "")).upper() == "USD"
+            currency_matches
             and invoice_amount.is_finite() and invoice_amount == expected_quote
             and expected_units == int(expected_usd_units)
             and method_ok
+            and metadata_user_matches
             and (
-                linked_by_invoice_id
+                linked_by_invoice_id or local_invoice_matches
                 or (
                     isinstance(invoice.get("metadata"), dict)
                     and str(invoice["metadata"].get("orderId", "")) == provider_order_id
@@ -766,19 +785,40 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
             g_conn.commit()
             return {"status": "processing", "order_id": int(order_id)}
 
+        late_full_payment = False
         if event_type == "InvoiceExpired" and str(invoice.get("status", "")).lower() == "expired":
             additional = str(invoice.get("additionalStatus", "None")).casefold()
-            status = "needs_review" if additional in {"paidpartial", "paidover", "paidlate", "marked"} else "expired"
-            g_conn.execute(
-                "UPDATE budget_payment_orders SET status = ?, provider_status = 'Expired', "
-                "provider_payment_id = COALESCE(provider_payment_id, ?) "
-                "WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
-                (status, invoice_id, order_id),
-            )
-            g_conn.commit()
-            if status == "needs_review":
-                return {"status": status, "notify": order_status != "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
-            return {"status": status, "order_id": int(order_id)}
+            if additional == "paidlate":
+                # Reduced-safety option: a full amount observed by LTCPay on an
+                # expired invoice can be credited before the provider changes
+                # its base status to Settled. Require an explicit paidAmount
+                # and the exact locally stored USD invoice amount.
+                try:
+                    expected_late_quote = Decimal(str(quote_usd))
+                    late_invoice_amount = Decimal(str(invoice.get("amount")))
+                    late_paid_amount = Decimal(str(invoice.get("paidAmount")))
+                    late_full_payment = (
+                        str(invoice.get("currency", "")).upper() in {"", "USD"}
+                        and expected_late_quote.is_finite()
+                        and late_invoice_amount.is_finite()
+                        and late_paid_amount.is_finite()
+                        and late_invoice_amount == expected_late_quote
+                        and late_paid_amount >= late_invoice_amount
+                    )
+                except (InvalidOperation, TypeError, ValueError, OverflowError):
+                    late_full_payment = False
+            if not late_full_payment:
+                status = "needs_review" if additional in {"paidpartial", "paidover", "paidlate", "marked"} else "expired"
+                g_conn.execute(
+                    "UPDATE budget_payment_orders SET status = ?, provider_status = 'Expired', "
+                    "provider_payment_id = COALESCE(provider_payment_id, ?) "
+                    "WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
+                    (status, invoice_id, order_id),
+                )
+                g_conn.commit()
+                if status == "needs_review":
+                    return {"status": status, "notify": order_status != "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+                return {"status": status, "order_id": int(order_id)}
 
         if event_type == "InvoiceInvalid" and str(invoice.get("status", "")).lower() == "invalid":
             notify = order_status != "needs_review"
@@ -790,22 +830,26 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
             g_conn.commit()
             return {"status": "needs_review", "notify": notify, "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
 
-        if event_type != "InvoiceSettled" or str(invoice.get("status", "")).lower() != "settled":
+        provider_confirms_settled = (
+            event_type == "InvoiceSettled" and str(invoice.get("status", "")).lower() == "settled"
+        )
+        if not provider_confirms_settled and not late_full_payment:
             g_conn.rollback()
             return None
 
         additional = invoice.get("additionalStatus")
         additional_status = str(additional).casefold() if additional is not None else "none"
-        overpaid = additional_status == "paidover"
         payment_matches = (
             identity_matches and method_ok
-            # PaidOver is safe to accept: the customer paid at least the
-            # requested amount. PaidPartial, PaidLate, and Marked remain
-            # manual-review cases.
-            and additional_status in {"none", "paidover"}
+            # A provider-confirmed Settled invoice is accepted even if it is
+            # late or manually marked. A full late payment may also be credited
+            # from an Expired/PaidLate event with an explicit sufficient amount.
+            # When paidAmount is absent on a Settled invoice, use the pinned
+            # local quote as the provider's full-payment confirmation.
+            and additional_status != "paidpartial"
             and paid_amount.is_finite()
-            and (paid_amount >= invoice_amount if overpaid else paid_amount == invoice_amount)
-            and order_status in {"pending", "creating", "processing"}
+            and paid_amount >= invoice_amount
+            and can_settle_order
         )
         if not payment_matches:
             notify = order_status != "needs_review"
@@ -827,7 +871,10 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
             return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
         cur = g_conn.execute(
             "UPDATE budget_payment_orders SET status = 'paid', provider_status = 'Settled', "
-            "provider_payment_id = ?, paid_at = ? WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
+            "provider_payment_id = ?, paid_at = ? WHERE id = ? AND ("
+            "status IN ('pending', 'creating', 'processing') OR "
+            "status = 'expired' OR "
+            "(status = 'needs_review' AND provider_status IN ('Settled_review', 'Expired', 'Invalid'))) ",
             (invoice_id, int(time.time()), order_id),
         )
         if cur.rowcount != 1:
