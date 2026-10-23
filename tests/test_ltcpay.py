@@ -239,6 +239,12 @@ class LTCPaySettlementTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_logs").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT status FROM budget_payment_orders WHERE id = ?", (self.order_id,)).fetchone()[0], "paid")
 
+    def test_settled_invoice_uses_signed_event_store_when_canonical_store_is_omitted(self):
+        invoice = self.invoice()
+        invoice.pop("storeId")
+        result = database.process_ltcpay_webhook(self.event(), invoice)
+        self.assertEqual(result["status"], "paid")
+
     def test_greenfield_ltc_chain_alias_is_accepted_as_the_single_ltc_method(self):
         result = database.process_ltcpay_webhook(
             self.event(), self.invoice(checkout={"paymentMethods": ["LTC-CHAIN"]})

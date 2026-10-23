@@ -657,8 +657,8 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
     event_type = str(event.get("type", "")).strip()
     invoice_id = str(event.get("invoiceId", "")).strip()
     event_store_id = str(event.get("storeId", "")).strip()
-    canonical_invoice_id = str(invoice.get("id", "")).strip()
-    canonical_store_id = str(invoice.get("storeId", "")).strip()
+    canonical_invoice_id = str(invoice.get("id") or invoice_id).strip()
+    canonical_store_id = str(invoice.get("storeId") or event_store_id).strip()
     if not invoice_id or canonical_invoice_id != invoice_id or not event_store_id or canonical_store_id != event_store_id:
         return None
 
