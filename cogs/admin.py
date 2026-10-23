@@ -341,13 +341,8 @@ def can_manage_bot(ctx: commands.Context) -> bool:
 
 
 def can_configure_guild_management_roles(ctx: commands.Context) -> bool:
-    """Only the guild owner or an already trusted owner-role can assign staff roles."""
-    if not ctx.guild or not ctx.author:
-        return False
-    if ctx.author.id in (PRIMARY_OWNER_ID, ctx.guild.owner_id):
-        return True
-    owner_role_id, _limited_admin_role_id = get_guild_management_role_ids(ctx.guild.id)
-    return has_guild_role(ctx.author, owner_role_id, ctx.guild)
+    """Allow the same principals that can manage bot settings to configure staff roles."""
+    return can_manage_bot(ctx)
 
 def can_manage_global_exchange(ctx: commands.Context) -> bool:
     """كتالوج التبديل العام لا يُدار إلا من سيرفر Cosmo بواسطة إدارته."""
