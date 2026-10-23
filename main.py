@@ -16,7 +16,7 @@ import re
 from datetime import datetime
 
 # استيراد دالة تشغيل لوحة التحكم
-from dashboard.app import run_dashboard
+from dashboard.app import run_dashboard, set_discord_bot_context
 
 load_dotenv()
 
@@ -47,6 +47,13 @@ def run_tunnel():
         except Exception as e:
             print(f"❌ فشل تحميل أداة النفق: {e}")
             return
+
+    try:
+        # ملفات المستودع قد تُستنسخ دون بت التنفيذ؛ اضبطه قبل تشغيل الأداة.
+        os.chmod(binary_path, os.stat(binary_path).st_mode | stat.S_IXUSR)
+    except OSError as e:
+        print(f"❌ تعذر ضبط صلاحية تشغيل cloudflared: {e}")
+        return
 
     # تشغيل النفق
     try:
@@ -213,6 +220,7 @@ async def load_cogs():
 async def main():
     # 1. تشغيل سيرفر الداشبورد في خيط مستقل
     try:
+        set_discord_bot_context(bot, asyncio.get_running_loop())
         web_thread = threading.Thread(target=run_dashboard, daemon=True)
         web_thread.start()
         print("🌐 Dashboard thread started successfully on port 2009!")

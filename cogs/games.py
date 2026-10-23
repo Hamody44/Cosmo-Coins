@@ -9,11 +9,17 @@ import math
 from database import (
     parse_amount, parse_duration, is_bot_admin, deduct_server_spending,
     refund_server_spending, update_balance, is_blacklisted, get_guild_db,
-    clean_display_name, get_unicode_font, PRIMARY_OWNER_ID
+    clean_display_name, get_unicode_font, PRIMARY_OWNER_ID, get_currency_label
 )
 from PIL import Image, ImageDraw, ImageOps
 
 active_roulettes = {}
+
+def can_manage_server_games(ctx: commands.Context) -> bool:
+    """مالك السيرفر يستطيع بدء ألعاب الجوائز حتى دون بريميوم؛ بقية الصلاحيات كما هي."""
+    if not ctx.guild:
+        return False
+    return ctx.author.id == ctx.guild.owner_id or is_bot_admin(ctx)
 
 class RouletteSession:
     def __init__(self, guild_id: int):
@@ -59,9 +65,10 @@ class ClaimVerificationView(discord.ui.View):
         for item in self.children:
             item.disabled = True
         await interaction.message.edit(view=self)
-        await interaction.response.send_message(f"✅ تم تسليم `{self.amount:,}` Cosmo إلى {self.winner.mention} بواسطة {interaction.user.mention}.")
+        label = get_currency_label(interaction.guild.id)
+        await interaction.response.send_message(f"✅ تم تسليم `{self.amount:,}` {label} إلى {self.winner.mention} بواسطة {interaction.user.mention}.")
         try:
-            await self.winner.send(f"🎉 تم تسليمك {self.reward_type} بقيمة `{self.amount:,}` Cosmo.")
+            await self.winner.send(f"🎉 تم تسليمك {self.reward_type} بقيمة `{self.amount:,}` {label}.")
         except:
             pass
 
@@ -108,11 +115,12 @@ class BoxClaimView(discord.ui.View):
         await interaction.message.edit(view=self)
 
         winner = interaction.user
+        label = get_currency_label(interaction.guild.id)
         if not self.condition:
             update_balance(winner.id, self.amount)
-            await interaction.response.send_message(f"🎉 مبروك {winner.mention}! فتحت البوكس وربحت `{self.amount:,}` Cosmo.")
+            await interaction.response.send_message(f"🎉 مبروك {winner.mention}! فتحت البوكس وربحت `{self.amount:,}` {label}.")
             try:
-                await winner.send(f"🎁 مبروك! حصلت على `{self.amount:,}` Cosmo من فتح البوكس السريع.")
+                await winner.send(f"🎁 مبروك! حصلت على `{self.amount:,}` {label} من فتح البوكس السريع.")
             except:
                 pass
         else:
@@ -137,7 +145,7 @@ class RouletteLobbyView(discord.ui.View):
 
         embed = discord.Embed(
             title="🎯 لعبة الروليت | Roulette 🎯",
-            description=f"**الجائزة للفائز الأخير:** `{self.amount:,}` Cosmo\n"
+            description=f"**الجائزة للفائز الأخير:** `{self.amount:,}` {get_currency_label(guild.id)}\n"
                         f"**الشرط:** {self.condition if self.condition else 'لا يوجد شرط'}\n"
                         f"**الحد الأدنى للبدء:** 4 لاعبين\n"
                         f"⏳ **وقت التسجيل:** 30 ثانية!\n\n"
@@ -255,6 +263,7 @@ class Games(commands.Cog):
         asyncio.create_task(self.resume_all_giveaways())
 
     async def finish_giveaway(self, guild: discord.Guild, channel: discord.TextChannel, msg_id: int, amount: int, winners_count: int, condition: str, participants: list):
+        label = get_currency_label(guild.id)
         g_conn, g_cur = get_guild_db(guild.id)
         g_cur.execute("UPDATE active_giveaways SET is_finished = 1 WHERE message_id = ?", (msg_id,))
         g_conn.commit()
@@ -263,7 +272,7 @@ class Games(commands.Cog):
         valid_participants = [uid for uid in participants if guild.get_member(uid) and not is_blacklisted(guild.get_member(uid))]
         if not valid_participants:
             refund_server_spending(guild.id, amount * winners_count)
-            return await channel.send(f"⚠️ انتهى السحب على `{amount:,}` Cosmo، ولكن لم يشترك أحد (أُعيدت الميزانية للسيرفر).")
+            return await channel.send(f"⚠️ انتهى السحب على `{amount:,}` {label}، ولكن لم يشترك أحد (أُعيدت الميزانية للسيرفر).")
 
         winners_ids = random.sample(valid_participants, min(len(valid_participants), winners_count))
         winners = [guild.get_member(uid) for uid in winners_ids]
@@ -277,10 +286,10 @@ class Games(commands.Cog):
             for winner in winners:
                 update_balance(winner.id, amount)
                 try:
-                    await winner.send(f"🎉 مبروك! فزت بـ `{amount:,}` Cosmo في السحب وتم تسليمها تلقائياً.")
+                    await winner.send(f"🎉 مبروك! فزت بـ `{amount:,}` {label} في السحب وتم تسليمها تلقائياً.")
                 except:
                     pass
-            await channel.send(f"🎊 مبارك للفائزين: {winners_mentions}!\nتم تسليم `{amount:,}` Cosmo تلقائياً لكل فائز.")
+            await channel.send(f"🎊 مبارك للفائزين: {winners_mentions}!\nتم تسليم `{amount:,}` {label} تلقائياً لكل فائز.")
         else:
             await channel.send(f"🎊 الفائزون بالقرعة: {winners_mentions}!\n⚠️ **الشرط:** `{condition}`\nفي انتظار مراجعة الإدارة للتسليم.")
             for winner in winners:
@@ -360,7 +369,7 @@ class Games(commands.Cog):
                     msg = await channel.fetch_message(payload.message_id)
                     if msg.embeds:
                         embed = msg.embeds[0]
-                        embed.description = f"**الجائزة لكل فائز:** `{row[2]:,}` Cosmo\n" \
+                        embed.description = f"**الجائزة لكل فائز:** `{row[2]:,}` {get_currency_label(payload.guild_id)}\n" \
                                             f"**عدد الفائزين:** `{row[3]}`\n" \
                                             f"**المشاركين:** `{len(participants)}`\n" \
                                             f"**الشرط:** {row[4] if row[4] else 'لا يوجد شرط'}\n" \
@@ -397,7 +406,7 @@ class Games(commands.Cog):
                     msg = await channel.fetch_message(payload.message_id)
                     if msg.embeds:
                         embed = msg.embeds[0]
-                        embed.description = f"**الجائزة لكل فائز:** `{row[2]:,}` Cosmo\n" \
+                        embed.description = f"**الجائزة لكل فائز:** `{row[2]:,}` {get_currency_label(payload.guild_id)}\n" \
                                             f"**عدد الفائزين:** `{row[3]}`\n" \
                                             f"**المشاركين:** `{len(participants)}`\n" \
                                             f"**الشرط:** {row[4] if row[4] else 'لا يوجد شرط'}\n" \
@@ -409,8 +418,8 @@ class Games(commands.Cog):
 
     @commands.hybrid_command(name="giveaway", aliases=["سحب", "جيف_اواي"], description="بدء سحب جيف أواي على عملات Cosmo بالريأكشن 🎉")
     async def giveaway(self, ctx: commands.Context, amount: str, duration: str, winners_count: int, *, condition: str = None):
-        if not is_bot_admin(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+        if not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
         try:
             parsed_amount = parse_amount(amount)
         except:
@@ -429,9 +438,10 @@ class Games(commands.Cog):
             return await ctx.send("❌ صيغة الوقت غير صحيحة.")
 
         end_timestamp = int(time.time()) + duration_seconds
+        currency_label = get_currency_label(ctx.guild.id)
         embed = discord.Embed(
-            title="🎉 سحب على عملات Cosmo! 🎉",
-            description=f"**الجائزة لكل فائز:** `{parsed_amount:,}` Cosmo\n**عدد الفائزين:** `{winners_count}`\n**المشاركين:** `0`\n**الشرط:** {condition if condition else 'لا يوجد شرط'}\n**ينتهي:** <t:{end_timestamp}:R>",
+            title=f"🎉 سحب على {currency_label}! 🎉",
+            description=f"**الجائزة لكل فائز:** `{parsed_amount:,}` {currency_label}\n**عدد الفائزين:** `{winners_count}`\n**المشاركين:** `0`\n**الشرط:** {condition if condition else 'لا يوجد شرط'}\n**ينتهي:** <t:{end_timestamp}:R>",
             color=discord.Color.purple()
         )
         embed.set_footer(text="تفاعل بالريأكشن 🎉 للدخول في السحب!")
@@ -450,8 +460,8 @@ class Games(commands.Cog):
 
     @commands.hybrid_command(name="box", aliases=["بوكس"], description="إنشاء بوكس سريع لأول شخص يضغط على الزر")
     async def box(self, ctx: commands.Context, amount: str, *, condition: str = None):
-        if not is_bot_admin(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+        if not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
         try:
             parsed_amount = parse_amount(amount)
         except:
@@ -463,9 +473,10 @@ class Games(commands.Cog):
         if not allowed:
             return await ctx.send(pool_msg)
 
+        currency_label = get_currency_label(ctx.guild.id)
         embed = discord.Embed(
-            title="🎁 بوكس Cosmo السريع! 🎁",
-            description=f"**الجائزة:** `{parsed_amount:,}` Cosmo\n**الشرط:** {condition if condition else 'لا يوجد شرط (تسليم فوري)'}\n**القاعدة:** أول من يضغط على الزر يفوز بالجائزة فوراً!",
+            title=f"🎁 بوكس {currency_label} السريع! 🎁",
+            description=f"**الجائزة:** `{parsed_amount:,}` {currency_label}\n**الشرط:** {condition if condition else 'لا يوجد شرط (تسليم فوري)'}\n**القاعدة:** أول من يضغط على الزر يفوز بالجائزة فوراً!",
             color=discord.Color.gold()
         )
         embed.set_footer(text="كن الأسرع واضغط على الزر أدناه!")
@@ -474,8 +485,8 @@ class Games(commands.Cog):
 
     @commands.hybrid_command(name="roulette", aliases=["روليت"], description="بدء لعبة الروليت التنافسية مع العجلة الرسومية")
     async def roulette(self, ctx: commands.Context, amount: str, *, condition: str = None):
-        if not is_bot_admin(ctx):
-            return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
+        if not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذه اللعبة متاحة لمالك السيرفر أو لمسؤول البوت المخوّل.")
         if ctx.guild.id in active_roulettes:
             return await ctx.send("⚠️ هناك لعبة روليت جارية بالفعل!")
 
@@ -571,9 +582,10 @@ class Games(commands.Cog):
 
         if not condition:
             update_balance(final_winner.id, parsed_amount)
-            await ctx.channel.send(f"👑 **مبروك للفائز بالروليت:** {final_winner.mention}!\nتم تسليم `{parsed_amount:,}` Cosmo إلى رصيدك تلقائياً.")
+            currency_label = get_currency_label(ctx.guild.id)
+            await ctx.channel.send(f"👑 **مبروك للفائز بالروليت:** {final_winner.mention}!\nتم تسليم `{parsed_amount:,}` {currency_label} إلى رصيدك تلقائياً.")
             try:
-                await final_winner.send(f"🎉 مبروك! فزت في لعبة الروليت وحصلت على `{parsed_amount:,}` Cosmo.")
+                await final_winner.send(f"🎉 مبروك! فزت في لعبة الروليت وحصلت على `{parsed_amount:,}` {currency_label}.")
             except:
                 pass
         else:

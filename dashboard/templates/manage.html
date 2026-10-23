@@ -37,19 +37,24 @@
     <hr class="border-secondary">
     <h5 class="text-white fw-bold mb-3">🎨 تخصيص هوية البوت في السيرفر (بريميوم)</h5>
     <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="update_bot_identity">
         <div class="row g-3">
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label text-white fw-semibold">اسم البوت المستعار (Nickname)</label>
                 <input type="text" name="bot_nick" class="form-control" value="{{ bot_nick }}" placeholder="اكتب اسم البوت الجديد...">
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label text-white fw-semibold">رابط صورة البوت (Avatar URL)</label>
                 <input type="url" name="avatar_url" class="form-control" value="{{ avatar_url }}" placeholder="https://i.imgur.com/...png">
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <label class="form-label text-white fw-semibold">رابط بنر البوت (Banner URL)</label>
                 <input type="url" name="banner_url" class="form-control" value="{{ banner_url }}" placeholder="https://i.imgur.com/...png">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label text-white fw-semibold">اسم عرض رصيد Cosmo في هذا السيرفر فقط</label>
+                <input type="text" name="currency_name" class="form-control" maxlength="24" value="{{ currency_label if currency_label != 'Cosmo' else '' }}" placeholder="اتركه فارغًا لاستخدام Cosmo">
             </div>
         </div>
         <button type="submit" class="btn btn-warning mt-3 fw-bold">حفظ مظهر وهوية البوت</button>
@@ -69,13 +74,18 @@
         </div>
 
         <div class="card p-4 mb-4">
-            <h5 class="text-white fw-bold mb-3">⚙️ قفل التبديل ورومات لوجات السيرفر</h5>
+            <h5 class="text-white fw-bold mb-3">⚙️ حالة التبديل العام ورومات لوجات السيرفر</h5>
             <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="save_settings">
                 
-                <div class="form-check form-switch mb-4">
-                    <input class="form-check-input" type="checkbox" name="exchange_enabled" id="exchangeSwitch" {% if settings.exchange_enabled == 1 %}checked{% endif %}>
-                    <label class="form-check-label text-white fw-semibold" for="exchangeSwitch">تفعيل التبديل في السيرفر</label>
+                <div class="alert {% if settings.exchange_enabled == 1 %}alert-success{% else %}alert-danger{% endif %} mb-4">
+                    {% if settings.exchange_enabled == 1 %}
+                        التبديل مفتوح عالميًا في جميع السيرفرات.
+                    {% else %}
+                        التبديل مغلق عالميًا في جميع السيرفرات.
+                    {% endif %}
+                    <div class="small mt-1">إدارة الفتح والإغلاق تتم من سيرفر Cosmo فقط عبر `/toggle_exchange_system`؛ أما لوجات هذا السيرفر فتظل محلية. إغلاق السوق يمنع الطلبات الجديدة فقط، والطلبات المعلقة تبقى للمعالجة.</div>
                 </div>
 
                 <!-- 1. لوج التحويلات -->
@@ -122,6 +132,17 @@
                     </select>
                 </div>
 
+                <div class="mb-4">
+                    <label class="form-label text-white fw-semibold">🎫 روم أرشيف التذاكر (خاص بهذا السيرفر)</label>
+                    <select name="ticket_log" class="form-select">
+                        <option value="">-- بدون روم محددة --</option>
+                        {% for ch in channels %}
+                            <option value="{{ ch.id }}" {% if settings.ticket_log|string == ch.id|string %}selected{% endif %}># {{ ch.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <small class="text-muted-custom">عند حذف تذكرة، يرسل البوت سجلها إلى هذه القناة داخل هذا السيرفر فقط.</small>
+                </div>
+
                 <button type="submit" class="btn btn-primary w-100 fw-bold">حفظ إعدادات الرومات</button>
             </form>
         </div>
@@ -130,22 +151,24 @@
     <!-- العملات المسجلة والردود التلقائية -->
     <div class="col-lg-7">
         <div class="card p-4 mb-4">
-            <h5 class="text-white fw-bold mb-3">💱 عملات السيرفر وقفل التبديل الفردي</h5>
+            <h5 class="text-white fw-bold mb-2">💱 كتالوج العملات العام</h5>
+            <p class="text-muted-custom small">هذه الأسعار والحالات موحّدة لكل السيرفرات وتدار من سيرفر Cosmo فقط؛ لا يمكن تغييرها من إعدادات هذا السيرفر.</p>
             <div class="table-responsive">
                 <table class="table table-custom align-middle">
                     <thead>
                         <tr>
                             <th>العملة</th>
-                            <th>سعر التحويل</th>
+                            <th>السعر</th>
+                            <th>الحد الأدنى</th>
                             <th>الحالة</th>
-                            <th>تحكم</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for curr in currencies %}
                         <tr>
                             <td class="fw-bold">{{ curr[0] }}</td>
-                            <td>{{ curr[1] }} Cosmo</td>
+                            <td>1 {{ currency_label }} = {{ curr[1] }} {{ curr[0] }}</td>
+                            <td>{{ curr[3] }} {{ curr[0] }}</td>
                             <td>
                                 {% if curr[2] == 1 %}
                                     <span class="badge bg-success">متاح للتبديل</span>
@@ -153,20 +176,10 @@
                                     <span class="badge bg-danger">معطل</span>
                                 {% endif %}
                             </td>
-                            <td>
-                                <form method="POST" style="display:inline;">
-                                    <input type="hidden" name="action" value="toggle_currency">
-                                    <input type="hidden" name="currency_name" value="{{ curr[0] }}">
-                                    <input type="hidden" name="status" value="{{ 0 if curr[2] == 1 else 1 }}">
-                                    <button class="btn btn-sm {% if curr[2] == 1 %}btn-outline-danger{% else %}btn-outline-success{% endif %}">
-                                        {{ "إيقاف" if curr[2] == 1 else "تشغيل" }}
-                                    </button>
-                                </form>
-                            </td>
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="4" class="text-center text-muted-custom py-3">لا توجد عملات مضافة بعد عبر أمر <code>/add_exchange_currency</code>.</td>
+                            <td colspan="4" class="text-center text-muted-custom py-3">لا توجد عملات مضافة في الكتالوج العام بعد.</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -180,6 +193,7 @@
             
             <!-- نموذج إضافة رد تلقائي جديد -->
             <form method="POST" class="mb-4 p-3 bg-dark rounded border border-secondary">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="add_reply">
                 <div class="row g-2">
                     <div class="col-md-5">
@@ -213,6 +227,7 @@
                             <td class="text-white">{{ content }}</td>
                             <td class="text-center">
                                 <form method="POST" onsubmit="return confirm('هل أنت متأكد من حذف هذا الرد التلقائي؟');">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                     <input type="hidden" name="action" value="delete_reply">
                                     <input type="hidden" name="trigger" value="{{ word }}">
                                     <button type="submit" class="btn btn-sm btn-outline-danger">🗑️</button>

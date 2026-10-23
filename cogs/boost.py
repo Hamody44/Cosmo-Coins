@@ -2,10 +2,11 @@ import discord
 from discord.ext import commands, tasks
 import time
 from database import (
-    get_guild_db, is_bot_admin, parse_amount, update_balance
+    get_guild_db, is_bot_admin, parse_amount, update_balance, get_currency_label
 )
 
 async def register_member_boost(guild: discord.Guild, member: discord.Member, boost_count: int, is_fake: bool = False):
+    currency_label = get_currency_label(guild.id)
     g_conn, g_cur = get_guild_db(guild.id)
     g_cur.execute("SELECT is_enabled, single_boost_reward, double_boost_reward, boost_log_channel FROM boost_system_config WHERE guild_id = ?", (guild.id,))
     cfg = g_cur.fetchone()
@@ -38,7 +39,7 @@ async def register_member_boost(guild: discord.Guild, member: discord.Member, bo
         await member.send(
             f"🎉 **شكراً لدعمك سيرفر {guild.name}!**\n"
             f"تم تفعيل اشتراكك في نظام مكافآت الـ {type_str}:\n"
-            f"• استلمت الدفعة الأولى فوراً: `{reward_per_week:,}` Cosmo!\n"
+            f"• استلمت الدفعة الأولى فوراً: `{reward_per_week:,}` {currency_label}!\n"
             f"• متبقي لك: `3` دفعات أسبوعية (كل 7 أيام دفعة طالما البوست مستمر).\n"
             f"• موعد الدفعة القادمة: <t:{next_payment}:F> (<t:{next_payment}:R>)."
         )
@@ -50,7 +51,7 @@ async def register_member_boost(guild: discord.Guild, member: discord.Member, bo
         if chan:
             await chan.send(
                 f"🚀 قام {member.mention} بعمل **{type_str}** للسيرفر!\n"
-                f"تم تسليم الدفعة الأولى تلقائياً (`{reward_per_week:,}` Cosmo) مع جدولة 3 دفعات أسبوعية قادمة."
+                f"تم تسليم الدفعة الأولى تلقائياً (`{reward_per_week:,}` {currency_label}) مع جدولة 3 دفعات أسبوعية قادمة."
             )
 
     return True, f"تم تسجيل اشتراك {type_str} وتسليم الدفعة الأولى بنجاح!"
@@ -73,6 +74,7 @@ class Boost(commands.Cog):
     async def process_boost_weekly_payments(self):
         now = int(time.time())
         for guild in self.bot.guilds:
+            currency_label = get_currency_label(guild.id)
             g_conn, g_cur = get_guild_db(guild.id)
             g_cur.execute(
                 "SELECT id, user_id, boost_type, weekly_reward, payments_remaining, next_payment_timestamp, is_fake "
@@ -114,7 +116,7 @@ class Boost(commands.Cog):
                 if member:
                     try:
                         await member.send(
-                            f"💎 **دفعة بوست جديدة:** تم تسليم `{total_due_reward:,}` Cosmo لدعمك السيرفر بـ {type_str}{missed_text}!\n"
+                            f"💎 **دفعة بوست جديدة:** تم تسليم `{total_due_reward:,}` {currency_label} لدعمك السيرفر بـ {type_str}{missed_text}!\n"
                             f"(الدفعات المتبقية: `{new_remaining}`)."
                         )
                     except:
@@ -126,7 +128,7 @@ class Boost(commands.Cog):
                     log_chan = guild.get_channel(log_row[0])
                     if log_chan:
                         await log_chan.send(
-                            f"💎 تم تسليم دفعة البوست للعضو <@{u_id}> بقيمة `{total_due_reward:,}` Cosmo لدعمه بـ {type_str}{missed_text} (المتبقي: `{new_remaining}`)."
+                            f"💎 تم تسليم دفعة البوست للعضو <@{u_id}> بقيمة `{total_due_reward:,}` {currency_label} لدعمه بـ {type_str}{missed_text} (المتبقي: `{new_remaining}`)."
                         )
 
             g_conn.close()
@@ -135,6 +137,7 @@ class Boost(commands.Cog):
     async def setup_boost_rewards(self, ctx: commands.Context, single_reward: str, double_reward: str):
         if not is_bot_admin(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
+        currency_label = get_currency_label(ctx.guild.id)
         try:
             s_amount = parse_amount(single_reward)
             d_amount = parse_amount(double_reward)
@@ -152,7 +155,7 @@ class Boost(commands.Cog):
         )
         g_conn.commit()
         g_conn.close()
-        await ctx.send(f"✅ **تم ضبط مكافآت البوست:**\n• البوست الواحد: `{s_amount:,}` Cosmo أسبوعياً\n• الدبل بوست: `{d_amount:,}` Cosmo أسبوعياً.")
+        await ctx.send(f"✅ **تم ضبط مكافآت البوست:**\n• البوست الواحد: `{s_amount:,}` {currency_label} أسبوعياً\n• الدبل بوست: `{d_amount:,}` {currency_label} أسبوعياً.")
 
     @commands.hybrid_command(name="toggle_boost_system", aliases=["تفعيل_نظام_البوست"], description="تفعيل أو تعطيل استقبال مشتركين جدد في نظام البوست")
     async def toggle_boost_system(self, ctx: commands.Context, status: bool):
@@ -199,6 +202,7 @@ class Boost(commands.Cog):
 
     @commands.hybrid_command(name="my_boost_status", aliases=["حالة_البوست_لي"], description="معاينة اشتراكات البوست والدفعات المتبقية لك في هذا السيرفر")
     async def my_boost_status(self, ctx: commands.Context):
+        currency_label = get_currency_label(ctx.guild.id)
         g_conn, g_cur = get_guild_db(ctx.guild.id)
         g_cur.execute(
             "SELECT id, boost_type, weekly_reward, payments_remaining, next_payment_timestamp FROM active_boost_subscriptions WHERE user_id = ?", 
@@ -215,7 +219,7 @@ class Boost(commands.Cog):
             type_str = "دبل بوست (2 Boosts)" if s[1] == 2 else "بوست واحد (1 Boost)"
             embed.add_field(
                 name=f"اشتراك #{idx} - {type_str}",
-                value=f"• المكافأة: `{s[2]:,}` Cosmo أسبوعياً\n• المتبقي: `{s[3]}` دفعات من أصل 4\n• الدفعة القادمة: <t:{s[4]}:F> (<t:{s[4]}:R>)",
+                value=f"• المكافأة: `{s[2]:,}` {currency_label} أسبوعياً\n• المتبقي: `{s[3]}` دفعات من أصل 4\n• الدفعة القادمة: <t:{s[4]}:F> (<t:{s[4]}:R>)",
                 inline=False
             )
         await ctx.send(embed=embed)

@@ -33,7 +33,7 @@
             </div>
 
             <div class="p-3 bg-dark rounded border border-warning my-3 text-center shadow-sm">
-                <span class="text-muted-custom d-block small mb-1 fw-semibold">رصيد Cosmo المتاح</span>
+                <span class="text-muted-custom d-block small mb-1 fw-semibold">الرصيد الموحد المتاح</span>
                 <span class="fs-2 text-warning fw-bold">{{ "{:,}".format(balance) }}</span>
                 <span class="text-white fw-bold ms-1">Cosmo</span>
             </div>
@@ -50,16 +50,17 @@
             <div class="d-flex align-items-center gap-2 mb-3">
                 <span class="fs-3">💱</span>
                 <div>
-                    <h4 class="text-white fw-bold mb-0">طلب تبديل Cosmo (/exchange)</h4>
-                    <p class="text-muted-custom small mb-0">استبدل عملات Cosmo بعملات السيرفرات البريميوم المتاحة مباشرة</p>
+                    <h4 class="text-white fw-bold mb-0">طلب تبديل الرصيد (/exchange)</h4>
+                    <p class="text-muted-custom small mb-0">التبديل متاح دون Premium في السيرفرات التي تديرها ويكون البوت موجودًا فيها.</p>
                 </div>
             </div>
 
-            {% if guilds|length > 0 %}
+            {% if exchange_open and guilds|length > 0 %}
             <form method="POST" id="exchangeForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <!-- 1. اختيار السيرفر المستلم -->
                 <div class="mb-3">
-                    <label class="form-label text-white fw-semibold">1. اختر سيرفر الاستلام (السيرفرات المفعلة للبريميوم فقط)</label>
+                    <label class="form-label text-white fw-semibold">1. اختر سيرفر الاستلام (يجب أن يكون التبديل مفتوحًا)</label>
                     <select name="guild_id" id="guildSelect" class="form-select" required>
                         <option value="">-- اضغط لتحديد السيرفر --</option>
                         {% for g in guilds %}
@@ -79,10 +80,10 @@
 
                 <!-- 3. كمية الكوزمو -->
                 <div class="mb-3">
-                    <label class="form-label text-white fw-semibold">3. كمية الكوزمو المراد استبدالها (Amount)</label>
+                    <label class="form-label text-white fw-semibold">3. كمية <span id="currencyLabel">Cosmo</span> المراد استبدالها</label>
                     <input type="text" name="cosmo_amount" id="cosmoAmount" class="form-control" placeholder="أدخل المبلغ (يدعم الأرقام أو 1k, 1m...)" required disabled>
                     <div class="d-flex justify-content-between align-items-center mt-1">
-                        <span class="text-muted-custom small">رصيدك: <b>{{ "{:,}".format(balance) }}</b> Cosmo</span>
+                        <span class="text-muted-custom small">رصيدك: <b>{{ "{:,}".format(balance) }}</b> (الاسم يتبع السيرفر المحدد)</span>
                         <span id="calcResult" class="text-success fw-bold small"></span>
                     </div>
                 </div>
@@ -100,8 +101,12 @@
             {% else %}
             <div class="text-center py-5">
                 <div class="fs-1 mb-2">🔒</div>
-                <h5 class="text-white fw-bold">لا توجد سيرفرات بريميوم متاحة للاستلام</h5>
-                <p class="text-muted-custom mb-0">لإجراء التبديل، يجب أن تكون متواجداً في سيرفر يمتلك اشتراك بريميوم نشط ونظام تبديل مفتوح.</p>
+                <h5 class="text-white fw-bold">لا توجد سيرفرات مؤهلة حاليًا</h5>
+                {% if not exchange_open %}
+                    <p class="text-muted-custom mb-0">نظام التبديل مغلق عالميًا من سيرفر Cosmo حاليًا؛ ستعود القائمة عند فتحه.</p>
+                {% else %}
+                    <p class="text-muted-custom mb-0">تحتاج أن تكون مالكًا أو مسؤولًا في سيرفر يوجد به البوت؛ لا يلزم Premium.</p>
+                {% endif %}
             </div>
             {% endif %}
         </div>
@@ -134,7 +139,7 @@
                             <td class="fw-bold">#{{ ex.id }}</td>
                             <td>{{ ex.server_name }}</td>
                             <td>
-                                <div><b class="text-warning">{{ "{:,}".format(ex.cosmo_amount) }}</b> Cosmo</div>
+                                <div><b class="text-warning">{{ "{:,}".format(ex.cosmo_amount) }}</b> {{ ex.currency_label }}</div>
                                 <div class="text-muted-custom">➔ {{ ex.received_amount }} {{ ex.target_currency }}</div>
                             </td>
                             <td>
@@ -221,6 +226,7 @@
     const rateInfo = document.getElementById('rateInfo');
     const calcResult = document.getElementById('calcResult');
     const submitBtn = document.getElementById('submitBtn');
+    const currencyLabel = document.getElementById('currencyLabel');
 
     function parseAmountStr(str) {
         if (!str) return 0;
@@ -242,16 +248,19 @@
             submitBtn.disabled = true;
 
             if (!selectedGid) {
+                currencyLabel.textContent = 'Cosmo';
                 currencySelect.disabled = true;
                 return;
             }
 
             const targetGuild = guildsData.find(g => String(g.id) === String(selectedGid));
             if (targetGuild && targetGuild.currencies) {
+                const baseLabel = targetGuild.currency_label || 'Cosmo';
+                currencyLabel.textContent = baseLabel;
                 targetGuild.currencies.forEach(c => {
                     const opt = document.createElement('option');
                     opt.value = c.name;
-                    opt.textContent = `${c.name} (1 Cosmo = ${c.rate} ${c.name})`;
+                    opt.textContent = `${c.name} (1 ${baseLabel} = ${c.rate} ${c.name})`;
                     opt.dataset.rate = c.rate;
                     opt.dataset.min = c.min;
                     currencySelect.appendChild(opt);
@@ -272,7 +281,9 @@
 
             const rate = parseFloat(selectedOpt.dataset.rate);
             const min = parseFloat(selectedOpt.dataset.min);
-            rateInfo.textContent = `ℹ️ سعر الصرف: 1 Cosmo = ${rate} ${this.value} | الحد الأدنى للاستلام: ${min} ${this.value}`;
+            const targetGuild = guildsData.find(g => String(g.id) === String(guildSelect.value));
+            const baseLabel = targetGuild ? (targetGuild.currency_label || 'Cosmo') : 'Cosmo';
+            rateInfo.textContent = `ℹ️ سعر الصرف: 1 ${baseLabel} = ${rate} ${this.value} | الحد الأدنى للاستلام: ${min} ${this.value}`;
             rateInfo.style.display = 'block';
             cosmoAmount.disabled = false;
             submitBtn.disabled = false;
