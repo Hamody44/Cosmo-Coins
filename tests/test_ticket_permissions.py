@@ -2,8 +2,9 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import discord
 import database
 from cogs.tickets import Tickets, can_manage_ticket_member
 
@@ -112,6 +113,83 @@ class TicketRenamePermissionTests(unittest.IsolatedAsyncioTestCase):
 
         ctx.channel.edit.assert_awaited_once_with(name="renamed-ticket")
         ctx.send.assert_awaited_once()
+
+
+class TicketAddPersonTests(unittest.IsolatedAsyncioTestCase):
+    def make_context(self, member_id_or_mention="123"):
+        added_member = SimpleNamespace(id=123, mention="<@123>")
+        guild = SimpleNamespace(
+            id=111,
+            get_member=Mock(return_value=None),
+            fetch_member=AsyncMock(return_value=added_member),
+        )
+        channel = SimpleNamespace(
+            id=222,
+            overwrites_for=Mock(return_value=discord.PermissionOverwrite()),
+            set_permissions=AsyncMock(),
+        )
+        ctx = SimpleNamespace(
+            guild=guild,
+            channel=channel,
+            author=SimpleNamespace(id=444, name="Admin"),
+            send=AsyncMock(),
+        )
+        conn = SimpleNamespace(close=Mock())
+        cursor = SimpleNamespace(execute=Mock(), fetchone=Mock(return_value=(0,)))
+        return ctx, added_member, conn, cursor
+
+    async def test_non_admin_cannot_add_person(self):
+        ctx, _member, conn, cursor = self.make_context()
+        with patch("cogs.tickets.can_manage_tickets", return_value=False), patch(
+            "cogs.tickets.get_guild_db", return_value=(conn, cursor)
+        ) as get_db:
+            await Tickets.add_person.callback(Tickets(None), ctx, "123")
+
+        get_db.assert_not_called()
+        ctx.channel.set_permissions.assert_not_awaited()
+        ctx.send.assert_awaited_once_with("⛔ هذا الأمر متاح لمالك السيرفر أو مسؤولي التذاكر فقط.")
+
+    async def test_ticket_admin_adds_member_by_id_and_fetches_uncached_member(self):
+        ctx, member, conn, cursor = self.make_context()
+        with patch("cogs.tickets.can_manage_tickets", return_value=True), patch(
+            "cogs.tickets.get_guild_db", return_value=(conn, cursor)
+        ):
+            await Tickets.add_person.callback(Tickets(None), ctx, "123")
+
+        cursor.execute.assert_called_once_with(
+            "SELECT is_closed FROM tickets WHERE channel_id = ?", (222,)
+        )
+        ctx.guild.fetch_member.assert_awaited_once_with(123)
+        ctx.channel.set_permissions.assert_awaited_once()
+        permissions = ctx.channel.set_permissions.await_args.kwargs["overwrite"]
+        self.assertTrue(permissions.view_channel)
+        self.assertTrue(permissions.send_messages)
+        ctx.send.assert_awaited_once_with("✅ تمت إضافة <@123> إلى التذكرة.")
+
+    async def test_ticket_admin_can_add_member_using_discord_mention(self):
+        ctx, member, conn, cursor = self.make_context("<@!123>")
+        with patch("cogs.tickets.can_manage_tickets", return_value=True), patch(
+            "cogs.tickets.get_guild_db", return_value=(conn, cursor)
+        ):
+            await Tickets.add_person.callback(Tickets(None), ctx, "<@!123>")
+
+        ctx.guild.fetch_member.assert_awaited_once_with(123)
+        ctx.channel.set_permissions.assert_awaited_once()
+
+    async def test_invalid_id_and_closed_ticket_do_not_change_permissions(self):
+        ctx, _member, conn, cursor = self.make_context()
+        with patch("cogs.tickets.can_manage_tickets", return_value=True), patch(
+            "cogs.tickets.get_guild_db", return_value=(conn, cursor)
+        ):
+            await Tickets.add_person.callback(Tickets(None), ctx, "<@&123>")
+            self.assertEqual(ctx.send.await_args.args[0], "❌ أدخل ID عضو صالحاً أو منشنه داخل السيرفر.")
+            cursor.fetchone.return_value = (1,)
+            ctx.send.reset_mock()
+            await Tickets.add_person.callback(Tickets(None), ctx, "123")
+
+        self.assertEqual(ctx.send.await_args.args[0], "⚠️ لا يمكن إضافة عضو إلى تذكرة مغلقة.")
+        ctx.channel.set_permissions.assert_not_awaited()
+        ctx.guild.fetch_member.assert_not_awaited()
 
 
 if __name__ == "__main__":

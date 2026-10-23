@@ -701,11 +701,11 @@ class Admin(commands.Cog):
         )
 
     @commands.hybrid_command(
-        name="auto_add_server_budget",
-        aliases=["شحن_ميزانية_تلقائي"],
+        name="buy_budget",
+        aliases=["auto_add_server_budget", "auto_buy_server_budget", "شحن_ميزانية_تلقائي"],
         description="بدء طلب شحن ميزانية السيرفر عبر وسيلة دفع مفعلة"
     )
-    async def auto_add_server_budget(self, ctx: commands.Context, amount: str):
+    async def buy_budget(self, ctx: commands.Context, amount: str):
         if not ctx.guild:
             return await ctx.send("⛔ استخدم الأمر داخل السيرفر المطلوب شحن ميزانيته.")
         try:

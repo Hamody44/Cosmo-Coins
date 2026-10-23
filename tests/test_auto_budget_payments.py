@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import database
 from cogs.admin import (
+    Admin,
     ADAMC_ID,
     AutoBudgetCommandButton,
     PRIMARY_OWNER_ID,
@@ -263,6 +264,31 @@ class AutoBudgetCommandButtonTests(unittest.IsolatedAsyncioTestCase):
             "هذا الزر مخصص لصاحب طلب الشحن فقط.", ephemeral=True
         )
         self.assertNotIn(command, interaction.response.send_message.await_args.args[0])
+
+
+class ServerBudgetOwnerCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_budget_purchase_command_uses_new_name_and_keeps_legacy_aliases(self):
+        self.assertEqual(Admin.buy_budget.name, "buy_budget")
+        self.assertIn("auto_add_server_budget", Admin.buy_budget.aliases)
+        self.assertIn("auto_buy_server_budget", Admin.buy_budget.aliases)
+
+    async def test_manual_add_and_remove_budget_are_bot_owner_only(self):
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=101),
+            author=SimpleNamespace(id=202),
+            send=AsyncMock(),
+        )
+        admin = Admin(None)
+        for command in (Admin.add_server_budget, Admin.remove_server_budget):
+            ctx.send.reset_mock()
+            with patch("cogs.admin.check_is_owner", new=AsyncMock(return_value=False)), patch(
+                "cogs.admin.get_server_spending_balance"
+            ) as get_balance, patch("cogs.admin.get_guild_db") as get_db:
+                await command.callback(admin, ctx, "10")
+
+            ctx.send.assert_awaited_once_with("⛔ هذا الأمر متاح فقط لمالك ومطور البوت الأساسي.")
+            get_balance.assert_not_called()
+            get_db.assert_not_called()
 
 
 class BudgetHistoryLabelTests(unittest.TestCase):

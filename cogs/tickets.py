@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import io
 import datetime
+import re
 from database import get_guild_db, is_bot_admin, PRIMARY_OWNER_ID
 
 def can_manage_ticket_member(guild, member, admin_role_id=None) -> bool:
@@ -282,6 +283,55 @@ class Tickets(commands.Cog):
         g_conn.commit()
         g_conn.close()
         await ctx.send(f"✅ تم ضبط روم لوج التذاكر على: {channel.mention}")
+
+    @commands.hybrid_command(
+        name="add_person",
+        aliases=["اضافة_شخص_للتكت"],
+        description="إضافة عضو إلى التذكرة الحالية (الإدارة فقط)",
+    )
+    async def add_person(self, ctx: commands.Context, member_id_or_mention: str):
+        if not ctx.guild:
+            return await ctx.send("⛔ استخدم هذا الأمر داخل تذكرة في السيرفر.")
+        if not can_manage_tickets(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو مسؤولي التذاكر فقط.")
+
+        g_conn, g_cur = get_guild_db(ctx.guild.id)
+        g_cur.execute("SELECT is_closed FROM tickets WHERE channel_id = ?", (ctx.channel.id,))
+        ticket = g_cur.fetchone()
+        g_conn.close()
+        if not ticket:
+            return await ctx.send("❌ هذا الروم ليس تذكرة مسجلة في النظام.")
+        if ticket[0]:
+            return await ctx.send("⚠️ لا يمكن إضافة عضو إلى تذكرة مغلقة.")
+
+        match = re.fullmatch(r"(?:<@!?(\d{1,20})>|(\d{1,20}))", member_id_or_mention.strip())
+        if not match:
+            return await ctx.send("❌ أدخل ID عضو صالحاً أو منشنه داخل السيرفر.")
+        member_id = int(match.group(1) or match.group(2))
+        try:
+            member = ctx.guild.get_member(member_id)
+            if member is None:
+                member = await ctx.guild.fetch_member(member_id)
+        except discord.NotFound:
+            return await ctx.send("❌ لم أعثر على هذا العضو في السيرفر.")
+        except (discord.Forbidden, discord.HTTPException):
+            return await ctx.send("⚠️ تعذر جلب العضو من Discord؛ تحقق من صلاحيات البوت ثم أعد المحاولة.")
+
+        try:
+            overwrite = ctx.channel.overwrites_for(member)
+            overwrite.view_channel = True
+            overwrite.send_messages = True
+            await ctx.channel.set_permissions(
+                member,
+                overwrite=overwrite,
+                reason=f"Ticket access granted by {ctx.author} ({ctx.author.id})",
+            )
+        except discord.Forbidden:
+            return await ctx.send("⛔ لا يملك البوت صلاحية إدارة أذونات هذه القناة.")
+        except discord.HTTPException:
+            return await ctx.send("⚠️ تعذر تحديث أذونات القناة؛ حاول مرة أخرى لاحقاً.")
+
+        await ctx.send(f"✅ تمت إضافة {member.mention} إلى التذكرة.")
 
     @commands.hybrid_command(name="rename", aliases=["تغيير_اسم_التكت"], description="إعادة تسمية التذكرة (مالك السيرفر أو مسؤول التذاكر فقط)")
     async def rename_ticket(self, ctx: commands.Context, new_name: str):
