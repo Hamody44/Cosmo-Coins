@@ -309,6 +309,20 @@ class LTCPaySettlementTests(unittest.TestCase):
             row = conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()
             self.assertEqual(row[0] if row else 0, 0)
 
+    def test_settled_invoice_can_use_locally_saved_invoice_id_when_metadata_is_omitted(self):
+        with patch.object(
+            database,
+            "_find_crypto_order_by_invoice_id",
+            return_value=(101, self.provider_order_id),
+        ):
+            result = database.process_ltcpay_webhook(self.event(), self.invoice(metadata={}))
+        self.assertEqual(result["status"], "paid")
+        with sqlite3.connect(self.guild_db_path) as conn:
+            self.assertEqual(
+                conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()[0],
+                195_000_000,
+            )
+
 
 class LTCPayWebhookRouteTests(unittest.TestCase):
     def test_valid_signed_event_fetches_canonical_invoice_and_bad_signature_is_rejected(self):

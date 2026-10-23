@@ -6,6 +6,7 @@ import re
 import math
 import random
 import io
+import glob
 import threading
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from contextlib import closing
@@ -624,6 +625,33 @@ def fail_crypto_budget_payment_order(guild_id: int, order_id: int, provider_orde
         g_conn.close()
 
 
+def _find_crypto_order_by_invoice_id(invoice_id: str):
+    """Find the local order linked to an invoice without trusting invoice metadata."""
+    invoice_id = str(invoice_id).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", invoice_id):
+        return None
+    database_dir = os.path.abspath("guilds_data")
+    for path in glob.glob(os.path.join(database_dir, "guild_*.db")):
+        name = os.path.basename(path)
+        match = re.fullmatch(r"guild_(\d+)\.db", name)
+        if not match:
+            continue
+        guild_id = int(match.group(1))
+        try:
+            with closing(sqlite3.connect(path, timeout=5)) as conn:
+                row = conn.execute(
+                    "SELECT provider_order_id FROM budget_payment_orders "
+                    "WHERE method = 'crypto' AND provider_payment_id = ? "
+                    "AND status NOT IN ('cancelled', 'failed') LIMIT 1",
+                    (invoice_id,),
+                ).fetchone()
+            if row and row[0]:
+                return guild_id, str(row[0]).strip()
+        except sqlite3.DatabaseError:
+            continue
+    return None
+
+
 def process_ltcpay_webhook(event: dict, invoice: dict):
     """Settle one signed LTCPay event after fetching its canonical invoice state."""
     event_type = str(event.get("type", "")).strip()
@@ -634,12 +662,23 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
     if not invoice_id or canonical_invoice_id != invoice_id or not event_store_id or canonical_store_id != event_store_id:
         return None
 
-    # The local order reference is encoded in the signed event and fetched LTCPay invoice metadata.
+    # Prefer the provider order reference, but fall back to our stored invoice
+    # ID when a compatible provider omits custom metadata from GET responses.
+    # The invoice ID was saved before payment and is never accepted by itself:
+    # all amount, status, store, currency, and LTC checks below still apply.
     metadata = invoice.get("metadata") if isinstance(invoice.get("metadata"), dict) else {}
     provider_order_id = str(metadata.get("orderId", "")).strip()
+    linked_by_invoice_id = False
     match = re.fullmatch(r"cosmo:(\d{1,20}):([0-9a-f]{32})", provider_order_id)
     if not match:
-        return None
+        linked_order = _find_crypto_order_by_invoice_id(invoice_id)
+        if not linked_order:
+            return None
+        provider_order_id = linked_order[1]
+        linked_by_invoice_id = True
+        match = re.fullmatch(r"cosmo:(\d{1,20}):([0-9a-f]{32})", provider_order_id)
+        if not match:
+            return None
     guild_id = int(match.group(1))
     if guild_id <= 0:
         return None
@@ -693,9 +732,14 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
             and invoice_amount.is_finite() and invoice_amount == expected_quote
             and expected_units == int(expected_usd_units)
             and method_ok
-            and isinstance(invoice.get("metadata"), dict)
-            and str(invoice["metadata"].get("orderId", "")) == provider_order_id
-            and str(invoice["metadata"].get("discord_user_id", "")) == str(user_id)
+            and (
+                linked_by_invoice_id
+                or (
+                    isinstance(invoice.get("metadata"), dict)
+                    and str(invoice["metadata"].get("orderId", "")) == provider_order_id
+                    and str(invoice["metadata"].get("discord_user_id", "")) == str(user_id)
+                )
+            )
         )
 
         if event_type == "InvoiceProcessing" and str(invoice.get("status", "")).lower() == "processing":
