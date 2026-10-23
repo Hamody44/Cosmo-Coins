@@ -1,7 +1,4 @@
 import asyncio
-import html
-import io
-import os
 import time
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -120,115 +117,72 @@ def daily_report_dates_due(enabled_since: float | None, last_report_date: str | 
     ]
 
 
-def _safe_url(url: str | None) -> str:
-    return html.escape(url or "", quote=True)
-
-
-def _render_png(document: str) -> bytes:
-    """Render the exact-value card from HTML using a headless browser."""
-    from playwright.sync_api import sync_playwright
-
-    chromium_path = os.getenv("LEVEL_CARD_CHROMIUM", "/usr/bin/chromium")
-    with sync_playwright() as playwright:
-        launch_options = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
-        if os.path.exists(chromium_path):
-            launch_options["executable_path"] = chromium_path
-        browser = playwright.chromium.launch(**launch_options)
-        page = browser.new_page(viewport={"width": 1024, "height": 1000}, device_scale_factor=1.5)
-        page.set_content(document, wait_until="domcontentloaded", timeout=15000)
-        try:
-            page.evaluate("Promise.all(Array.from(document.images).map(image => image.decode().catch(() => null)))")
-        except Exception:
-            pass
-        card = page.locator("main.card")
-        png = card.screenshot(type="png", animations="disabled")
-        browser.close()
-        return png
-
-
-def _card_shell(content: str, server_name: str, server_icon: str | None) -> str:
-    server_icon = _safe_url(server_icon)
-    server_name = html.escape(server_name)
-    icon_html = (
-        f'<img class="server-icon" src="{server_icon}" alt="" onerror="this.style.display=\'none\'">'
-        if server_icon else '<div class="server-icon fallback">✦</div>'
-    )
-    return f'''<!doctype html>
-<html lang="ar" dir="rtl">
-<head><meta charset="utf-8"><style>
-* {{ box-sizing: border-box; }}
-body {{ margin: 0; padding: 20px; background: #0b1024; color: #f4f2ff; font-family: "Noto Sans Arabic", "Segoe UI", Arial, sans-serif; }}
-main.card {{ width: 960px; padding: 34px; border-radius: 30px; overflow: hidden; background: radial-gradient(circle at 12% 6%, #3c2c79 0, transparent 27%), radial-gradient(circle at 93% 90%, #13546b 0, transparent 28%), linear-gradient(145deg, #11162f, #191d3d 56%, #101b34); border: 1px solid rgba(202,194,255,.25); box-shadow: 0 22px 70px rgba(0,0,0,.38); }}
-.server {{ display:flex; align-items:center; gap:14px; padding-bottom:22px; border-bottom:1px solid rgba(255,255,255,.12); }}
-.server-icon {{ width:52px; height:52px; border-radius:17px; object-fit:cover; background:#4d3c8b; display:grid; place-items:center; }}
-.server-name {{ font-size:22px; font-weight:800; }}
-.brand {{ color:#aaa3d1; font-size:13px; margin-top:4px; letter-spacing:.3px; }}
-h1 {{ font-size:30px; margin:24px 0 7px; }}
-.subtitle {{ color:#c1bddb; font-size:15px; margin-bottom:20px; }}
-.profile {{ display:flex; align-items:center; gap:22px; padding:22px; background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.12); border-radius:22px; }}
-.avatar {{ width:112px; height:112px; border-radius:50%; object-fit:cover; border:4px solid #b8a4ff; background:#252b4e; }}
-.name {{ font-size:25px; font-weight:800; }}
-.meta {{ margin-top:7px; color:#bcb8d3; font-size:14px; }}
-.stats {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:17px; }}
-.stat {{ padding:18px; border-radius:18px; background:rgba(255,255,255,.065); border:1px solid rgba(255,255,255,.1); }}
-.label {{ color:#bcb8d3; font-size:13px; }}
-.value {{ font-size:25px; font-weight:800; margin-top:7px; color:#fff; }}
-.progress-wrap {{ margin-top:19px; padding:18px 20px; border-radius:18px; background:rgba(255,255,255,.06); }}
-.progress-head {{ display:flex; justify-content:space-between; color:#d0cce8; font-size:13px; margin-bottom:11px; }}
-.track {{ height:13px; background:#303455; border-radius:20px; overflow:hidden; }}
-.bar {{ height:100%; border-radius:20px; background:linear-gradient(90deg,#65e6d2,#bba2ff); }}
-.rows {{ display:grid; gap:11px; margin-top:14px; }}
-.row {{ display:grid; grid-template-columns:55px 1fr auto auto; align-items:center; gap:14px; padding:13px 16px; background:rgba(255,255,255,.065); border:1px solid rgba(255,255,255,.09); border-radius:17px; }}
-.rank {{ color:#c5b8ff; font-weight:900; font-size:18px; text-align:center; }}
-.row-user {{ display:flex; align-items:center; gap:12px; min-width:0; }}
-.row-avatar {{ width:42px; height:42px; border-radius:50%; object-fit:cover; background:#303455; }}
-.row-name {{ font-weight:750; font-size:16px; overflow-wrap:anywhere; }}
-.metric {{ min-width:120px; text-align:left; }}
-.metric-label {{ color:#bcb8d3; font-size:12px; }}
-.metric-value {{ font-weight:800; font-size:16px; margin-top:3px; }}
-.empty {{ padding:28px; text-align:center; color:#cac5e3; background:rgba(255,255,255,.06); border-radius:18px; }}
-.footer {{ color:#9b97b9; margin-top:19px; font-size:12px; }}
-@media (max-width:900px) {{ main.card {{ width:920px; }} }}
-</style></head><body><main class="card">
-<div class="server">{icon_html}<div><div class="server-name">{server_name}</div><div class="brand">COSMO • نظام المستويات</div></div></div>
-{content}
-<div class="footer">معلومات هذا النظام محفوظة لهذا السيرفر فقط • توقيت الرياض</div>
-</main></body></html>'''
-
-
-def profile_card_html(server_name: str, server_icon: str | None, display_name: str, avatar: str | None, profile: dict) -> str:
-    avatar = _safe_url(avatar)
-    name = html.escape(display_name)
-    pct = max(0, min(100, int(profile["progress"])))
-    content = f'''<h1>بطاقة المستوى</h1><div class="subtitle">ملفك ونشاطك في هذا السيرفر</div>
-<div class="profile"><img class="avatar" src="{avatar}" alt="" onerror="this.style.visibility='hidden'"><div><div class="name">{name}</div><div class="meta">الترتيب العام: <b>#{profile['rank']}</b> • الرسائل غير المزعجة: <b>{profile['messages']:,}</b></div></div></div>
-<div class="stats"><div class="stat"><div class="label">المستوى الحالي</div><div class="value">{profile['level']}</div></div>
-<div class="stat"><div class="label">نقاطك</div><div class="value">{profile['points']:,}</div></div>
-<div class="stat"><div class="label">المتبقي للمستوى التالي</div><div class="value">{profile['next_level_points']:,}</div></div></div>
-<div class="progress-wrap"><div class="progress-head"><span>التقدم للمستوى {profile['level'] + 1}</span><span>{pct}%</span></div><div class="track"><div class="bar" style="width:{pct}%"></div></div></div>'''
-    return _card_shell(content, server_name, server_icon)
-
-
-def leaderboard_card_html(server_name: str, server_icon: str | None, title: str, entries: list[dict]) -> str:
-    title = html.escape(title)
-    if entries:
-        rows = []
-        medals = ("01", "02", "03", "04", "05")
-        for index, entry in enumerate(entries):
-            avatar = _safe_url(entry.get("avatar"))
-            name = html.escape(entry["name"])
-            avatar_html = f'<img class="row-avatar" src="{avatar}" alt="" onerror="this.style.visibility=\'hidden\'">' if avatar else '<div class="row-avatar"></div>'
-            rows.append(
-                f'<div class="row"><div class="rank">#{medals[index]}</div>'
-                f'<div class="row-user">{avatar_html}<div class="row-name">{name}</div></div>'
-                f'<div class="metric"><div class="metric-label">النقاط المكتسبة</div><div class="metric-value">{entry["points"]:,}</div></div>'
-                f'<div class="metric"><div class="metric-label">الرسائل المقبولة</div><div class="metric-value">{entry["messages"]:,}</div></div></div>'
-            )
-        rows_html = '<div class="rows">' + "".join(rows) + "</div>"
+def _set_guild_embed_author(embed: discord.Embed, server_name: str, server_icon: str | None) -> None:
+    if server_icon:
+        embed.set_author(name=server_name, icon_url=server_icon)
     else:
-        rows_html = '<div class="empty">لا توجد رسائل محتسبة في هذه الفترة بعد.</div>'
-    content = f'<h1>لوحة المتصدرين</h1><div class="subtitle">{title} • أفضل خمسة أعضاء</div>{rows_html}'
-    return _card_shell(content, server_name, server_icon)
+        embed.set_author(name=server_name)
+
+
+def profile_embed(
+    server_name: str,
+    server_icon: str | None,
+    display_name: str,
+    avatar: str | None,
+    profile: dict,
+) -> discord.Embed:
+    progress = max(0, min(XP_PER_LEVEL, int(profile["progress"])))
+    filled = round(progress / XP_PER_LEVEL * 10)
+    bar = "▰" * filled + "▱" * (10 - filled)
+    progress_percent = round(progress / XP_PER_LEVEL * 100)
+    safe_name = discord.utils.escape_markdown(display_name)[:200]
+    embed = discord.Embed(
+        title=f"🌟 بطاقة المستوى — {safe_name}",
+        description="إحصاءات نشاطك في هذا السيرفر",
+        color=discord.Color.from_rgb(123, 103, 238),
+    )
+    _set_guild_embed_author(embed, server_name, server_icon)
+    if avatar:
+        embed.set_thumbnail(url=avatar)
+    embed.add_field(name="المستوى", value=f"**{profile['level']:,}**", inline=True)
+    embed.add_field(name="النقاط", value=f"**{profile['points']:,}**", inline=True)
+    embed.add_field(name="الترتيب", value=f"**#{profile['rank']:,}**", inline=True)
+    embed.add_field(name="الرسائل المحتسبة", value=f"**{profile['messages']:,}**", inline=True)
+    embed.add_field(
+        name=f"التقدم إلى المستوى {profile['level'] + 1:,}",
+        value=f"`{bar}` **{progress_percent}%**\nالمتبقي: **{profile['next_level_points']:,}** نقطة",
+        inline=False,
+    )
+    embed.set_footer(text="بيانات هذا السيرفر فقط • توقيت الرياض")
+    return embed
+
+
+def leaderboard_embed(
+    server_name: str,
+    server_icon: str | None,
+    period_title: str,
+    entries: list[dict],
+) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🏆 المتصدرون — {period_title}",
+        description="أفضل خمسة أعضاء حسب النقاط المكتسبة",
+        color=discord.Color.from_rgb(123, 103, 238),
+    )
+    _set_guild_embed_author(embed, server_name, server_icon)
+    if server_icon:
+        embed.set_thumbnail(url=server_icon)
+    if entries:
+        medals = ("🥇", "🥈", "🥉", "🏅", "🏅")
+        for index, entry in enumerate(entries[:5]):
+            embed.add_field(
+                name=f"{medals[index]} المركز {index + 1} — <@{entry['user_id']}>",
+                value=f"⭐ النقاط: **{entry['points']:,}**   •   💬 الرسائل المحتسبة: **{entry['messages']:,}**",
+                inline=False,
+            )
+    else:
+        embed.description = "لا توجد نقاط أو رسائل محتسبة في هذه الفترة بعد."
+    embed.set_footer(text="الترتيب خاص بهذا السيرفر • توقيت الرياض")
+    return embed
 
 
 class Leveling(commands.Cog):
@@ -452,14 +406,6 @@ class Leveling(commands.Cog):
 
         marker = f"level-daily:{guild.id}:{local_day}"
 
-        card_entries = await self.prepare_card_entries(guild, entries)
-        document = leaderboard_card_html(guild.name, guild.icon.url if guild.icon else None, f"الترتيب اليومي • {local_day}", card_entries)
-        try:
-            image_bytes = await asyncio.to_thread(_render_png, document)
-        except Exception as exc:
-            image_bytes = None
-            print(f"Level card render failed for guild {guild.id}: {exc}")
-
         if salaries:
             salary_lines = []
             for salary in salaries:
@@ -494,13 +440,17 @@ class Leveling(commands.Cog):
 
         embed = discord.Embed(
             title=f"🏆 أفضل 5 لليوم | {guild.name}",
-            description=(
-                f"ترتيب اليوم حسب النقاط المكتسبة. الرواتب تحتسب الرسائل المقبولة غير المزعجة.\n\n"
-                f"**التوب 5:**\n{ranking_text}\n\n**الرواتب:**\n{salary_text}"
-            ),
+            description="ترتيب اليوم حسب النقاط المكتسبة. الرواتب تحتسب الرسائل المقبولة غير المزعجة.",
             color=discord.Color.from_rgb(123, 103, 238),
             timestamp=datetime.now(RIYADH),
         )
+        if guild.icon:
+            embed.set_author(name=guild.name, icon_url=guild.icon.url)
+            embed.set_thumbnail(url=guild.icon.url)
+        else:
+            embed.set_author(name=guild.name)
+        embed.add_field(name="🏆 التوب 5", value=ranking_text, inline=False)
+        embed.add_field(name="💰 الرواتب اليومية", value=salary_text, inline=False)
         embed.set_footer(text=marker)
         if prior_send_at is not None:
             reconcile_channel_id = prior_send_channel_id or channel_id
@@ -535,10 +485,6 @@ class Leveling(commands.Cog):
                     return
 
             if report_message:
-                if report_message.embeds:
-                    old_image_url = report_message.embeds[0].image.url
-                    if old_image_url:
-                        embed.set_image(url=old_image_url)
                 try:
                     await report_message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
                 except (discord.Forbidden, discord.HTTPException) as exc:
@@ -558,12 +504,7 @@ class Leveling(commands.Cog):
 
         await asyncio.to_thread(mark_daily_report_send_attempt, guild.id, local_day, channel.id)
         try:
-            if image_bytes:
-                file = discord.File(io.BytesIO(image_bytes), filename="daily-level-top5.png")
-                embed.set_image(url="attachment://daily-level-top5.png")
-                message = await channel.send(embed=embed, file=file, allowed_mentions=discord.AllowedMentions.none())
-            else:
-                message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
             if salary_processing_error:
                 await asyncio.to_thread(save_daily_report_message, guild.id, local_day, message.id)
                 await asyncio.to_thread(
@@ -584,19 +525,6 @@ class Leveling(commands.Cog):
             if any(embed.footer and embed.footer.text == marker for embed in message.embeds):
                 return message
         return None
-
-    async def prepare_card_entries(self, guild: discord.Guild, entries: list[dict]) -> list[dict]:
-        prepared = []
-        for entry in entries:
-            member = guild.get_member(entry["user_id"])
-            if member:
-                name = member.display_name
-                avatar = member.display_avatar.url
-            else:
-                name = f"عضو {entry['user_id']}"
-                avatar = None
-            prepared.append({**entry, "name": name, "avatar": avatar})
-        return prepared
 
     @commands.hybrid_command(name="toggle_level_system", description="فتح أو إغلاق نظام النقاط واللفلات لهذا السيرفر")
     async def toggle_level_system(self, ctx: commands.Context, enabled: bool):
@@ -740,35 +668,20 @@ class Leveling(commands.Cog):
             send_kwargs["ephemeral"] = True
         await ctx.send(**send_kwargs)
 
-    @commands.hybrid_command(name="level_points", aliases=["my_level"], description="عرض نقاطك ومستواك في هذا السيرفر على بطاقة")
+    @commands.hybrid_command(name="level_points", aliases=["my_level"], description="عرض نقاطك ومستواك في هذا السيرفر")
     async def level_points(self, ctx: commands.Context, member: discord.Member | None = None):
         if not ctx.guild:
             return await ctx.send("⛔ استخدم هذا الأمر داخل السيرفر.")
         target = member or ctx.author
         profile = await asyncio.to_thread(get_level_profile, ctx.guild.id, target.id)
-        document = profile_card_html(
+        embed = profile_embed(
             ctx.guild.name,
             ctx.guild.icon.url if ctx.guild.icon else None,
             target.display_name,
             target.display_avatar.url,
             profile,
         )
-        try:
-            image_bytes = await asyncio.to_thread(_render_png, document)
-            file = discord.File(io.BytesIO(image_bytes), filename="level-profile.png")
-            embed = discord.Embed(
-                title=f"مستوى {target.display_name} في {ctx.guild.name}",
-                color=discord.Color.from_rgb(123, 103, 238),
-            )
-            embed.set_image(url="attachment://level-profile.png")
-            await ctx.send(embed=embed, file=file)
-        except Exception as exc:
-            print(f"Level profile card failed: {exc}")
-            await ctx.send(
-                f"🌟 **{target.display_name}** في **{ctx.guild.name}**\n"
-                f"• المستوى: `{profile['level']}`\n• النقاط: `{profile['points']:,}`\n"
-                f"• المتبقي للمستوى التالي: `{profile['next_level_points']}`\n• الترتيب: `#{profile['rank']}`"
-            )
+        await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="level_top5", description="عرض أفضل خمسة أعضاء يومياً أو أسبوعياً أو شهرياً أو أبدياً")
     @discord.app_commands.choices(period=[
@@ -785,35 +698,19 @@ class Leveling(commands.Cog):
         except ValueError as exc:
             return await ctx.send(f"❌ {exc}")
         entries = await asyncio.to_thread(get_level_leaderboard, ctx.guild.id, start_at, end_at, 5)
-        card_entries = await self.prepare_card_entries(ctx.guild, entries)
         period_name = {
             "daily": "اليومي", "day": "اليومي", "يومي": "اليومي", "اليومي": "اليومي",
             "weekly": "الأسبوعي", "week": "الأسبوعي", "اسبوعي": "الأسبوعي", "أسبوعي": "الأسبوعي", "الأسبوعي": "الأسبوعي",
             "monthly": "الشهري", "month": "الشهري", "شهري": "الشهري", "الشهري": "الشهري",
             "all": "الأبدي", "alltime": "الأبدي", "all-time": "الأبدي", "ابدي": "الأبدي", "أبدي": "الأبدي", "الكل": "الأبدي",
         }[period.strip().lower()]
-        document = leaderboard_card_html(
+        embed = leaderboard_embed(
             ctx.guild.name,
             ctx.guild.icon.url if ctx.guild.icon else None,
             f"الترتيب {period_name}",
-            card_entries,
+            entries,
         )
-        try:
-            image_bytes = await asyncio.to_thread(_render_png, document)
-            file = discord.File(io.BytesIO(image_bytes), filename="level-top5.png")
-            embed = discord.Embed(color=discord.Color.from_rgb(123, 103, 238))
-            embed.set_image(url="attachment://level-top5.png")
-            await ctx.send(embed=embed, file=file)
-        except Exception as exc:
-            print(f"Level leaderboard card failed: {exc}")
-            if entries:
-                lines = [
-                    f"{index}. <@{entry['user_id']}> — `{entry['points']:,}` نقطة / `{entry['messages']:,}` رسالة"
-                    for index, entry in enumerate(entries, 1)
-                ]
-                await ctx.send(f"🏆 أفضل خمسة ({period_name}) في **{ctx.guild.name}**:\n" + "\n".join(lines))
-            else:
-                await ctx.send(f"ℹ️ لا توجد نقاط في ترتيب {period_name} بعد.")
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def setup(bot):

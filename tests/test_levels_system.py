@@ -8,10 +8,18 @@ import discord
 from datetime import datetime
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import database
-from cogs.levels import Leveling, RIYADH, can_manage_level_settings, daily_report_dates_due, period_bounds, profile_card_html
+from cogs.levels import (
+    Leveling,
+    RIYADH,
+    can_manage_level_settings,
+    daily_report_dates_due,
+    leaderboard_embed,
+    period_bounds,
+    profile_embed,
+)
 from leveling_store import (
     add_level_channel,
     ensure_level_config,
@@ -177,7 +185,7 @@ class LevelMessageStoreTests(IsolatedGuildDatabase):
         self.assertEqual(history[0]["tier_threshold"], 500)
 
 
-class LevelPeriodAndCardTests(unittest.TestCase):
+class LevelPeriodAndEmbedTests(unittest.TestCase):
     def test_daily_report_backfill_starts_when_enabled_and_skips_sent_days(self):
         enabled = datetime(2026, 10, 20, 8, 0, tzinfo=RIYADH).timestamp()
         now = datetime(2026, 10, 25, 23, 55, tzinfo=RIYADH)
@@ -207,17 +215,24 @@ class LevelPeriodAndCardTests(unittest.TestCase):
         self.assertEqual(datetime.fromtimestamp(month_start, RIYADH), datetime(2026, 10, 1, 0, 0, tzinfo=RIYADH))
         self.assertEqual(datetime.fromtimestamp(month_end, RIYADH), datetime(2026, 11, 1, 0, 0, tzinfo=RIYADH))
 
-    def test_all_time_range_is_unbounded_and_card_preserves_exact_arabic_text(self):
+    def test_profile_and_leaderboard_embeds_preserve_guild_stats_and_progress(self):
         self.assertEqual(period_bounds("all"), (None, None))
-        html_doc = profile_card_html("سيرفر كوزمو", None, "عضو تجريبي", None, {
+        profile = profile_embed("سيرفر كوزمو", None, "عضو تجريبي", None, {
             "rank": 2, "messages": 505, "level": 10, "points": 900,
             "next_level_points": 100, "progress": 0,
         })
-        self.assertIn("سيرفر كوزمو", html_doc)
-        self.assertIn("عضو تجريبي", html_doc)
-        self.assertIn("900", html_doc)
-        self.assertIn("505", html_doc)
-        self.assertIn("توقيت الرياض", html_doc)
+        self.assertEqual(profile.author.name, "سيرفر كوزمو")
+        self.assertIn("عضو تجريبي", profile.title)
+        self.assertTrue(any(field.name == "النقاط" and "900" in field.value for field in profile.fields))
+        self.assertTrue(any(field.name == "الرسائل المحتسبة" and "505" in field.value for field in profile.fields))
+        self.assertIn("توقيت الرياض", profile.footer.text)
+
+        board = leaderboard_embed("سيرفر كوزمو", None, "الترتيب الأسبوعي", [
+            {"user_id": 123, "points": 900, "messages": 505},
+        ])
+        self.assertIn("الترتيب الأسبوعي", board.title)
+        self.assertIn("<@123>", board.fields[0].name)
+        self.assertIn("900", board.fields[0].value)
 
     def test_primary_bot_owner_can_manage_level_commands(self):
         ctx = SimpleNamespace(
@@ -280,7 +295,6 @@ class LevelBackgroundTaskTests(unittest.IsolatedAsyncioTestCase):
             fetch_member=fetch_member,
         )
         cog.bot = SimpleNamespace()
-        cog.prepare_card_entries = AsyncMock(return_value=[])
         status = (77, None, "pending", 1_800_000_000, 0, 0, None, None, None)
 
         with patch("cogs.levels.get_report_status", return_value=status), patch(
@@ -288,14 +302,14 @@ class LevelBackgroundTaskTests(unittest.IsolatedAsyncioTestCase):
             return_value=[{"user_id": 42, "points": 600, "messages": 600}],
         ), patch("cogs.levels.get_guild_management_role_ids", return_value=(None, 1234)), patch(
             "cogs.levels.get_salary_tiers", return_value=[(500, 20)]
-        ), patch("cogs.levels._render_png", return_value=None), patch(
-            "cogs.levels.mark_daily_report_send_attempt"
+        ), patch("cogs.levels.mark_daily_report_send_attempt"
         ), patch("cogs.levels.save_daily_report_message") as save_message, patch(
             "cogs.levels.record_report_failure"
         ) as record_failure, patch("cogs.levels.finish_daily_report") as finish_report:
             await cog.publish_daily_report(guild, "2026-10-23", 77)
 
-        self.assertIn("تعذر التحقق أو تجهيز الراتب مؤقتاً", channel.sent_embed.description)
+        self.assertEqual([field.name for field in channel.sent_embed.fields], ["🏆 التوب 5", "💰 الرواتب اليومية"])
+        self.assertIn("تعذر التحقق أو تجهيز الراتب مؤقتاً", channel.sent_embed.fields[1].value)
         save_message.assert_called_once_with(9502, "2026-10-23", 9001)
         record_failure.assert_called_once()
         finish_report.assert_not_called()

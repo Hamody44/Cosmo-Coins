@@ -23,7 +23,7 @@
 - The `/level_salary_history` audit command is available to the primary bot owner, guild owner, configured owner role, or Discord administrators/manage-guild members. Each salary ledger entry records the local day, accepted-message count, tier, amount, and payout status.
 - Background payout retries are bounded per cycle and isolate failures per payout. A salary error for one admin does not suppress the daily top-five report: it is shown in the same report, which remains retryable and is edited after payroll recovers. Report failures use bounded exponential backoff and stop after eight attempts rather than blocking newer reports. Reapplying `/set_level_announcement_channel` requeues failed reports. Before retrying an ambiguous Discord send, the worker persists its timestamp/channel and searches messages after that attempt; it does not resend if history cannot be inspected, so the bot needs Read Message History in the channel for recovery.
 - The former `admin_role_id` is migrated once to `owner_role_id` when the new column is first installed; `admin_role_id` is then available for the new limited ticket/salary role. `owner_role_id` cannot bypass checks reserved for the bot owner. Do not assign the same Discord role to both settings.
-- Profile and leaderboard images are rendered from escaped HTML with Playwright/Chromium. Install the matching browser with `python -m playwright install chromium`, or set `LEVEL_CARD_CHROMIUM` to an installed Chromium executable. The bot falls back to text if rendering is unavailable.
+- Profile cards, leaderboards, and daily salary reports are sent as formatted Discord embeds; they do not require Playwright or a Chromium installation.
 
 ## Previously published ngrok credential
 
