@@ -79,6 +79,39 @@ class LTCPayClientTests(unittest.TestCase):
         self.assertTrue(request.call_args_list[1].args[0] == "GET")
         self.assertIn("includePaymentMethods", request.call_args_list[1].kwargs["params"])
 
+    def test_invoice_verification_pins_store_snapshot_across_create_and_get(self):
+        order_id = "cosmo:101:" + "a" * 32
+        created = {
+            "id": "Invoice123",
+            "checkoutLink": "https://pay.example.test/i/Invoice123",
+            "currency": "USD",
+            "amount": "0.75",
+            "expirationTime": 1_900_000_000,
+        }
+        canonical = {
+            "id": "Invoice123",
+            "currency": "USD",
+            "amount": "0.75",
+            "checkoutLink": "https://pay.example.test/i/Invoice123",
+            "expirationTime": 1_900_000_000,
+            "metadata": {"orderId": order_id, "discord_user_id": "202"},
+            "checkout": {"paymentMethods": ["LTC"]},
+        }
+
+        def provider_request(method, url, **kwargs):
+            self.assertIn("/stores/Store123/", url)
+            if method == "POST":
+                # Simulate a process-level configuration change between calls.
+                os.environ["LTCPAY_STORE_ID"] = "OtherStore"
+                return SimpleNamespace(status_code=200, json=lambda: created)
+            return SimpleNamespace(status_code=200, json=lambda: canonical)
+
+        with patch("ltcpay.requests.request", side_effect=provider_request):
+            invoice = ltcpay.create_ltc_invoice(
+                price_usd=Decimal("0.75"), provider_order_id=order_id, discord_user_id=202,
+            )
+        self.assertEqual(invoice["store_id"], "Store123")
+
     def test_provider_422_includes_short_validation_reason(self):
         response = SimpleNamespace(
             status_code=422,

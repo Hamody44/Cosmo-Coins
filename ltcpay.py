@@ -94,8 +94,10 @@ def _provider_error_detail(response) -> str:
     return detail[:320]
 
 
-def _api_request(method: str, endpoint: str, *, params=None, json_body=None):
-    base_url, store_id, api_key, _, valid_host = _config()
+def _api_request(method: str, endpoint: str, *, params=None, json_body=None, config=None):
+    # Use one configuration snapshot for a multi-request operation. This avoids
+    # changing the store between invoice creation and canonical verification.
+    base_url, store_id, api_key, _, valid_host = config or _config()
     if not valid_host or not re.fullmatch(r"[A-Za-z0-9]+", store_id) or not api_key:
         raise LTCPayError("تكامل LTCPay غير مكتمل الإعداد؛ تواصل مع مالك البوت.")
     try:
@@ -135,7 +137,8 @@ def create_ltc_invoice(*, price_usd: Decimal, provider_order_id: str, discord_us
         raise LTCPayError("معرّف مستخدم Discord غير صالح.")
     if not re.fullmatch(r"cosmo:\d{1,20}:[0-9a-f]{32}", str(provider_order_id)):
         raise LTCPayError("معرّف طلب الميزانية غير صالح.")
-    base_url, store_id, _, _, _ = _config()
+    config = _config()
+    base_url, store_id, _, _, _ = config
     payload = {
         "amount": format(amount, "f"),
         "currency": "USD",
@@ -153,7 +156,9 @@ def create_ltc_invoice(*, price_usd: Decimal, provider_order_id: str, discord_us
             "defaultLanguage": "en",
         },
     }
-    created_invoice = _api_request("POST", f"/api/v1/stores/{store_id}/invoices", json_body=payload)
+    created_invoice = _api_request(
+        "POST", f"/api/v1/stores/{store_id}/invoices", json_body=payload, config=config
+    )
     try:
         invoice_id = str(created_invoice["id"]).strip()
         if not invoice_id:
@@ -163,11 +168,14 @@ def create_ltc_invoice(*, price_usd: Decimal, provider_order_id: str, discord_us
 
     # Some Greenfield-compatible providers return only a compact create response.
     # Fetch the canonical invoice before exposing its checkout link or trusting its fields.
-    invoice = get_invoice(invoice_id)
+    invoice = get_invoice(invoice_id, config=config)
     try:
         canonical_id = str(invoice.get("id", invoice_id)).strip()
         checkout_url = str(invoice.get("checkoutLink") or created_invoice.get("checkoutLink") or "").strip()
-        returned_store = str(invoice.get("storeId") or created_invoice.get("storeId") or "").strip()
+        # The provider may omit storeId in a compact response. In that case,
+        # the store embedded in the pinned GET path is the reference. An
+        # explicit provider value is still checked below and must match it.
+        returned_store = str(invoice.get("storeId") or created_invoice.get("storeId") or store_id).strip()
         returned_currency = str(invoice.get("currency") or created_invoice.get("currency") or "").strip().upper()
         returned_amount = Decimal(str(invoice.get("amount", created_invoice.get("amount"))))
         expiry = int(invoice.get("expirationTime", created_invoice.get("expirationTime")))
@@ -227,15 +235,17 @@ def _invoice_payment_methods(invoice: dict):
     return invoice.get("paymentMethods")
 
 
-def get_invoice(invoice_id: str) -> dict:
+def get_invoice(invoice_id: str, *, config=None) -> dict:
     invoice_id = str(invoice_id).strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", invoice_id):
         raise LTCPayError("معرّف فاتورة LTCPay غير صالح.")
-    _, store_id, _, _, _ = _config()
+    request_config = config or _config()
+    _, store_id, _, _, _ = request_config
     return _api_request(
         "GET",
         f"/api/v1/stores/{store_id}/invoices/{invoice_id}",
         params={"includePaymentMethods": "true"},
+        config=request_config,
     )
 
 
