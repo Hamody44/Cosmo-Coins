@@ -3,31 +3,74 @@ from discord.ext import commands
 import io
 import datetime
 import re
-from database import get_guild_db, is_bot_admin, PRIMARY_OWNER_ID
+from database import (
+    get_guild_db, is_bot_admin, PRIMARY_OWNER_ID,
+    get_guild_management_role_ids, has_guild_role,
+)
 
-def can_manage_ticket_member(guild, member, admin_role_id=None) -> bool:
-    """صلاحيات إدارة التذاكر لا تعتمد على اشتراك Premium."""
+def can_manage_ticket_member(guild, member, admin_role_id=None, owner_role_id=None) -> bool:
+    """صلاحيات التذاكر التشغيلية: owner/admin المعرّفان ومالكو السيرفر."""
     if not guild or not member:
         return False
-    if member.id in (guild.owner_id, PRIMARY_OWNER_ID):
+    if member.id in (getattr(guild, "owner_id", None), PRIMARY_OWNER_ID):
         return True
     permissions = getattr(member, "guild_permissions", None)
     if permissions and (permissions.administrator or permissions.manage_guild):
         return True
-    if admin_role_id:
-        role = guild.get_role(admin_role_id)
-        if role and role in getattr(member, "roles", ()):
-            return True
-    return False
+    return has_guild_role(member, owner_role_id, guild) or has_guild_role(member, admin_role_id, guild)
+
+
+def can_manage_ticket_settings(ctx: commands.Context) -> bool:
+    """إعداد التذاكر وإعادة تسميتها متاحان للمالك/owner-role فقط، لا لرتبة admin المحدودة."""
+    if not ctx.guild or not ctx.author:
+        return False
+    owner_role_id, _limited_admin_role_id = get_guild_management_role_ids(ctx.guild.id)
+    return (
+        can_manage_ticket_member(ctx.guild, ctx.author, owner_role_id=owner_role_id)
+        or is_bot_admin(ctx)
+    )
 
 def can_manage_tickets(ctx: commands.Context) -> bool:
     if not ctx.guild or not ctx.author:
         return False
     g_conn, g_cur = get_guild_db(ctx.guild.id)
-    g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (ctx.guild.id,))
+    g_cur.execute("SELECT admin_role_id, owner_role_id FROM settings WHERE guild_id = ?", (ctx.guild.id,))
     row = g_cur.fetchone()
     g_conn.close()
-    return can_manage_ticket_member(ctx.guild, ctx.author, row[0] if row else None) or is_bot_admin(ctx)
+    admin_role_id, owner_role_id = row if row else (None, None)
+    return can_manage_ticket_member(ctx.guild, ctx.author, admin_role_id, owner_role_id) or is_bot_admin(ctx)
+
+
+async def sync_ticket_staff_roles(guild, previous_role_ids=(), active_role_ids=()):
+    """Ensure configured staff roles can see existing tickets after role setup/change."""
+    previous_role_ids = {int(role_id) for role_id in previous_role_ids if role_id}
+    active_role_ids = {int(role_id) for role_id in active_role_ids if role_id}
+    affected_ids = previous_role_ids | active_role_ids
+    if not affected_ids:
+        return
+    conn, cur = get_guild_db(guild.id)
+    cur.execute("SELECT channel_id FROM tickets")
+    channel_ids = [int(row[0]) for row in cur.fetchall()]
+    conn.close()
+    for channel_id in channel_ids:
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            continue
+        for role_id in affected_ids:
+            role = guild.get_role(role_id)
+            if not role:
+                continue
+            try:
+                if role_id in active_role_ids:
+                    overwrite = channel.overwrites_for(role)
+                    overwrite.view_channel = True
+                    overwrite.send_messages = True
+                    overwrite.read_message_history = True
+                    await channel.set_permissions(role, overwrite=overwrite, reason="Sync Cosmo ticket staff roles")
+                else:
+                    await channel.set_permissions(role, overwrite=None, reason="Remove old Cosmo ticket staff role")
+            except discord.HTTPException:
+                continue
 
 # واجهة أزرار التحكم داخل التذكرة (إغلاق / حذف)
 class TicketControlView(discord.ui.View):
@@ -54,11 +97,14 @@ class TicketControlView(discord.ui.View):
             g_conn.close()
             return await interaction.response.send_message("⚠️ هذه التذكرة مغلقة بالفعل.", ephemeral=True)
 
-        # التحقق من الصلاحيات: صاحب التكت أو الإدارة
-        g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
+        # التحقق من الصلاحيات: صاحب التكت أو الرتبتان المخولتان
+        g_cur.execute("SELECT admin_role_id, owner_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
         admin_row = g_cur.fetchone()
         has_admin = can_manage_ticket_member(
-            interaction.guild, interaction.user, admin_row[0] if admin_row else None
+            interaction.guild,
+            interaction.user,
+            admin_row[0] if admin_row else None,
+            admin_row[1] if admin_row else None,
         )
 
         if not has_admin and interaction.user.id != owner_id:
@@ -95,12 +141,15 @@ class TicketControlView(discord.ui.View):
         custom_id="ticket_btn_delete_action"
     )
     async def btn_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # المسؤولون فقط يمكنهم حذف التذكرة نهائياً
+        # مالك السيرفر وowner-role وadmin-role المحدود يمكنهم حذف التذكرة
         g_conn, g_cur = get_guild_db(interaction.guild.id)
-        g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
+        g_cur.execute("SELECT admin_role_id, owner_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
         admin_row = g_cur.fetchone()
         has_admin = can_manage_ticket_member(
-            interaction.guild, interaction.user, admin_row[0] if admin_row else None
+            interaction.guild,
+            interaction.user,
+            admin_row[0] if admin_row else None,
+            admin_row[1] if admin_row else None,
         )
 
         if not has_admin:
@@ -205,12 +254,15 @@ class TicketCreateView(discord.ui.View):
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
         }
 
-        g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (guild.id,))
+        g_cur.execute("SELECT admin_role_id, owner_role_id FROM settings WHERE guild_id = ?", (guild.id,))
         admin_row = g_cur.fetchone()
-        if admin_row and admin_row[0]:
-            admin_role = guild.get_role(admin_row[0])
-            if admin_role:
-                overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        if admin_row:
+            for role_id in admin_row:
+                staff_role = guild.get_role(role_id) if role_id else None
+                if staff_role:
+                    overwrites[staff_role] = discord.PermissionOverwrite(
+                        view_channel=True, send_messages=True, read_message_history=True
+                    )
 
         channel_name = f"ticket-{user.name[:10]}"
         ticket_channel = await guild.create_text_channel(
@@ -255,8 +307,8 @@ class Tickets(commands.Cog):
 
     @commands.hybrid_command(name="setup_ticket", aliases=["انشاء_تكت"], description="إنشاء رسالة وزر فتح التذاكر في هذا الروم")
     async def setup_ticket(self, ctx: commands.Context):
-        if not can_manage_tickets(ctx):
-            return await ctx.send("⛔ مالك السيرفر أو مسؤول التذاكر فقط يمكنه إعداد النظام.")
+        if not can_manage_ticket_settings(ctx):
+            return await ctx.send("⛔ مالك السيرفر أو owner-role فقط يمكنه إعداد النظام.")
 
         embed = discord.Embed(
             title="🎫 نظام الدعم الفني والمساعدة",
@@ -272,8 +324,8 @@ class Tickets(commands.Cog):
 
     @commands.hybrid_command(name="set_ticket_log", aliases=["لوج_التكت"], description="تحديد روم إرسال سجلات وتفريغ التذاكر بعد حذفها")
     async def set_ticket_log(self, ctx: commands.Context, channel: discord.TextChannel):
-        if not can_manage_tickets(ctx):
-            return await ctx.send("⛔ مالك السيرفر أو مسؤول التذاكر فقط يمكنه ضبط قناة اللوج.")
+        if not can_manage_ticket_settings(ctx):
+            return await ctx.send("⛔ مالك السيرفر أو owner-role فقط يمكنه ضبط قناة اللوج.")
 
         g_conn, g_cur = get_guild_db(ctx.guild.id)
         g_cur.execute(
@@ -345,8 +397,8 @@ class Tickets(commands.Cog):
         if not row:
             return await ctx.send("❌ هذا الروم ليس تذكرة مسجلة في النظام.")
 
-        if not can_manage_tickets(ctx):
-            return await ctx.send("⛔ إعادة تسمية التذكرة متاحة لمالك السيرفر أو مسؤولي التذاكر فقط.")
+        if not can_manage_ticket_settings(ctx):
+            return await ctx.send("⛔ إعادة تسمية التذكرة متاحة لمالك السيرفر أو owner-role فقط.")
 
         cleaned_name = new_name.strip().replace(" ", "-")[:32]
         await ctx.channel.edit(name=cleaned_name)

@@ -42,7 +42,7 @@ class ClaimVerificationView(discord.ui.View):
     @discord.ui.button(label="تسليم", style=discord.ButtonStyle.success, emoji="✅")
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         g_conn, g_cur = get_guild_db(interaction.guild.id)
-        g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
+        g_cur.execute("SELECT owner_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
         row = g_cur.fetchone()
         g_conn.close()
 
@@ -75,7 +75,7 @@ class ClaimVerificationView(discord.ui.View):
     @discord.ui.button(label="عدم التسليم", style=discord.ButtonStyle.danger, emoji="❌")
     async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         g_conn, g_cur = get_guild_db(interaction.guild.id)
-        g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
+        g_cur.execute("SELECT owner_role_id FROM settings WHERE guild_id = ?", (interaction.guild.id,))
         row = g_cur.fetchone()
         g_conn.close()
 

@@ -6,12 +6,17 @@ from cogs.admin import can_manage_bot
 from cogs.games import can_manage_server_games
 
 
-def make_context(author_id=200, owner_id=100, *, administrator=False, manage_guild=False):
+def make_context(author_id=200, owner_id=100, *, administrator=False, manage_guild=False, roles=(), role_map=None):
     author = SimpleNamespace(
         id=author_id,
         guild_permissions=SimpleNamespace(administrator=administrator, manage_guild=manage_guild),
+        roles=list(roles),
     )
-    guild = SimpleNamespace(owner_id=owner_id)
+    guild = SimpleNamespace(
+        id=111,
+        owner_id=owner_id,
+        get_role=lambda role_id: (role_map or {}).get(role_id),
+    )
     return SimpleNamespace(author=author, guild=guild)
 
 
@@ -36,9 +41,24 @@ class ServerOwnerAccessTests(unittest.TestCase):
         ctx = make_context(author_id=100, owner_id=100)
         self.assertTrue(can_manage_bot(ctx))
 
+    @patch("cogs.admin.get_guild_management_role_ids", return_value=(None, None))
     @patch("cogs.admin.is_bot_admin", return_value=False)
-    def test_other_members_do_not_gain_charge_or_deduct_access(self, _premium_admin):
+    def test_other_members_do_not_gain_charge_or_deduct_access(self, _premium_admin, _roles):
         ctx = make_context(author_id=200, owner_id=100)
+        self.assertFalse(can_manage_bot(ctx))
+
+    @patch("cogs.admin.get_guild_management_role_ids", return_value=(501, None))
+    @patch("cogs.admin.is_bot_admin", return_value=False)
+    def test_owner_role_can_manage_bot_commands(self, _premium_admin, _roles):
+        owner_role = object()
+        ctx = make_context(author_id=200, owner_id=100, roles=[owner_role], role_map={501: owner_role})
+        self.assertTrue(can_manage_bot(ctx))
+
+    @patch("cogs.admin.get_guild_management_role_ids", return_value=(501, 502))
+    @patch("cogs.admin.is_bot_admin", return_value=False)
+    def test_limited_admin_role_does_not_gain_server_management_access(self, _premium_admin, _roles):
+        admin_role = object()
+        ctx = make_context(author_id=200, owner_id=100, roles=[admin_role], role_map={502: admin_role})
         self.assertFalse(can_manage_bot(ctx))
 
 

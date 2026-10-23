@@ -90,14 +90,14 @@ class TicketRenamePermissionTests(unittest.IsolatedAsyncioTestCase):
             send=AsyncMock(),
         )
         with patch("cogs.tickets.get_guild_db", return_value=(conn, cursor)), patch(
-            "cogs.tickets.can_manage_tickets", return_value=False
+            "cogs.tickets.can_manage_ticket_settings", return_value=False
         ):
             await Tickets.rename_ticket.callback(Tickets(None), ctx, "renamed-ticket")
 
         ctx.channel.edit.assert_not_awaited()
-        ctx.send.assert_awaited_once_with("⛔ إعادة تسمية التذكرة متاحة لمالك السيرفر أو مسؤولي التذاكر فقط.")
+        ctx.send.assert_awaited_once_with("⛔ إعادة تسمية التذكرة متاحة لمالك السيرفر أو owner-role فقط.")
 
-    async def test_ticket_admin_can_rename(self):
+    async def test_limited_admin_role_cannot_rename(self):
         cursor = SimpleNamespace(execute=lambda *_args: None, fetchone=lambda: (1,))
         conn = SimpleNamespace(close=lambda: None)
         ctx = SimpleNamespace(
@@ -107,7 +107,24 @@ class TicketRenamePermissionTests(unittest.IsolatedAsyncioTestCase):
             send=AsyncMock(),
         )
         with patch("cogs.tickets.get_guild_db", return_value=(conn, cursor)), patch(
-            "cogs.tickets.can_manage_tickets", return_value=True
+            "cogs.tickets.can_manage_ticket_settings", return_value=False
+        ):
+            await Tickets.rename_ticket.callback(Tickets(None), ctx, "renamed ticket")
+
+        ctx.channel.edit.assert_not_awaited()
+        ctx.send.assert_awaited_once_with("⛔ إعادة تسمية التذكرة متاحة لمالك السيرفر أو owner-role فقط.")
+
+    async def test_owner_role_can_rename(self):
+        cursor = SimpleNamespace(execute=lambda *_args: None, fetchone=lambda: (1,))
+        conn = SimpleNamespace(close=lambda: None)
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=111),
+            channel=SimpleNamespace(id=222, edit=AsyncMock()),
+            author=SimpleNamespace(id=444),
+            send=AsyncMock(),
+        )
+        with patch("cogs.tickets.get_guild_db", return_value=(conn, cursor)), patch(
+            "cogs.tickets.can_manage_ticket_settings", return_value=True
         ):
             await Tickets.rename_ticket.callback(Tickets(None), ctx, "renamed ticket")
 

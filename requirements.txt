@@ -41,6 +41,8 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
+greenlet==3.5.6
+    # via playwright
 google-auth==2.62.0
     # via google-genai
 google-genai==2.31.0
@@ -83,6 +85,8 @@ openai==3.31.0
     # via -r requirements.in
 pillow==12.3.0
     # via -r requirements.in
+playwright==1.63.0
+    # via -r requirements.in
 propcache==0.5.4
     # via
     #   aiohttp
@@ -99,6 +103,8 @@ pydantic==2.14.1
     #   openai
 pydantic-core==2.50.1
     # via pydantic
+pyee==13.0.1
+    # via playwright
 python-dotenv==1.2.4
     # via -r requirements.in
 requests==2.34.2

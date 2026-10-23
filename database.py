@@ -26,8 +26,30 @@ GLOBAL_DB_PATH = os.path.abspath("global_cosmo.db")
 _balance_lock = threading.RLock()
 _auto_budget_payment_lock = threading.RLock()
 _exchange_state_lock = threading.RLock()
+_level_payout_lock = threading.RLock()
+_guild_schema_migration_lock = threading.RLock()
+_guild_schema_initialized = set()
 global_conn = sqlite3.connect(GLOBAL_DB_PATH, check_same_thread=False, timeout=10)
 global_cursor = global_conn.cursor()
+
+
+def _ensure_guild_db_column(cur, table: str, column: str, definition: str, schema_key: str) -> bool:
+    """Add a guild DB column once, tolerating another process winning the migration race."""
+    if schema_key in _guild_schema_initialized:
+        return False
+    with _guild_schema_migration_lock:
+        if schema_key in _guild_schema_initialized:
+            return False
+        columns = {row[1] for row in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column in columns:
+            return False
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            return True
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                return False
+            raise
 
 global_cursor.execute('''CREATE TABLE IF NOT EXISTS balances (
     user_id INTEGER PRIMARY KEY,
@@ -71,7 +93,8 @@ global_conn.commit()
 # قواعد بيانات السيرفرات الفردية
 def get_guild_db(guild_id: int):
     db_path = f"guilds_data/guild_{guild_id}.db"
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    schema_key = os.path.abspath(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=15)
     cur = conn.cursor()
 
     cur.execute('''CREATE TABLE IF NOT EXISTS settings (
@@ -83,6 +106,7 @@ def get_guild_db(guild_id: int):
         balance_log INTEGER,
         ticket_log INTEGER,
         admin_role_id INTEGER,
+        owner_role_id INTEGER,
         blacklist_role_id INTEGER,
         exchange_enabled INTEGER DEFAULT 1,
         double_event_end INTEGER DEFAULT 0,
@@ -189,7 +213,6 @@ def get_guild_db(guild_id: int):
     cur.execute('''CREATE INDEX IF NOT EXISTS idx_budget_payment_orders_pending
                    ON budget_payment_orders(status, expires_at, method, channel_id)''')
 
-    payment_columns = {row[1] for row in cur.execute("PRAGMA table_info(budget_payment_orders)").fetchall()}
     for column, definition in (
         ("provider_order_id", "TEXT"),
         ("provider_payment_id", "TEXT"),
@@ -198,8 +221,7 @@ def get_guild_db(guild_id: int):
         ("pay_currency", "TEXT"),
         ("provider_status", "TEXT"),
     ):
-        if column not in payment_columns:
-            cur.execute(f"ALTER TABLE budget_payment_orders ADD COLUMN {column} {definition}")
+        _ensure_guild_db_column(cur, "budget_payment_orders", column, definition, schema_key)
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_payment_provider_order ON budget_payment_orders(provider_order_id)")
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_payment_provider_payment ON budget_payment_orders(provider_payment_id)")
 
@@ -208,23 +230,108 @@ def get_guild_db(guild_id: int):
         reply_content TEXT
     )''')
 
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_config (
+        guild_id INTEGER PRIMARY KEY,
+        is_enabled INTEGER NOT NULL DEFAULT 0,
+        milestone_reward INTEGER NOT NULL DEFAULT 0,
+        announcement_channel_id INTEGER,
+        last_daily_report_date TEXT,
+        enabled_since REAL
+    )''')
+    _ensure_guild_db_column(cur, "leveling_config", "enabled_since", "REAL", schema_key)
+    cur.execute(
+        "UPDATE leveling_config SET enabled_since = ? WHERE is_enabled = 1 AND enabled_since IS NULL",
+        (time.time(),),
+    )
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_channels (
+        channel_id INTEGER PRIMARY KEY
+    )''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_users (
+        user_id INTEGER PRIMARY KEY,
+        total_points INTEGER NOT NULL DEFAULT 0,
+        last_point_at REAL NOT NULL DEFAULT 0,
+        spam_until REAL NOT NULL DEFAULT 0,
+        last_spam_warning_at REAL NOT NULL DEFAULT 0
+    )''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_pending_messages (
+        message_id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        channel_id INTEGER NOT NULL,
+        created_at REAL NOT NULL
+    )''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_level_pending_user_time ON leveling_pending_messages(user_id, created_at)')
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_message_events (
+        message_id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        channel_id INTEGER NOT NULL,
+        created_at REAL NOT NULL,
+        points_awarded INTEGER NOT NULL DEFAULT 0
+    )''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_level_events_user_time ON leveling_message_events(user_id, created_at)')
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_salary_tiers (
+        message_threshold INTEGER PRIMARY KEY,
+        amount INTEGER NOT NULL CHECK(amount >= 0)
+    )''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_payouts (
+        payout_key TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        payout_type TEXT NOT NULL,
+        amount INTEGER NOT NULL CHECK(amount > 0),
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )''')
+    for column, definition in (
+        ("local_date", "TEXT"),
+        ("message_count", "INTEGER"),
+        ("tier_threshold", "INTEGER"),
+    ):
+        _ensure_guild_db_column(cur, "leveling_payouts", column, definition, schema_key)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_level_salary_history "
+        "ON leveling_payouts(payout_type, local_date DESC, user_id)"
+    )
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_daily_reports (
+        local_date TEXT PRIMARY KEY,
+        channel_id INTEGER NOT NULL,
+        message_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        last_send_attempt_at REAL,
+        last_send_channel_id INTEGER
+    )''')
+    for column, definition in (
+        ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("next_attempt_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_error", "TEXT"),
+        ("last_send_attempt_at", "REAL"),
+        ("last_send_channel_id", "INTEGER"),
+    ):
+        _ensure_guild_db_column(cur, "leveling_daily_reports", column, definition, schema_key)
+
     # ترقية الجداول في حال وجود قواعد بيانات منشأة مسبقاً
-    try:
-        cur.execute("ALTER TABLE premium_info ADD COLUMN custom_banner_url TEXT")
-    except sqlite3.OperationalError:
-        pass
+    _ensure_guild_db_column(cur, "premium_info", "custom_banner_url", "TEXT", schema_key)
+    _ensure_guild_db_column(cur, "settings", "ticket_log", "INTEGER", schema_key)
+    with _guild_schema_migration_lock:
+        if _ensure_guild_db_column(cur, "settings", "owner_role_id", "INTEGER", schema_key):
+            cur.execute(
+                "UPDATE settings SET owner_role_id = admin_role_id, admin_role_id = NULL "
+                "WHERE admin_role_id IS NOT NULL"
+            )
+    _ensure_guild_db_column(cur, "premium_info", "custom_currency_name", "TEXT", schema_key)
 
-    try:
-        cur.execute("ALTER TABLE settings ADD COLUMN ticket_log INTEGER")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute("ALTER TABLE premium_info ADD COLUMN custom_currency_name TEXT")
-    except sqlite3.OperationalError:
-        pass
+    if schema_key not in _guild_schema_initialized:
+        cur.execute(
+            "UPDATE leveling_daily_reports SET last_send_attempt_at = created_at, last_send_channel_id = channel_id "
+            "WHERE status = 'pending' AND last_send_attempt_at IS NULL"
+        )
 
     conn.commit()
+    with _guild_schema_migration_lock:
+        _guild_schema_initialized.add(schema_key)
     return conn, cur
 
 # دوال الفحص والتحقق
@@ -981,9 +1088,33 @@ def settle_budget_payment(guild_id: int, method: str, channel_id: int, payer_nam
             payment_message_id, payment_author_id, payment_timestamp, recipient_id,
         )
 
+def get_guild_management_role_ids(guild_id: int) -> tuple[int | None, int | None]:
+    """Return (owner_role_id, limited_admin_role_id) for this guild."""
+    g_conn, g_cur = get_guild_db(guild_id)
+    g_cur.execute("SELECT owner_role_id, admin_role_id FROM settings WHERE guild_id = ?", (guild_id,))
+    row = g_cur.fetchone()
+    g_conn.close()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def has_guild_role(member, role_id: int | None, guild=None) -> bool:
+    if not member or not role_id:
+        return False
+    guild = guild or getattr(member, "guild", None)
+    role = guild.get_role(role_id) if guild else None
+    return bool(role and role in getattr(member, "roles", ()))
+
+
 def is_bot_admin(ctx):
+    if not ctx or not ctx.guild or not ctx.author:
+        return False
     if ctx.author.id == PRIMARY_OWNER_ID:
         return True
+
+    owner_role_id, _limited_admin_role_id = get_guild_management_role_ids(ctx.guild.id)
+    if has_guild_role(ctx.author, owner_role_id, ctx.guild):
+        return True
+
     if not is_guild_premium(ctx.guild.id):
         return False
     if ctx.author.id == ctx.guild.owner_id:
@@ -991,18 +1122,9 @@ def is_bot_admin(ctx):
 
     g_conn, g_cur = get_guild_db(ctx.guild.id)
     g_cur.execute("SELECT 1 FROM bot_whitelist WHERE bot_id = ? AND channel_id = ?", (ctx.author.id, ctx.channel.id))
-    if g_cur.fetchone():
-        g_conn.close()
-        return True
-
-    g_cur.execute("SELECT admin_role_id FROM settings WHERE guild_id = ?", (ctx.guild.id,))
-    row = g_cur.fetchone()
+    allowed = bool(g_cur.fetchone())
     g_conn.close()
-    if row and row[0]:
-        role = ctx.guild.get_role(row[0])
-        if role and role in ctx.author.roles:
-            return True
-    return False
+    return allowed
 
 def get_server_spending_balance(guild_id: int) -> int:
     g_conn, g_cur = get_guild_db(guild_id)
@@ -1010,6 +1132,101 @@ def get_server_spending_balance(guild_id: int) -> int:
     row = g_cur.fetchone()
     g_conn.close()
     return row[0] if row and row[0] else 0
+
+
+def payout_from_server_budget(
+    guild_id: int,
+    user_id: int,
+    amount: int,
+    payout_key: str,
+    payout_type: str,
+    timestamp: int | None = None,
+) -> dict:
+    """Atomically pay a guild-funded level reward/salary and prevent duplicate payouts."""
+    amount = int(amount)
+    if amount <= 0:
+        raise ValueError("يجب أن يكون مبلغ المكافأة أكبر من صفر.")
+    timestamp = int(timestamp or time.time())
+    db_path = os.path.abspath(f"guilds_data/guild_{int(guild_id)}.db")
+    get_guild_db(guild_id)[0].close()  # ensure schema exists for both new and existing guild files
+
+    with _balance_lock, _level_payout_lock, closing(sqlite3.connect(db_path, timeout=15, isolation_level=None)) as conn:
+        conn.execute("ATTACH DATABASE ? AS global_wallet", (GLOBAL_DB_PATH,))
+        guild_journal = str(conn.execute("PRAGMA main.journal_mode").fetchone()[0]).lower()
+        global_journal = str(conn.execute("PRAGMA global_wallet.journal_mode").fetchone()[0]).lower()
+        if guild_journal == "wal" or global_journal == "wal":
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT user_id, amount, status FROM leveling_payouts WHERE payout_key = ?", (payout_key,)
+            ).fetchone()
+            if existing and (int(existing[0]) != int(user_id) or int(existing[1]) != amount):
+                conn.rollback()
+                raise ValueError("مفتاح صرف المكافأة مستخدم ببيانات مختلفة.")
+            if existing and existing[2] == "paid":
+                conn.commit()
+                return {"status": "already_paid", "amount": existing[1], "user_id": existing[0]}
+            conn.execute(
+                "INSERT INTO leveling_payouts (payout_key, user_id, payout_type, amount, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'blocked_wal', ?, ?) "
+                "ON CONFLICT(payout_key) DO UPDATE SET status='blocked_wal', updated_at=excluded.updated_at",
+                (payout_key, user_id, payout_type, amount, timestamp, timestamp),
+            )
+            conn.commit()
+            return {"status": "blocked_wal", "amount": amount, "user_id": int(user_id)}
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT user_id, amount, status FROM leveling_payouts WHERE payout_key = ?",
+            (payout_key,),
+        ).fetchone()
+        if existing and (int(existing[0]) != int(user_id) or int(existing[1]) != amount):
+            conn.rollback()
+            raise ValueError("مفتاح صرف المكافأة مستخدم ببيانات مختلفة.")
+        if existing and existing[2] == "paid":
+            conn.commit()
+            return {"status": "already_paid", "amount": existing[1], "user_id": existing[0]}
+
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (guild_id, spending_balance) VALUES (?, 0)",
+            (guild_id,),
+        )
+        balance_row = conn.execute(
+            "SELECT spending_balance FROM settings WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+        old_budget = int(balance_row[0] or 0) if balance_row else 0
+        if old_budget < amount:
+            conn.execute(
+                "INSERT INTO leveling_payouts (payout_key, user_id, payout_type, amount, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'insufficient', ?, ?) "
+                "ON CONFLICT(payout_key) DO UPDATE SET status='insufficient', updated_at=excluded.updated_at",
+                (payout_key, user_id, payout_type, amount, timestamp, timestamp),
+            )
+            conn.commit()
+            return {"status": "insufficient", "amount": amount, "budget": old_budget, "user_id": int(user_id)}
+
+        new_budget = old_budget - amount
+        conn.execute(
+            "UPDATE settings SET spending_balance = ? WHERE guild_id = ?",
+            (new_budget, guild_id),
+        )
+        conn.execute(
+            "INSERT INTO global_wallet.balances (user_id, balance) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance",
+            (user_id, amount),
+        )
+        conn.execute(
+            "INSERT INTO budget_logs (action, amount, old_balance, new_balance, admin_id, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("مكافأة لفل" if payout_type == "milestone" else "راتب نظام اللفلات", amount,
+             old_budget, new_budget, PRIMARY_OWNER_ID, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))),
+        )
+        conn.execute(
+            "INSERT INTO leveling_payouts (payout_key, user_id, payout_type, amount, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'paid', ?, ?) "
+            "ON CONFLICT(payout_key) DO UPDATE SET status='paid', updated_at=excluded.updated_at",
+            (payout_key, user_id, payout_type, amount, timestamp, timestamp),
+        )
+        conn.commit()
+        return {"status": "paid", "amount": amount, "budget": new_budget, "user_id": int(user_id)}
 
 def deduct_server_spending(guild_id: int, amount: int) -> tuple[bool, str]:
     g_conn, g_cur = get_guild_db(guild_id)

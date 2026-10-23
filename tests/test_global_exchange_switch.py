@@ -44,8 +44,9 @@ class GlobalExchangeSwitchTests(unittest.TestCase):
         author = SimpleNamespace(id=555, guild_permissions=permissions)
         guild_admin = SimpleNamespace(id=123, owner_id=777)
         cosmo_admin = SimpleNamespace(id=database.COSMO_GUILD_ID, owner_id=777)
-        self.assertFalse(can_manage_global_exchange(SimpleNamespace(guild=guild_admin, author=author)))
-        self.assertTrue(can_manage_global_exchange(SimpleNamespace(guild=cosmo_admin, author=author)))
+        with patch("cogs.admin.get_guild_management_role_ids", return_value=(None, None)):
+            self.assertFalse(can_manage_global_exchange(SimpleNamespace(guild=guild_admin, author=author)))
+            self.assertTrue(can_manage_global_exchange(SimpleNamespace(guild=cosmo_admin, author=author)))
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ import re
 import unicodedata
 from datetime import datetime
 from database import (
-    check_is_owner, is_bot_admin, is_guild_premium, parse_duration,
+    check_is_owner, is_bot_admin, is_guild_premium, get_guild_management_role_ids, has_guild_role, parse_duration,
     parse_amount, get_guild_db, global_cursor, global_conn, PRIMARY_OWNER_ID,
     deduct_server_spending, update_balance, debit_balance, get_balance, is_blacklisted, get_server_spending_balance,
     send_global_action_log, COSMO_GUILD_ID, get_currency_label,
@@ -28,6 +28,7 @@ from ltcpay import (
     LTCPayError, INVOICE_TTL_SECONDS, MIN_CRYPTO_BUDGET, MIN_CRYPTO_USD,
     create_ltc_invoice, format_usd, is_configured as ltc_pay_is_configured, usd_for_budget,
 )
+from cogs.tickets import sync_ticket_staff_roles
 
 PROBOT_ID = PROBOT_PAYMENT_BOT_ID
 ADAMC_ID = ADAMC_PAYMENT_BOT_ID
@@ -331,15 +332,31 @@ def can_manage_bot(ctx: commands.Context) -> bool:
         return False
     if ctx.author.id == PRIMARY_OWNER_ID or ctx.author.id == ctx.guild.owner_id:
         return True
+    owner_role_id, _limited_admin_role_id = get_guild_management_role_ids(ctx.guild.id)
+    if has_guild_role(ctx.author, owner_role_id, ctx.guild):
+        return True
     if ctx.author.guild_permissions.administrator or ctx.author.guild_permissions.manage_guild:
         return True
     return is_bot_admin(ctx)
+
+
+def can_configure_guild_management_roles(ctx: commands.Context) -> bool:
+    """Only the guild owner or an already trusted owner-role can assign staff roles."""
+    if not ctx.guild or not ctx.author:
+        return False
+    if ctx.author.id in (PRIMARY_OWNER_ID, ctx.guild.owner_id):
+        return True
+    owner_role_id, _limited_admin_role_id = get_guild_management_role_ids(ctx.guild.id)
+    return has_guild_role(ctx.author, owner_role_id, ctx.guild)
 
 def can_manage_global_exchange(ctx: commands.Context) -> bool:
     """كتالوج التبديل العام لا يُدار إلا من سيرفر Cosmo بواسطة إدارته."""
     if not ctx.guild or ctx.guild.id != COSMO_GUILD_ID:
         return False
     if ctx.author.id == PRIMARY_OWNER_ID or ctx.author.id == ctx.guild.owner_id:
+        return True
+    owner_role_id, _limited_admin_role_id = get_guild_management_role_ids(ctx.guild.id)
+    if has_guild_role(ctx.author, owner_role_id, ctx.guild):
         return True
     permissions = getattr(ctx.author, "guild_permissions", None)
     return bool(permissions and (permissions.administrator or permissions.manage_guild))
@@ -1171,10 +1188,38 @@ class Admin(commands.Cog):
             return await ctx.send(f"❌ العملة `{currency_name}` غير موجودة في الكتالوج العام.")
         await ctx.send(f"🗑️ تم حذف العملة العامة **{deleted_name}** من قائمة جميع السيرفرات.")
 
-    @commands.hybrid_command(name="set_admin_role", aliases=["رتبة_المسؤول"], description="تعيين رتبة مسؤولي البوت")
+    @commands.hybrid_command(name="set_owner_role", aliases=["رتبة_المالك"], description="تعيين رتبة تعامل كمالك السيرفر لأوامر البوت")
+    async def set_owner_role(self, ctx: commands.Context, role: discord.Role):
+        if not can_configure_guild_management_roles(ctx):
+            return await ctx.send("⛔ مالك السيرفر أو owner-role الحالي فقط يمكنه تعيين هذه الرتبة.")
+        old_owner_role_id, old_admin_role_id = get_guild_management_role_ids(ctx.guild.id)
+        if role.id == old_admin_role_id and role.id != old_owner_role_id:
+            return await ctx.send("❌ اختر رتبة مختلفة عن رتبة admin المحدودة حتى تبقى الصلاحيات منفصلة.")
+        g_conn, g_cur = get_guild_db(ctx.guild.id)
+        g_cur.execute(
+            "INSERT INTO settings (guild_id, owner_role_id) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET owner_role_id = excluded.owner_role_id",
+            (ctx.guild.id, role.id)
+        )
+        g_conn.commit()
+        g_conn.close()
+        await sync_ticket_staff_roles(
+            ctx.guild,
+            previous_role_ids=(old_owner_role_id,),
+            active_role_ids=(role.id, old_admin_role_id),
+        )
+        await ctx.send(
+            f"✅ تم اعتماد {role.mention} كرتبة owner للسيرفر. لها صلاحيات إدارة السيرفر داخل البوت، "
+            "لكنها لا تملك أوامر مالك البوت المحمية."
+        )
+
+    @commands.hybrid_command(name="set_admin_role", aliases=["رتبة_المسؤول"], description="تعيين رتبة admin محدودة للتكت واستحقاق الراتب")
     async def set_admin_role(self, ctx: commands.Context, role: discord.Role):
-        if ctx.author.id != ctx.guild.owner_id and ctx.author.id != PRIMARY_OWNER_ID:
-            return await ctx.send("⛔ مالك السيرفر فقط يمكنه تعيين الرتبة.")
+        if not can_configure_guild_management_roles(ctx):
+            return await ctx.send("⛔ مالك السيرفر أو owner-role الحالي فقط يمكنه تعيين هذه الرتبة.")
+        old_owner_role_id, old_admin_role_id = get_guild_management_role_ids(ctx.guild.id)
+        if role.id == old_owner_role_id:
+            return await ctx.send("❌ اختر رتبة مختلفة عن رتبة owner حتى تبقى صلاحيات admin محدودة.")
         g_conn, g_cur = get_guild_db(ctx.guild.id)
         g_cur.execute(
             "INSERT INTO settings (guild_id, admin_role_id) VALUES (?, ?) "
@@ -1183,7 +1228,15 @@ class Admin(commands.Cog):
         )
         g_conn.commit()
         g_conn.close()
-        await ctx.send(f"✅ تم اعتماد رتبة {role.mention} كمسؤول للبوت.")
+        await sync_ticket_staff_roles(
+            ctx.guild,
+            previous_role_ids=(old_admin_role_id,),
+            active_role_ids=(old_owner_role_id, role.id),
+        )
+        await ctx.send(
+            f"✅ تم اعتماد {role.mention} كرتبة admin محدودة: مشاهدة التذاكر وإضافة الأعضاء وإغلاق/حذف التذاكر، "
+            "والدخول ضمن مستحقي الراتب فقط."
+        )
 
     @commands.hybrid_command(name="set_blacklist_role", aliases=["رتبة_البلاك_ليست"], description="تحديد رتبة البلاك ليست")
     async def set_blacklist_role(self, ctx: commands.Context, role: discord.Role):
