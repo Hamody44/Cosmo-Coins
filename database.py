@@ -795,10 +795,16 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
             return None
 
         additional = invoice.get("additionalStatus")
+        additional_status = str(additional).casefold() if additional is not None else "none"
+        overpaid = additional_status == "paidover"
         payment_matches = (
             identity_matches and method_ok
-            and (additional is None or str(additional).casefold() == "none")
-            and paid_amount.is_finite() and paid_amount == invoice_amount
+            # PaidOver is safe to accept: the customer paid at least the
+            # requested amount. PaidPartial, PaidLate, and Marked remain
+            # manual-review cases.
+            and additional_status in {"none", "paidover"}
+            and paid_amount.is_finite()
+            and (paid_amount >= invoice_amount if overpaid else paid_amount == invoice_amount)
             and order_status in {"pending", "creating", "processing"}
         )
         if not payment_matches:

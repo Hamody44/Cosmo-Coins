@@ -267,10 +267,15 @@ class LTCPaySettlementTests(unittest.TestCase):
         result = database.process_ltcpay_webhook(self.event(), invoice)
         self.assertEqual(result["status"], "paid")
 
+    def test_settled_paid_over_invoice_is_credited_once(self):
+        result = database.process_ltcpay_webhook(
+            self.event(), self.invoice(additionalStatus="PaidOver", paidAmount="0.80")
+        )
+        self.assertEqual(result["status"], "paid")
+
     def test_nonexact_unexpected_store_or_non_ltc_funded_invoices_go_to_review(self):
         cases = (
             (self.event(), self.invoice(paidAmount="0.70")),
-            (self.event(), self.invoice(additionalStatus="PaidOver")),
             (self.event(), self.invoice(checkout={"paymentMethods": ["BTC-CHAIN"]})),
             (self.event(storeId="OtherStore"), self.invoice()),
             (self.event(), self.invoice(metadata={"orderId": "cosmo:102:" + "c" * 32, "discord_user_id": "202"})),
