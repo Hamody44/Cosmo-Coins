@@ -1186,7 +1186,7 @@ class Admin(commands.Cog):
     @commands.hybrid_command(name="set_owner_role", aliases=["رتبة_المالك"], description="تعيين رتبة تعامل كمالك السيرفر لأوامر البوت")
     async def set_owner_role(self, ctx: commands.Context, role: discord.Role):
         if not can_configure_guild_management_roles(ctx):
-            return await ctx.send("⛔ مالك السيرفر أو owner-role الحالي فقط يمكنه تعيين هذه الرتبة.")
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو owner-role أو أصحاب Administrator/Manage Server فقط.")
         old_owner_role_id, old_admin_role_id = get_guild_management_role_ids(ctx.guild.id)
         if role.id == old_admin_role_id and role.id != old_owner_role_id:
             return await ctx.send("❌ اختر رتبة مختلفة عن رتبة admin المحدودة حتى تبقى الصلاحيات منفصلة.")
@@ -1208,10 +1208,10 @@ class Admin(commands.Cog):
             "لكنها لا تملك أوامر مالك البوت المحمية."
         )
 
-    @commands.hybrid_command(name="set_admin_role", aliases=["رتبة_المسؤول"], description="تعيين رتبة admin محدودة للتكت واستحقاق الراتب")
-    async def set_admin_role(self, ctx: commands.Context, role: discord.Role):
+    @commands.hybrid_command(name="set_staff_role", aliases=["رتبة_المسؤول"], description="تعيين رتبة staff محدودة للتكت واستحقاق الراتب")
+    async def set_staff_role(self, ctx: commands.Context, role: discord.Role):
         if not can_configure_guild_management_roles(ctx):
-            return await ctx.send("⛔ مالك السيرفر أو owner-role الحالي فقط يمكنه تعيين هذه الرتبة.")
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو owner-role أو أصحاب Administrator/Manage Server فقط.")
         old_owner_role_id, old_admin_role_id = get_guild_management_role_ids(ctx.guild.id)
         if role.id == old_owner_role_id:
             return await ctx.send("❌ اختر رتبة مختلفة عن رتبة owner حتى تبقى صلاحيات admin محدودة.")

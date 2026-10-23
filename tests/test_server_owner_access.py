@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from cogs.admin import can_configure_guild_management_roles, can_manage_bot
+from cogs.admin import Admin, can_configure_guild_management_roles, can_manage_bot
 from cogs.games import can_manage_server_games
 
 
@@ -21,6 +21,13 @@ def make_context(author_id=200, owner_id=100, *, administrator=False, manage_gui
 
 
 class ServerOwnerAccessTests(unittest.TestCase):
+    def test_staff_role_has_only_the_new_slash_name(self):
+        commands = {command.name: command for command in Admin.__cog_commands__}
+        self.assertIn("set_staff_role", commands)
+        self.assertNotIn("set_admin_role", commands)
+        self.assertEqual(commands["set_staff_role"].app_command.name, "set_staff_role")
+        self.assertNotIn("set_admin_role", commands["set_staff_role"].aliases)
+
     def test_discord_admin_and_manage_guild_can_configure_management_roles(self):
         with patch("cogs.admin.get_guild_management_role_ids", return_value=(None, None)), \
              patch("cogs.admin.is_bot_admin", return_value=False):

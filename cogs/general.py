@@ -131,7 +131,7 @@ class HelpView(discord.ui.View):
                 ("📋 الرتب والسجلات", (
                     "• `/server_budget_history` — سجل حركة ميزانية الجوائز.\n"
                     "• `/set_owner_role` — رتبة بمعاملة مالك السيرفر داخل البوت (لا تتجاوز أوامر مالك البوت).\n"
-                    "• `/set_admin_role` — رتبة محدودة للتذاكر والراتب اليومي فقط.\n"
+                    "• `/set_staff_role` — تعيين رتبة محدودة للتذاكر والراتب اليومي فقط.\n"
                     "• `/set_blacklist_role` — تعيين رتبة البلاك ليست.\n"
                     "• `/set_balance_log` و`/set_boost_log` — قنوات سجلات الرصيد والبوست.\n"
                     "• `/set_delivery_log` و`/set_success_log` — قنوات التسليم والنجاح.\n"
