@@ -655,7 +655,14 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
         ).fetchone()
         if not order:
             g_conn.rollback()
-            return None
+            # The invoice is structurally ours, but the local order may still
+            # be committing while LTCPay delivers the webhook. Do not credit
+            # anything; ask the provider to retry instead.
+            return {
+                "status": "retry",
+                "guild_id": guild_id,
+                "provider_order_id": provider_order_id,
+            }
         order_id, user_id, channel_id, budget_amount, expected_usd_units, saved_invoice_id, quote_usd, order_status, saved_order_id = order
         if str(saved_order_id) != provider_order_id:
             g_conn.rollback()

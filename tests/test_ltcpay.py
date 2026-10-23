@@ -263,7 +263,7 @@ class LTCPaySettlementTests(unittest.TestCase):
         )
         for event, invoice in cases:
             result = database.process_ltcpay_webhook(event, invoice)
-            self.assertTrue(result is None or result["status"] == "needs_review")
+            self.assertTrue(result is None or result["status"] in {"needs_review", "retry"})
 
         with sqlite3.connect(self.guild_db_path) as conn:
             row = conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()
@@ -298,6 +298,17 @@ class LTCPaySettlementTests(unittest.TestCase):
             )
         )
 
+    def test_structural_invoice_without_local_order_requests_retry_without_crediting(self):
+        missing_order_id = "cosmo:101:" + "c" * 32
+        result = database.process_ltcpay_webhook(
+            self.event(),
+            self.invoice(metadata={"orderId": missing_order_id, "discord_user_id": "202"}),
+        )
+        self.assertEqual(result["status"], "retry")
+        with sqlite3.connect(self.guild_db_path) as conn:
+            row = conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 101").fetchone()
+            self.assertEqual(row[0] if row else 0, 0)
+
 
 class LTCPayWebhookRouteTests(unittest.TestCase):
     def test_valid_signed_event_fetches_canonical_invoice_and_bad_signature_is_rejected(self):
@@ -327,6 +338,31 @@ class LTCPayWebhookRouteTests(unittest.TestCase):
                 "/ltcpay/webhook", data=raw, content_type="application/json", headers={"BTCPAY-SIG": "sha256=" + "0" * 64}
             )
             self.assertEqual(bad.status_code, 401)
+
+    def test_local_order_race_returns_retryable_response(self):
+        import dashboard.app as dashboard_app
+
+        raw = json.dumps(
+            {"type": "InvoiceSettled", "invoiceId": "Invoice123", "storeId": "Store123"},
+            separators=(",", ":"),
+        ).encode()
+        signature = "sha256=" + hmac.new(b"route-secret", raw, hashlib.sha256).hexdigest()
+        with patch.dict(
+            os.environ,
+            {"LTCPAY_WEBHOOK_SECRET": "route-secret", "LTCPAY_API_KEY": "test", "LTCPAY_STORE_ID": "Store123"},
+        ), patch.object(dashboard_app, "active_store_id", return_value="Store123"), patch.object(
+            dashboard_app, "get_invoice", return_value={"id": "Invoice123", "storeId": "Store123"}
+        ), patch.object(
+            dashboard_app.database,
+            "process_ltcpay_webhook",
+            return_value={"status": "retry", "provider_order_id": "cosmo:101:" + "a" * 32},
+        ):
+            client = dashboard_app.app.test_client()
+            response = client.post(
+                "/ltcpay/webhook", data=raw, content_type="application/json", headers={"BTCPAY-SIG": signature}
+            )
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.headers["Retry-After"], "10")
 
 
 if __name__ == "__main__":

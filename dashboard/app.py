@@ -237,6 +237,13 @@ def ltcpay_webhook():
     if result is None:
         app.logger.warning("Signed LTCPay webhook did not match a budget order")
         return "", 200
+    if result.get("status") == "retry":
+        app.logger.warning(
+            "Signed LTCPay webhook arrived before local budget order was visible: order=%s invoice=%s",
+            result.get("provider_order_id", "?"),
+            event.get("invoiceId", "?"),
+        )
+        return "Temporary settlement retry", 503, {"Retry-After": "10"}
     if result.get("status") in {"paid", "needs_review"}:
         _schedule_ltcpay_notice(result)
     return "", 200
