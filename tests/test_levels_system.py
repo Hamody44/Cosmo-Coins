@@ -17,6 +17,7 @@ from cogs.levels import (
     can_manage_level_settings,
     daily_report_dates_due,
     leaderboard_embed,
+    leaderboard_mention_payload,
     period_bounds,
     profile_embed,
 )
@@ -216,6 +217,7 @@ class LevelPeriodAndEmbedTests(unittest.TestCase):
         self.assertEqual(datetime.fromtimestamp(month_end, RIYADH), datetime(2026, 11, 1, 0, 0, tzinfo=RIYADH))
 
     def test_profile_and_leaderboard_embeds_preserve_guild_stats_and_progress(self):
+        self.assertEqual(Leveling.top.name, "top")
         self.assertEqual(period_bounds("all"), (None, None))
         profile = profile_embed("سيرفر كوزمو", None, "عضو تجريبي", None, {
             "rank": 2, "messages": 505, "level": 10, "points": 900,
@@ -228,11 +230,16 @@ class LevelPeriodAndEmbedTests(unittest.TestCase):
         self.assertIn("توقيت الرياض", profile.footer.text)
 
         board = leaderboard_embed("سيرفر كوزمو", None, "الترتيب الأسبوعي", [
-            {"user_id": 123, "points": 900, "messages": 505},
+            {"user_id": 123, "display_name": "عضو متصدر", "points": 900, "messages": 505},
         ])
         self.assertIn("الترتيب الأسبوعي", board.title)
-        self.assertIn("<@123>", board.fields[0].name)
+        self.assertIn("عضو متصدر", board.fields[0].name)
         self.assertIn("900", board.fields[0].value)
+        content, allowed = leaderboard_mention_payload([{"user_id": 123}])
+        self.assertIn("<@123>", content)
+        self.assertEqual([user.id for user in allowed.users], [123])
+        self.assertFalse(allowed.roles)
+        self.assertFalse(allowed.everyone)
 
     def test_primary_bot_owner_can_manage_level_commands(self):
         ctx = SimpleNamespace(

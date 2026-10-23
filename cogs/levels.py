@@ -174,8 +174,11 @@ def leaderboard_embed(
     if entries:
         medals = ("🥇", "🥈", "🥉", "🏅", "🏅")
         for index, entry in enumerate(entries[:5]):
+            member_name = discord.utils.escape_markdown(
+                str(entry.get("display_name") or f"عضو {entry['user_id']}")
+            )[:200]
             embed.add_field(
-                name=f"{medals[index]} المركز {index + 1} — <@{entry['user_id']}>",
+                name=f"{medals[index]} المركز {index + 1} — {member_name}",
                 value=f"⭐ النقاط: **{entry['points']:,}**   •   💬 الرسائل المحتسبة: **{entry['messages']:,}**",
                 inline=False,
             )
@@ -183,6 +186,19 @@ def leaderboard_embed(
         embed.description = "لا توجد نقاط أو رسائل محتسبة في هذه الفترة بعد."
     embed.set_footer(text="الترتيب خاص بهذا السيرفر • توقيت الرياض")
     return embed
+
+
+def leaderboard_mention_payload(entries: list[dict]) -> tuple[str | None, discord.AllowedMentions]:
+    if not entries:
+        return None, discord.AllowedMentions.none()
+    content = "🏆 المتصدرون: " + " ".join(f"<@{int(entry['user_id'])}>" for entry in entries[:5])
+    allowed = discord.AllowedMentions(
+        users=[discord.Object(id=int(entry["user_id"])) for entry in entries[:5]],
+        roles=False,
+        everyone=False,
+        replied_user=False,
+    )
+    return content, allowed
 
 
 class Leveling(commands.Cog):
@@ -683,14 +699,14 @@ class Leveling(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="level_top5", description="عرض أفضل خمسة أعضاء يومياً أو أسبوعياً أو شهرياً أو أبدياً")
+    @commands.hybrid_command(name="top", description="عرض أفضل خمسة أعضاء يومياً أو أسبوعياً أو شهرياً أو أبدياً")
     @discord.app_commands.choices(period=[
         discord.app_commands.Choice(name="يومي", value="daily"),
         discord.app_commands.Choice(name="أسبوعي", value="weekly"),
         discord.app_commands.Choice(name="شهري", value="monthly"),
         discord.app_commands.Choice(name="أبدي", value="all"),
     ])
-    async def level_top5(self, ctx: commands.Context, period: str):
+    async def top(self, ctx: commands.Context, period: str):
         if not ctx.guild:
             return await ctx.send("⛔ استخدم هذا الأمر داخل السيرفر.")
         try:
@@ -704,13 +720,21 @@ class Leveling(commands.Cog):
             "monthly": "الشهري", "month": "الشهري", "شهري": "الشهري", "الشهري": "الشهري",
             "all": "الأبدي", "alltime": "الأبدي", "all-time": "الأبدي", "ابدي": "الأبدي", "أبدي": "الأبدي", "الكل": "الأبدي",
         }[period.strip().lower()]
+        display_entries = []
+        for entry in entries:
+            member = ctx.guild.get_member(int(entry["user_id"]))
+            display_entries.append({
+                **entry,
+                "display_name": member.display_name if member else f"عضو {entry['user_id']}",
+            })
         embed = leaderboard_embed(
             ctx.guild.name,
             ctx.guild.icon.url if ctx.guild.icon else None,
             f"الترتيب {period_name}",
-            entries,
+            display_entries,
         )
-        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        mention_content, allowed_mentions = leaderboard_mention_payload(entries)
+        await ctx.send(content=mention_content, embed=embed, allowed_mentions=allowed_mentions)
 
 
 async def setup(bot):

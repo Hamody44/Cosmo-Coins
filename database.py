@@ -88,6 +88,16 @@ global_cursor.execute('''CREATE TABLE IF NOT EXISTS global_settings (
     key TEXT PRIMARY KEY,
     value INTEGER
 )''')
+global_cursor.execute('''CREATE TABLE IF NOT EXISTS giveaway_prize_payouts (
+    payout_key TEXT PRIMARY KEY,
+    guild_id INTEGER NOT NULL,
+    giveaway_message_id INTEGER NOT NULL,
+    generation INTEGER NOT NULL,
+    prize_slot INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    amount INTEGER NOT NULL CHECK(amount > 0),
+    created_at INTEGER NOT NULL
+)''')
 global_conn.commit()
 
 # قواعد بيانات السيرفرات الفردية
@@ -150,6 +160,25 @@ def get_guild_db(guild_id: int):
         condition TEXT,
         participants_json TEXT,
         is_finished INTEGER DEFAULT 0
+    )''')
+    for column, definition in (
+        ("status", "TEXT NOT NULL DEFAULT 'active'"),
+        ("generation", "INTEGER NOT NULL DEFAULT 0"),
+        ("managed_version", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        _ensure_guild_db_column(cur, "active_giveaways", column, definition, schema_key)
+    if schema_key not in _guild_schema_initialized:
+        cur.execute(
+            "UPDATE active_giveaways SET status = 'ended' "
+            "WHERE is_finished = 1 AND status = 'active'"
+        )
+    cur.execute('''CREATE TABLE IF NOT EXISTS giveaway_winners (
+        message_id INTEGER NOT NULL,
+        generation INTEGER NOT NULL,
+        prize_slot INTEGER NOT NULL,
+        user_id INTEGER,
+        state TEXT NOT NULL,
+        PRIMARY KEY(message_id, generation, prize_slot)
     )''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS boost_system_config (
@@ -1282,6 +1311,74 @@ def update_balance(user_id, amount):
             raise ValueError("رصيد غير كافٍ لإتمام الخصم.")
         conn.commit()
         return conn.execute("SELECT balance FROM balances WHERE user_id = ?", (user_id,)).fetchone()[0]
+
+
+def credit_giveaway_prize(
+    guild_id: int,
+    giveaway_message_id: int,
+    generation: int,
+    prize_slot: int,
+    user_id: int,
+    amount: int,
+) -> dict:
+    """Credit one reserved giveaway prize exactly once, including after retries."""
+    amount = int(amount)
+    if amount <= 0:
+        raise ValueError("يجب أن يكون مبلغ جائزة الجيف أكبر من صفر.")
+    payout_key = f"giveaway:{int(guild_id)}:{int(giveaway_message_id)}:{int(generation)}:{int(prize_slot)}"
+    created_at = int(time.time())
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=15)) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS giveaway_prize_payouts (
+            payout_key TEXT PRIMARY KEY,
+            guild_id INTEGER NOT NULL,
+            giveaway_message_id INTEGER NOT NULL,
+            generation INTEGER NOT NULL,
+            prize_slot INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL CHECK(amount > 0),
+            created_at INTEGER NOT NULL
+        )""")
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT user_id, amount FROM giveaway_prize_payouts WHERE payout_key = ?",
+            (payout_key,),
+        ).fetchone()
+        if existing:
+            if int(existing[0]) != int(user_id) or int(existing[1]) != amount:
+                conn.rollback()
+                raise ValueError("مفتاح صرف الجيف مستخدم ببيانات مختلفة.")
+            conn.commit()
+            return {"status": "already_paid", "user_id": int(user_id), "amount": amount}
+
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (user_id,))
+        conn.execute("UPDATE balances SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        conn.execute(
+            "INSERT INTO giveaway_prize_payouts "
+            "(payout_key, guild_id, giveaway_message_id, generation, prize_slot, user_id, amount, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (payout_key, guild_id, giveaway_message_id, generation, prize_slot, user_id, amount, created_at),
+        )
+        conn.commit()
+        return {"status": "paid", "user_id": int(user_id), "amount": amount}
+
+
+def giveaway_has_any_payout(guild_id: int, giveaway_message_id: int) -> bool:
+    with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=15)) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS giveaway_prize_payouts (
+            payout_key TEXT PRIMARY KEY,
+            guild_id INTEGER NOT NULL,
+            giveaway_message_id INTEGER NOT NULL,
+            generation INTEGER NOT NULL,
+            prize_slot INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL CHECK(amount > 0),
+            created_at INTEGER NOT NULL
+        )""")
+        row = conn.execute(
+            "SELECT 1 FROM giveaway_prize_payouts WHERE guild_id = ? AND giveaway_message_id = ? LIMIT 1",
+            (guild_id, giveaway_message_id),
+        ).fetchone()
+        return bool(row)
 
 def debit_balance(user_id, amount: int) -> bool:
     amount = int(amount)

@@ -72,6 +72,9 @@ class HelpView(discord.ui.View):
                 ("🎉 الفعاليات", (
                     "• `/box <amount> [condition]` — بوكس سريع.\n"
                     "• `/giveaway <amount> <duration> <winners> [condition]` — سحب بالريأكشن.\n"
+                    "• `/stop_giveaway <message_id>` — إيقاف جيف نشط وإرجاع كامل المبلغ المحجوز للسيرفر.\n"
+                    "• `/end_giveaway <message_id>` — إنهاء الجيف فوراً واختيار الفائزين وتسليم الجوائز تلقائياً إذا لم يوجد شرط.\n"
+                    "• `/reroll_giveaway <message_id>` — إعادة اختيار كل الفائزين بشرط عدم صرف أي جائزة؛ وقد يتطلب إعادة حجز المبالغ المستردة.\n"
                     "• `/roulette <amount> [condition]` — لعبة الروليت.\n"
                     "• `/stop_roulette` — إيقاف الروليت الجارية.\n"
                     "• `/set_double_event <duration>` — تفعيل مضاعفة جوائز العجلة."
@@ -138,7 +141,7 @@ class HelpView(discord.ui.View):
                     "• `/add_level_channel` و`/remove_level_channel` و`/list_level_channels` — تحديد رومات احتساب الرسائل.\n"
                     "• `/toggle_level_system <true|false>` — فتح النظام أو إغلاقه لهذا السيرفر فقط.\n"
                     "• `/set_level_reward <amount>` — مكافأة من ميزانية السيرفر لكل مستوى من مضاعفات 10.\n"
-                    "• `/level_points` و`/level_top5 <daily|weekly|monthly|all>` — إحصاءات النقاط والمستوى والمتصدرون عبر embeds.\n"
+                    "• `/level_points` و`/top <daily|weekly|monthly|all>` — إحصاءات النقاط والمستوى والمتصدرون عبر embeds مع منشن المتصدرين.\n"
                     "• `/set_level_announcement_channel` و`/set_level_salary <500|1000|2000|3000> <amount>` — روم التقرير ومبالغ شرائح admin.\n"
                     "• `/level_salary_history [member] [limit]` — سجل الرواتب السابقة؛ متاح لمالك البوت ومالك السيرفر وowner-role والإدارة المخولة.\n"
                     "كل 100 نقطة ترفع المستوى؛ تُمنح نقطة بحد مرة كل 30 ثانية. 5 رسائل خلال 10 ثوانٍ تُعد سباماً ولا تُحتسب. التصفير والتقرير اليومي الساعة 23:55 بتوقيت الرياض؛ الأسبوع يبدأ الاثنين والشهر يوم 1.\n"

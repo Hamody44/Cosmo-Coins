@@ -9,11 +9,139 @@ import math
 from database import (
     parse_amount, parse_duration, is_bot_admin, deduct_server_spending,
     refund_server_spending, update_balance, is_blacklisted, get_guild_db,
-    clean_display_name, get_unicode_font, PRIMARY_OWNER_ID, get_currency_label
+    clean_display_name, get_unicode_font, PRIMARY_OWNER_ID, get_currency_label,
+    credit_giveaway_prize, giveaway_has_any_payout,
 )
 from PIL import Image, ImageDraw, ImageOps
 
 active_roulettes = {}
+_giveaway_locks: dict[tuple[int, int], asyncio.Lock] = {}
+
+
+def _giveaway_lock(guild_id: int, message_id: int) -> asyncio.Lock:
+    return _giveaway_locks.setdefault((guild_id, message_id), asyncio.Lock())
+
+
+def _set_giveaway_prize_state(
+    guild_id: int,
+    message_id: int,
+    generation: int,
+    slot: int,
+    user_id: int,
+    amount: int,
+    action: str,
+) -> str:
+    """Claim a conditional prize or return it to the reserved guild budget once."""
+    conn, cur = get_guild_db(guild_id)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = cur.execute(
+            "SELECT status, generation FROM active_giveaways WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        if not row or row[0] != "ended" or int(row[1]) != generation:
+            conn.rollback()
+            return "stale"
+        prize = cur.execute(
+            "SELECT user_id, state FROM giveaway_winners "
+            "WHERE message_id = ? AND generation = ? AND prize_slot = ?",
+            (message_id, generation, slot),
+        ).fetchone()
+        if not prize or int(prize[0] or 0) != user_id:
+            conn.rollback()
+            return "stale"
+
+        current_state = prize[1]
+        if action == "claim":
+            if current_state == "paid":
+                conn.commit()
+                return "already_paid"
+            if current_state not in ("pending", "paying"):
+                conn.rollback()
+                return "stale"
+            cur.execute(
+                "UPDATE giveaway_winners SET state = 'paying' "
+                "WHERE message_id = ? AND generation = ? AND prize_slot = ? AND user_id = ? "
+                "AND state IN ('pending', 'paying')",
+                (message_id, generation, slot, user_id),
+            )
+            conn.commit()
+            return "ready"
+
+        if action == "deny":
+            if current_state == "refunded":
+                conn.commit()
+                return "already_refunded"
+            if current_state != "pending":
+                conn.rollback()
+                return "stale"
+            cur.execute(
+                "INSERT OR IGNORE INTO settings (guild_id, spending_balance) VALUES (?, 0)",
+                (guild_id,),
+            )
+            cur.execute(
+                "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) + ? WHERE guild_id = ?",
+                (amount, guild_id),
+            )
+            cur.execute(
+                "UPDATE giveaway_winners SET state = 'refunded' "
+                "WHERE message_id = ? AND generation = ? AND prize_slot = ? AND state = 'pending'",
+                (message_id, generation, slot),
+            )
+            conn.commit()
+            return "refunded"
+        raise ValueError("Unsupported giveaway prize action")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _mark_giveaway_prize_paid(guild_id: int, message_id: int, generation: int, slot: int) -> None:
+    conn, cur = get_guild_db(guild_id)
+    try:
+        cur.execute(
+            "UPDATE giveaway_winners SET state = 'paid' "
+            "WHERE message_id = ? AND generation = ? AND prize_slot = ? AND state = 'paying'",
+            (message_id, generation, slot),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _change_giveaway_participant(guild_id: int, message_id: int, user_id: int, add: bool):
+    conn, cur = get_guild_db(guild_id)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = cur.execute(
+            "SELECT participants_json, amount, winners_count, condition, end_timestamp "
+            "FROM active_giveaways WHERE message_id = ? AND status = 'active'",
+            (message_id,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        participants = json.loads(row[0]) if row[0] else []
+        if add and user_id not in participants:
+            participants.append(user_id)
+        elif not add and user_id in participants:
+            participants.remove(user_id)
+        else:
+            conn.commit()
+            return None
+        cur.execute(
+            "UPDATE active_giveaways SET participants_json = ? WHERE message_id = ? AND status = 'active'",
+            (json.dumps(participants), message_id),
+        )
+        conn.commit()
+        return (*row[1:], participants)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def can_manage_server_games(ctx: commands.Context) -> bool:
     """مالك السيرفر يستطيع بدء ألعاب الجوائز حتى دون بريميوم؛ بقية الصلاحيات كما هي."""
@@ -33,11 +161,18 @@ class RouletteSession:
             self.current_view.stop()
 
 class ClaimVerificationView(discord.ui.View):
-    def __init__(self, winner: discord.Member, amount: int, reward_type: str = "الجائزة"):
+    def __init__(
+        self,
+        winner: discord.Member,
+        amount: int,
+        reward_type: str = "الجائزة",
+        giveaway_prize: tuple[int, int, int, int] | None = None,
+    ):
         super().__init__(timeout=None)
         self.winner = winner
         self.amount = amount
         self.reward_type = reward_type
+        self.giveaway_prize = giveaway_prize
 
     @discord.ui.button(label="تسليم", style=discord.ButtonStyle.success, emoji="✅")
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -61,7 +196,27 @@ class ClaimVerificationView(discord.ui.View):
             await interaction.message.edit(view=self)
             return await interaction.response.send_message(f"⛔ تعذر التسليم: العضو {self.winner.mention} مدرج في البلاك ليست.")
 
-        update_balance(self.winner.id, self.amount)
+        if self.giveaway_prize:
+            guild_id, message_id, generation, slot = self.giveaway_prize
+            async with _giveaway_lock(guild_id, message_id):
+                state = await asyncio.to_thread(
+                    _set_giveaway_prize_state,
+                    guild_id, message_id, generation, slot, self.winner.id, self.amount, "claim",
+                )
+                if state == "already_paid":
+                    for item in self.children:
+                        item.disabled = True
+                    await interaction.message.edit(view=self)
+                    return await interaction.response.send_message("ℹ️ سبق تسليم هذه الجائزة.", ephemeral=True)
+                if state != "ready":
+                    return await interaction.response.send_message("⛔ هذا الزر لم يعد صالحاً؛ تغيّر فائز الجيف أو حالته.", ephemeral=True)
+                await asyncio.to_thread(
+                    credit_giveaway_prize,
+                    guild_id, message_id, generation, slot, self.winner.id, self.amount,
+                )
+                await asyncio.to_thread(_mark_giveaway_prize_paid, guild_id, message_id, generation, slot)
+        else:
+            update_balance(self.winner.id, self.amount)
         for item in self.children:
             item.disabled = True
         await interaction.message.edit(view=self)
@@ -88,7 +243,19 @@ class ClaimVerificationView(discord.ui.View):
         if not is_admin:
             return await interaction.response.send_message("⛔ المسؤولون فقط يمكنهم اتخاذ هذا الإجراء.", ephemeral=True)
 
-        refund_server_spending(interaction.guild.id, self.amount)
+        if self.giveaway_prize:
+            guild_id, message_id, generation, slot = self.giveaway_prize
+            async with _giveaway_lock(guild_id, message_id):
+                state = await asyncio.to_thread(
+                    _set_giveaway_prize_state,
+                    guild_id, message_id, generation, slot, self.winner.id, self.amount, "deny",
+                )
+            if state == "already_refunded":
+                return await interaction.response.send_message("ℹ️ سبق إرجاع مبلغ هذه الجائزة.", ephemeral=True)
+            if state != "refunded":
+                return await interaction.response.send_message("⛔ لم يعد هذا الزر صالحاً لهذه الجائزة.", ephemeral=True)
+        else:
+            refund_server_spending(interaction.guild.id, self.amount)
         for item in self.children:
             item.disabled = True
         await interaction.message.edit(view=self)
@@ -262,79 +429,187 @@ class Games(commands.Cog):
         self.bot = bot
         asyncio.create_task(self.resume_all_giveaways())
 
-    async def finish_giveaway(self, guild: discord.Guild, channel: discord.TextChannel, msg_id: int, amount: int, winners_count: int, condition: str, participants: list):
+    async def finish_giveaway(self, guild: discord.Guild, channel: discord.TextChannel, msg_id: int) -> bool:
+        async with _giveaway_lock(guild.id, msg_id):
+            return await self._finish_giveaway_locked(guild, channel, msg_id)
+
+    async def _finish_giveaway_locked(self, guild: discord.Guild, channel: discord.TextChannel, msg_id: int) -> bool:
         label = get_currency_label(guild.id)
+        read_conn, read_cur = get_guild_db(guild.id)
+        read_cur.execute(
+            "SELECT participants_json FROM active_giveaways WHERE message_id = ? AND status = 'active'",
+            (msg_id,),
+        )
+        participant_row = read_cur.fetchone()
+        excluded_rows = read_cur.execute(
+            "SELECT DISTINCT user_id FROM giveaway_winners WHERE message_id = ? AND state = 'void' AND user_id IS NOT NULL",
+            (msg_id,),
+        ).fetchall()
+        read_conn.close()
+        if not participant_row:
+            return False
+        participants_json = participant_row[0]
+        participants = json.loads(participants_json) if participants_json else []
+        excluded_ids = {int(row[0]) for row in excluded_rows}
+        valid_ids = []
+        for user_id in dict.fromkeys(int(value) for value in participants):
+            member = guild.get_member(user_id)
+            if user_id not in excluded_ids and member and not is_blacklisted(member):
+                valid_ids.append(user_id)
+
         g_conn, g_cur = get_guild_db(guild.id)
-        g_cur.execute("UPDATE active_giveaways SET is_finished = 1 WHERE message_id = ?", (msg_id,))
-        g_conn.commit()
-        g_conn.close()
+        try:
+            g_conn.execute("BEGIN IMMEDIATE")
+            row = g_cur.execute(
+                "SELECT amount, winners_count, condition, participants_json, status, generation "
+                "FROM active_giveaways WHERE message_id = ?",
+                (msg_id,),
+            ).fetchone()
+            if not row or row[4] != "active" or row[3] != participants_json:
+                g_conn.rollback()
+                return False
 
-        valid_participants = [uid for uid in participants if guild.get_member(uid) and not is_blacklisted(guild.get_member(uid))]
-        if not valid_participants:
-            refund_server_spending(guild.id, amount * winners_count)
-            return await channel.send(f"⚠️ انتهى السحب على `{amount:,}` {label}، ولكن لم يشترك أحد (أُعيدت الميزانية للسيرفر).")
+            amount, winners_count, condition, _participants_json, _status, generation = row
+            winners_ids = random.sample(valid_ids, min(len(valid_ids), int(winners_count)))
+            winners = [guild.get_member(user_id) for user_id in winners_ids]
 
-        winners_ids = random.sample(valid_participants, min(len(valid_participants), winners_count))
-        winners = [guild.get_member(uid) for uid in winners_ids]
-        winners_mentions = ", ".join([w.mention for w in winners])
+            g_cur.execute(
+                "UPDATE active_giveaways SET is_finished = 1, status = 'ended', managed_version = 1 "
+                "WHERE message_id = ? AND status = 'active'",
+                (msg_id,),
+            )
+            if g_cur.rowcount != 1:
+                g_conn.rollback()
+                return False
 
-        if len(winners) < winners_count:
-            refund_amount = (winners_count - len(winners)) * amount
-            refund_server_spending(guild.id, refund_amount)
+            for slot in range(int(winners_count)):
+                if slot < len(winners):
+                    winner_id = int(winners_ids[slot])
+                    state = "pending" if condition else "paying"
+                else:
+                    winner_id = None
+                    state = "unfilled"
+                g_cur.execute(
+                    "INSERT INTO giveaway_winners (message_id, generation, prize_slot, user_id, state) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (msg_id, generation, slot, winner_id, state),
+                )
 
-        if not condition:
-            for winner in winners:
-                update_balance(winner.id, amount)
+            unfilled = int(winners_count) - len(winners)
+            if unfilled:
+                refund_amount = unfilled * int(amount)
+                g_cur.execute(
+                    "INSERT OR IGNORE INTO settings (guild_id, spending_balance) VALUES (?, 0)",
+                    (guild.id,),
+                )
+                g_cur.execute(
+                    "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) + ? WHERE guild_id = ?",
+                    (refund_amount, guild.id),
+                )
+            g_conn.commit()
+        except Exception:
+            g_conn.rollback()
+            raise
+        finally:
+            g_conn.close()
+
+        await self._update_giveaway_post(guild, channel, msg_id, "انتهى السحب")
+        if not winners:
+            await channel.send(
+                f"⚠️ انتهى السحب على `{amount:,}` {label}، ولم يوجد مشاركون مؤهلون؛ أُعيدت الميزانية غير المصروفة للسيرفر."
+            )
+            return True
+
+        winners_mentions = ", ".join(winner.mention for winner in winners)
+        if condition:
+            await channel.send(
+                f"🎊 الفائزون بالقرعة: {winners_mentions}!\n⚠️ **الشرط:** `{condition}`\nفي انتظار مراجعة الإدارة للتسليم."
+            )
+            for slot, winner in enumerate(winners):
+                claim_view = ClaimVerificationView(
+                    winner,
+                    int(amount),
+                    "جائزة الجيف أواي",
+                    (guild.id, msg_id, int(generation), slot),
+                )
+                await channel.send(f"تحقق من شرط العضو {winner.mention}:", view=claim_view)
+        else:
+            for slot, winner in enumerate(winners):
+                try:
+                    await asyncio.to_thread(
+                        credit_giveaway_prize,
+                        guild.id, msg_id, int(generation), slot, winner.id, int(amount),
+                    )
+                    await asyncio.to_thread(_mark_giveaway_prize_paid, guild.id, msg_id, int(generation), slot)
+                except Exception as exc:
+                    print(f"Giveaway prize payout failed for guild {guild.id}, message {msg_id}, slot {slot}: {exc}")
+                    continue
                 try:
                     await winner.send(f"🎉 مبروك! فزت بـ `{amount:,}` {label} في السحب وتم تسليمها تلقائياً.")
-                except:
+                except discord.HTTPException:
                     pass
             await channel.send(f"🎊 مبارك للفائزين: {winners_mentions}!\nتم تسليم `{amount:,}` {label} تلقائياً لكل فائز.")
-        else:
-            await channel.send(f"🎊 الفائزون بالقرعة: {winners_mentions}!\n⚠️ **الشرط:** `{condition}`\nفي انتظار مراجعة الإدارة للتسليم.")
-            for winner in winners:
-                claim_view = ClaimVerificationView(winner, amount, "جائزة الجيف أواي")
-                await channel.send(f"تحقق من شرط العضو {winner.mention}:", view=claim_view)
+        return True
 
-    async def monitor_giveaway(self, guild_id: int, channel_id: int, msg_id: int, amount: int, duration_sec: int, winners_count: int, condition: str):
-        await asyncio.sleep(duration_sec)
+    async def _update_giveaway_post(self, guild, channel, msg_id: int, status_text: str):
+        try:
+            message = await channel.fetch_message(msg_id)
+            if not message.embeds:
+                return
+            embed = message.embeds[0]
+            base = (embed.description or "").split("\n**الحالة:**", 1)[0]
+            embed.description = f"{base}\n**الحالة:** {status_text}"
+            await message.edit(embed=embed)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def monitor_giveaway(self, guild_id: int, channel_id: int, msg_id: int, duration_sec: int):
+        await asyncio.sleep(max(0, duration_sec))
         guild = self.bot.get_guild(guild_id)
         if not guild:
             return
         channel = guild.get_channel(channel_id)
         if not channel:
-            return
-
-        g_conn, g_cur = get_guild_db(guild_id)
-        g_cur.execute("SELECT participants_json, is_finished FROM active_giveaways WHERE message_id = ?", (msg_id,))
-        row = g_cur.fetchone()
-        g_conn.close()
-
-        if row and row[1] == 0:
-            participants = json.loads(row[0]) if row[0] else []
-            await self.finish_giveaway(guild, channel, msg_id, amount, winners_count, condition, participants)
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+        await self.finish_giveaway(guild, channel, msg_id)
 
     async def resume_all_giveaways(self):
         await self.bot.wait_until_ready()
         now = int(time.time())
         for guild in self.bot.guilds:
-            g_conn, g_cur = get_guild_db(guild.id)
-            g_cur.execute("SELECT message_id, channel_id, amount, end_timestamp, winners_count, condition, participants_json FROM active_giveaways WHERE is_finished = 0")
-            rows = g_cur.fetchall()
-            g_conn.close()
+            try:
+                g_conn, g_cur = get_guild_db(guild.id)
+                g_cur.execute(
+                    "SELECT message_id, channel_id, end_timestamp FROM active_giveaways WHERE status = 'active'"
+                )
+                active_rows = g_cur.fetchall()
+                g_cur.execute(
+                    "SELECT w.message_id, w.generation, w.prize_slot, w.user_id, a.channel_id, a.amount "
+                    "FROM giveaway_winners w JOIN active_giveaways a ON a.message_id = w.message_id "
+                    "WHERE a.status = 'ended' AND w.state = 'paying'"
+                )
+                pending_payouts = g_cur.fetchall()
+                g_conn.close()
+            except Exception as exc:
+                print(f"Could not resume giveaways in guild {guild.id}: {exc}")
+                continue
 
-            for r in rows:
-                msg_id, chan_id, amount, end_time, winners_cnt, condition, part_json = r
-                channel = guild.get_channel(chan_id)
-                if not channel:
-                    continue
-                participants = json.loads(part_json) if part_json else []
+            for msg_id, channel_id, end_timestamp in active_rows:
+                remaining = max(0, int(end_timestamp) - now)
+                asyncio.create_task(self.monitor_giveaway(guild.id, channel_id, msg_id, remaining))
 
-                if now >= end_time:
-                    asyncio.create_task(self.finish_giveaway(guild, channel, msg_id, amount, winners_cnt, condition, participants))
-                else:
-                    remaining = end_time - now
-                    asyncio.create_task(self.monitor_giveaway(guild.id, chan_id, msg_id, amount, remaining, winners_cnt, condition))
+            for msg_id, generation, slot, user_id, channel_id, amount in pending_payouts:
+                try:
+                    await asyncio.to_thread(
+                        credit_giveaway_prize,
+                        guild.id, msg_id, generation, slot, user_id, amount,
+                    )
+                    await asyncio.to_thread(_mark_giveaway_prize_paid, guild.id, msg_id, generation, slot)
+                except Exception as exc:
+                    print(f"Could not resume giveaway payout {guild.id}/{msg_id}/{slot}: {exc}")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
@@ -342,42 +617,30 @@ class Games(commands.Cog):
             return
         if not payload.guild_id:
             return
-
-        g_conn, g_cur = get_guild_db(payload.guild_id)
-        g_cur.execute("SELECT participants_json, is_finished, amount, winners_count, condition, end_timestamp FROM active_giveaways WHERE message_id = ?", (payload.message_id,))
-        row = g_cur.fetchone()
-
-        if not row or row[1] == 1:
-            g_conn.close()
-            return
-
         guild = self.bot.get_guild(payload.guild_id)
         member = payload.member or (guild.get_member(payload.user_id) if guild else None)
         if member and is_blacklisted(member):
-            g_conn.close()
             return
-
-        participants = json.loads(row[0]) if row[0] else []
-        if payload.user_id not in participants:
-            participants.append(payload.user_id)
-            g_cur.execute("UPDATE active_giveaways SET participants_json = ? WHERE message_id = ?", (json.dumps(participants), payload.message_id))
-            g_conn.commit()
-
+        async with _giveaway_lock(payload.guild_id, payload.message_id):
+            row = await asyncio.to_thread(
+                _change_giveaway_participant, payload.guild_id, payload.message_id, payload.user_id, True
+            )
+        if row:
+            amount, winners_count, condition, end_timestamp, participants = row
             channel = self.bot.get_channel(payload.channel_id)
             if channel:
                 try:
                     msg = await channel.fetch_message(payload.message_id)
                     if msg.embeds:
                         embed = msg.embeds[0]
-                        embed.description = f"**الجائزة لكل فائز:** `{row[2]:,}` {get_currency_label(payload.guild_id)}\n" \
-                                            f"**عدد الفائزين:** `{row[3]}`\n" \
-                                            f"**المشاركين:** `{len(participants)}`\n" \
-                                            f"**الشرط:** {row[4] if row[4] else 'لا يوجد شرط'}\n" \
-                                            f"**ينتهي:** <t:{row[5]}:R>"
+                        embed.description = (
+                            f"**الجائزة لكل فائز:** `{amount:,}` {get_currency_label(payload.guild_id)}\n"
+                            f"**عدد الفائزين:** `{winners_count}`\n**المشاركين:** `{len(participants)}`\n"
+                            f"**الشرط:** {condition if condition else 'لا يوجد شرط'}\n**ينتهي:** <t:{end_timestamp}:R>"
+                        )
                         await msg.edit(embed=embed)
-                except:
+                except discord.HTTPException:
                     pass
-        g_conn.close()
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
@@ -386,35 +649,26 @@ class Games(commands.Cog):
         if not payload.guild_id:
             return
 
-        g_conn, g_cur = get_guild_db(payload.guild_id)
-        g_cur.execute("SELECT participants_json, is_finished, amount, winners_count, condition, end_timestamp FROM active_giveaways WHERE message_id = ?", (payload.message_id,))
-        row = g_cur.fetchone()
-
-        if not row or row[1] == 1:
-            g_conn.close()
-            return
-
-        participants = json.loads(row[0]) if row[0] else []
-        if payload.user_id in participants:
-            participants.remove(payload.user_id)
-            g_cur.execute("UPDATE active_giveaways SET participants_json = ? WHERE message_id = ?", (json.dumps(participants), payload.message_id))
-            g_conn.commit()
-
+        async with _giveaway_lock(payload.guild_id, payload.message_id):
+            row = await asyncio.to_thread(
+                _change_giveaway_participant, payload.guild_id, payload.message_id, payload.user_id, False
+            )
+        if row:
+            amount, winners_count, condition, end_timestamp, participants = row
             channel = self.bot.get_channel(payload.channel_id)
             if channel:
                 try:
                     msg = await channel.fetch_message(payload.message_id)
                     if msg.embeds:
                         embed = msg.embeds[0]
-                        embed.description = f"**الجائزة لكل فائز:** `{row[2]:,}` {get_currency_label(payload.guild_id)}\n" \
-                                            f"**عدد الفائزين:** `{row[3]}`\n" \
-                                            f"**المشاركين:** `{len(participants)}`\n" \
-                                            f"**الشرط:** {row[4] if row[4] else 'لا يوجد شرط'}\n" \
-                                            f"**ينتهي:** <t:{row[5]}:R>"
+                        embed.description = (
+                            f"**الجائزة لكل فائز:** `{amount:,}` {get_currency_label(payload.guild_id)}\n"
+                            f"**عدد الفائزين:** `{winners_count}`\n**المشاركين:** `{len(participants)}`\n"
+                            f"**الشرط:** {condition if condition else 'لا يوجد شرط'}\n**ينتهي:** <t:{end_timestamp}:R>"
+                        )
                         await msg.edit(embed=embed)
-                except:
+                except discord.HTTPException:
                     pass
-        g_conn.close()
 
     @commands.hybrid_command(name="giveaway", aliases=["سحب", "جيف_اواي"], description="بدء سحب جيف أواي على عملات Cosmo بالريأكشن 🎉")
     async def giveaway(self, ctx: commands.Context, amount: str, duration: str, winners_count: int, *, condition: str = None):
@@ -427,15 +681,14 @@ class Games(commands.Cog):
         if parsed_amount <= 0 or winners_count <= 0:
             return await ctx.send("❌ القيم غير صحيحة.")
 
+        duration_seconds = parse_duration(duration)
+        if not duration_seconds or duration_seconds <= 0:
+            return await ctx.send("❌ صيغة الوقت غير صحيحة.")
+
         total_cost = parsed_amount * winners_count
         allowed, pool_msg = deduct_server_spending(ctx.guild.id, total_cost)
         if not allowed:
             return await ctx.send(pool_msg)
-
-        duration_seconds = parse_duration(duration)
-        if not duration_seconds:
-            refund_server_spending(ctx.guild.id, total_cost)
-            return await ctx.send("❌ صيغة الوقت غير صحيحة.")
 
         end_timestamp = int(time.time()) + duration_seconds
         currency_label = get_currency_label(ctx.guild.id)
@@ -445,18 +698,214 @@ class Games(commands.Cog):
             color=discord.Color.purple()
         )
         embed.set_footer(text="تفاعل بالريأكشن 🎉 للدخول في السحب!")
-        msg = await ctx.send(embed=embed)
-        await msg.add_reaction("🎉")
+        msg = None
+        row_created = False
+        try:
+            msg = await ctx.send(embed=embed)
+            g_conn, g_cur = get_guild_db(ctx.guild.id)
+            try:
+                g_cur.execute(
+                    "INSERT INTO active_giveaways "
+                    "(message_id, channel_id, amount, end_timestamp, winners_count, condition, participants_json, "
+                    "is_finished, status, generation, managed_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?, '[]', 0, 'active', 0, 1)",
+                    (msg.id, ctx.channel.id, parsed_amount, end_timestamp, winners_count, condition),
+                )
+                g_conn.commit()
+                row_created = True
+            finally:
+                g_conn.close()
+            await msg.add_reaction("🎉")
+        except Exception as exc:
+            if row_created:
+                g_conn, g_cur = get_guild_db(ctx.guild.id)
+                try:
+                    g_conn.execute("BEGIN IMMEDIATE")
+                    g_cur.execute(
+                        "UPDATE active_giveaways SET status = 'stopped', is_finished = 1 "
+                        "WHERE message_id = ? AND status = 'active'",
+                        (msg.id,),
+                    )
+                    if g_cur.rowcount == 1:
+                        g_cur.execute(
+                            "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) + ? WHERE guild_id = ?",
+                            (total_cost, ctx.guild.id),
+                        )
+                    g_conn.commit()
+                except Exception:
+                    g_conn.rollback()
+                    print(f"Could not close failed giveaway setup {ctx.guild.id}/{msg.id}")
+                finally:
+                    g_conn.close()
+            else:
+                refund_server_spending(ctx.guild.id, total_cost)
+            if msg:
+                try:
+                    await msg.delete()
+                except discord.HTTPException:
+                    pass
+            print(f"Could not start giveaway in guild {ctx.guild.id}: {exc}")
+            return await ctx.send("❌ تعذر بدء الجيف؛ أُعيدت الميزانية المحجوزة للسيرفر.")
 
-        g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute(
-            "INSERT INTO active_giveaways (message_id, channel_id, amount, end_timestamp, winners_count, condition, participants_json, is_finished) VALUES (?, ?, ?, ?, ?, ?, '[]', 0)",
-            (msg.id, ctx.channel.id, parsed_amount, end_timestamp, winners_count, condition)
-        )
-        g_conn.commit()
-        g_conn.close()
+        asyncio.create_task(self.monitor_giveaway(ctx.guild.id, ctx.channel.id, msg.id, duration_seconds))
 
-        asyncio.create_task(self.monitor_giveaway(ctx.guild.id, ctx.channel.id, msg.id, parsed_amount, duration_seconds, winners_count, condition))
+    async def _giveaway_record(self, guild_id: int, message_id: int):
+        conn, cur = get_guild_db(guild_id)
+        try:
+            cur.execute(
+                "SELECT channel_id, amount, winners_count, status FROM active_giveaways WHERE message_id = ?",
+                (message_id,),
+            )
+            return cur.fetchone()
+        finally:
+            conn.close()
+
+    async def _giveaway_channel(self, guild: discord.Guild, channel_id: int):
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return None
+        return channel
+
+    @commands.hybrid_command(name="stop_giveaway", description="إيقاف جيف نشط وإرجاع كامل ميزانيته للسيرفر")
+    async def stop_giveaway(self, ctx: commands.Context, message_id: int):
+        if not ctx.guild or not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
+        async with _giveaway_lock(ctx.guild.id, message_id):
+            conn, cur = get_guild_db(ctx.guild.id)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = cur.execute(
+                    "SELECT channel_id, amount, winners_count, status FROM active_giveaways WHERE message_id = ?",
+                    (message_id,),
+                ).fetchone()
+                if not row or row[3] != "active":
+                    conn.rollback()
+                    return await ctx.send("❌ لم أجد جيفاً نشطاً بهذا المعرّف؛ ربما انتهى أو أُوقف مسبقاً.")
+                channel_id, amount, winners_count, _status = row
+                refund_amount = int(amount) * int(winners_count)
+                cur.execute("INSERT OR IGNORE INTO settings (guild_id, spending_balance) VALUES (?, 0)", (ctx.guild.id,))
+                cur.execute(
+                    "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) + ? WHERE guild_id = ?",
+                    (refund_amount, ctx.guild.id),
+                )
+                cur.execute(
+                    "UPDATE active_giveaways SET is_finished = 1, status = 'stopped' "
+                    "WHERE message_id = ? AND status = 'active'",
+                    (message_id,),
+                )
+                if cur.rowcount != 1:
+                    conn.rollback()
+                    return await ctx.send("❌ تغيّرت حالة الجيف قبل الإيقاف؛ لم تُجرَ أي عملية استرداد.")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        channel = await self._giveaway_channel(ctx.guild, channel_id)
+        if channel:
+            await self._update_giveaway_post(ctx.guild, channel, message_id, "أُوقف وأُعيدت الميزانية للسيرفر")
+        await ctx.send(f"🛑 أُوقف الجيف وأُعيد `{refund_amount:,}` Cosmo إلى ميزانية السيرفر.")
+
+    @commands.hybrid_command(name="end_giveaway", description="إنهاء جيف نشط الآن واختيار الفائزين")
+    async def end_giveaway(self, ctx: commands.Context, message_id: int):
+        if not ctx.guild or not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
+        row = await self._giveaway_record(ctx.guild.id, message_id)
+        if not row or row[3] != "active":
+            return await ctx.send("❌ لم أجد جيفاً نشطاً بهذا المعرّف؛ ربما انتهى أو أُوقف مسبقاً.")
+        channel = await self._giveaway_channel(ctx.guild, row[0])
+        if channel is None:
+            return await ctx.send("❌ تعذر الوصول إلى روم الجيف؛ لم أغيّر حالته.")
+        ended = await self.finish_giveaway(ctx.guild, channel, message_id)
+        if not ended:
+            return await ctx.send("❌ لم يتم إنهاء الجيف؛ ربما عالجه المؤقت للتو.")
+        await ctx.send("✅ تم إنهاء الجيف واختيار الفائزين.")
+
+    @commands.hybrid_command(name="reroll_giveaway", description="إعادة اختيار جميع الفائزين إذا لم تُصرف أي جائزة")
+    async def reroll_giveaway(self, ctx: commands.Context, message_id: int):
+        if not ctx.guild or not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
+
+        async with _giveaway_lock(ctx.guild.id, message_id):
+            initial_record = await self._giveaway_record(ctx.guild.id, message_id)
+            if not initial_record:
+                return await ctx.send("❌ لم أجد جيفاً بهذا المعرّف.")
+            channel = await self._giveaway_channel(ctx.guild, initial_record[0])
+            if channel is None:
+                return await ctx.send("❌ تعذر الوصول إلى روم الجيف؛ لم أغيّر حالته أو ميزانيته.")
+            if await asyncio.to_thread(giveaway_has_any_payout, ctx.guild.id, message_id):
+                return await ctx.send("⛔ لا يمكن إعادة السحب؛ سبق تسليم جائزة واحدة على الأقل.")
+
+            conn, cur = get_guild_db(ctx.guild.id)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = cur.execute(
+                    "SELECT channel_id, amount, winners_count, status, generation, managed_version "
+                    "FROM active_giveaways WHERE message_id = ?",
+                    (message_id,),
+                ).fetchone()
+                if not row or row[3] != "ended":
+                    conn.rollback()
+                    return await ctx.send("❌ يمكن إعادة السحب فقط لجيف منتهٍ ولم يُوقف.")
+                channel_id, amount, winners_count, _status, generation, managed_version = row
+                if not managed_version:
+                    conn.rollback()
+                    return await ctx.send("⛔ هذا جيف قديم لا يملك سجل صرف موثوقاً؛ أرفض إعادة السحب لمنع دفع مكرر.")
+                current_states = [r[0] for r in cur.execute(
+                    "SELECT state FROM giveaway_winners WHERE message_id = ? AND generation = ?",
+                    (message_id, generation),
+                ).fetchall()]
+                if any(state in ("paid", "paying") for state in current_states):
+                    conn.rollback()
+                    return await ctx.send("⛔ توجد جائزة مدفوعة أو قيد التسليم؛ لا يمكن إعادة السحب.")
+                pending_count = sum(state == "pending" for state in current_states)
+                total_cost = int(amount) * int(winners_count)
+                recharge = max(0, total_cost - pending_count * int(amount))
+                cur.execute("INSERT OR IGNORE INTO settings (guild_id, spending_balance) VALUES (?, 0)", (ctx.guild.id,))
+                budget_row = cur.execute(
+                    "SELECT spending_balance FROM settings WHERE guild_id = ?", (ctx.guild.id,)
+                ).fetchone()
+                available = int(budget_row[0] or 0) if budget_row else 0
+                if available < recharge:
+                    conn.rollback()
+                    return await ctx.send(
+                        f"⛔ الميزانية غير كافية لإعادة حجز الجوائز التي أُعيدت سابقاً. "
+                        f"المطلوب `{recharge:,}` والمتاح `{available:,}` Cosmo."
+                    )
+                cur.execute(
+                    "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) - ? WHERE guild_id = ?",
+                    (recharge, ctx.guild.id),
+                )
+                cur.execute(
+                    "UPDATE giveaway_winners SET state = 'void' WHERE message_id = ? AND generation = ?",
+                    (message_id, generation),
+                )
+                cur.execute(
+                    "UPDATE active_giveaways SET status = 'active', is_finished = 0, "
+                    "generation = generation + 1, end_timestamp = ?, managed_version = 1 "
+                    "WHERE message_id = ? AND status = 'ended'",
+                    (int(time.time()), message_id),
+                )
+                if cur.rowcount != 1:
+                    conn.rollback()
+                    return await ctx.send("❌ تغيّرت حالة الجيف؛ لم تُنفّذ إعادة السحب.")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+            rerolled = await self._finish_giveaway_locked(ctx.guild, channel, message_id)
+        if rerolled:
+            await ctx.send("🔄 أُعيد اختيار جميع الفائزين؛ لم تكن أي جائزة قد صُرفت.")
+        else:
+            await ctx.send("⚠️ لم تكتمل إعادة السحب؛ بقيت الحالة محفوظة لإعادة المحاولة.")
 
     @commands.hybrid_command(name="box", aliases=["بوكس"], description="إنشاء بوكس سريع لأول شخص يضغط على الزر")
     async def box(self, ctx: commands.Context, amount: str, *, condition: str = None):

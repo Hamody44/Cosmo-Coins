@@ -129,6 +129,26 @@ class FinancialTransactionTests(unittest.TestCase):
         with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM transfer_logs").fetchone()[0], 5)
 
+    def test_giveaway_prize_is_idempotent_and_records_only_one_credit(self):
+        args = (111, 222, 0, 0, 333, 75)
+        first = database.credit_giveaway_prize(*args)
+        second = database.credit_giveaway_prize(*args)
+        self.assertEqual(first["status"], "paid")
+        self.assertEqual(second["status"], "already_paid")
+        self.assertEqual(self.balance(333), 75)
+        self.assertTrue(database.giveaway_has_any_payout(111, 222))
+        with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM giveaway_prize_payouts").fetchone()[0], 1)
+
+    def test_concurrent_giveaway_payout_retries_do_not_duplicate_balance(self):
+        args = (111, 223, 0, 1, 334, 90)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _index: database.credit_giveaway_prize(*args), range(8)))
+        self.assertEqual(sum(result["status"] == "paid" for result in results), 1)
+        self.assertEqual(self.balance(334), 90)
+        with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM giveaway_prize_payouts").fetchone()[0], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
