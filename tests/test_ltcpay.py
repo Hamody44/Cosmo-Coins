@@ -245,6 +245,15 @@ class LTCPaySettlementTests(unittest.TestCase):
         result = database.process_ltcpay_webhook(self.event(), invoice)
         self.assertEqual(result["status"], "paid")
 
+    def test_incomplete_processing_snapshot_does_not_block_final_settlement(self):
+        processing = database.process_ltcpay_webhook(
+            self.event(type="InvoiceProcessing"),
+            self.invoice(status="Processing", paidAmount=None, metadata={"orderId": self.provider_order_id, "discord_user_id": "202"}, checkout={}),
+        )
+        self.assertEqual(processing["status"], "processing")
+        settled = database.process_ltcpay_webhook(self.event(), self.invoice())
+        self.assertEqual(settled["status"], "paid")
+
     def test_greenfield_ltc_chain_alias_is_accepted_as_the_single_ltc_method(self):
         result = database.process_ltcpay_webhook(
             self.event(), self.invoice(checkout={"paymentMethods": ["LTC-CHAIN"]})

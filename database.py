@@ -743,15 +743,21 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
         )
 
         if event_type == "InvoiceProcessing" and str(invoice.get("status", "")).lower() == "processing":
-            if not identity_matches or order_status not in {"pending", "creating", "processing"}:
-                notify = order_status != "needs_review"
+            # Processing is an intermediate on-chain state. Providers may
+            # omit paidAmount, payment methods, or metadata at this stage.
+            # Never turn that incomplete snapshot into a terminal review state;
+            # the complete security decision is made on InvoiceSettled.
+            if order_status in {"pending", "creating", "processing"}:
                 g_conn.execute(
-                    "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = 'Processing_review', "
-                    "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ? AND status != 'paid'",
+                    "UPDATE budget_payment_orders SET status = 'processing', provider_status = 'Processing', "
+                    "provider_payment_id = COALESCE(provider_payment_id, ?) "
+                    "WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
                     (invoice_id, order_id),
                 )
                 g_conn.commit()
-                return {"status": "needs_review", "notify": notify, "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+                return {"status": "processing", "order_id": int(order_id)}
+            g_conn.rollback()
+            return None
             g_conn.execute(
                 "UPDATE budget_payment_orders SET status = 'processing', provider_status = 'Processing', "
                 "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
