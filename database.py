@@ -744,8 +744,14 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
 
         if event_type == "InvoiceProcessing" and str(invoice.get("status", "")).lower() == "processing":
             if not identity_matches or order_status not in {"pending", "creating", "processing"}:
-                g_conn.rollback()
-                return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+                notify = order_status != "needs_review"
+                g_conn.execute(
+                    "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = 'Processing_review', "
+                    "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ? AND status != 'paid'",
+                    (invoice_id, order_id),
+                )
+                g_conn.commit()
+                return {"status": "needs_review", "notify": notify, "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
             g_conn.execute(
                 "UPDATE budget_payment_orders SET status = 'processing', provider_status = 'Processing', "
                 "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ? AND status IN ('pending', 'creating', 'processing')",
@@ -765,17 +771,18 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
             )
             g_conn.commit()
             if status == "needs_review":
-                return {"status": status, "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+                return {"status": status, "notify": order_status != "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
             return {"status": status, "order_id": int(order_id)}
 
         if event_type == "InvoiceInvalid" and str(invoice.get("status", "")).lower() == "invalid":
+            notify = order_status != "needs_review"
             g_conn.execute(
                 "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = 'Invalid', "
                 "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ? AND status != 'paid'",
                 (invoice_id, order_id),
             )
             g_conn.commit()
-            return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+            return {"status": "needs_review", "notify": notify, "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
 
         if event_type != "InvoiceSettled" or str(invoice.get("status", "")).lower() != "settled":
             g_conn.rollback()
@@ -789,13 +796,14 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
             and order_status in {"pending", "creating", "processing"}
         )
         if not payment_matches:
+            notify = order_status != "needs_review"
             g_conn.execute(
                 "UPDATE budget_payment_orders SET status = 'needs_review', provider_status = 'Settled_review', "
                 "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE id = ? AND status != 'paid'",
                 (invoice_id, order_id),
             )
             g_conn.commit()
-            return {"status": "needs_review", "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
+            return {"status": "needs_review", "notify": notify, "order_id": int(order_id), "user_id": int(user_id), "channel_id": int(channel_id)}
 
         old_row = g_conn.execute(
             "SELECT spending_balance FROM settings WHERE guild_id = ?", (guild_id,)

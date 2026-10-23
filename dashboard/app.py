@@ -244,7 +244,9 @@ def ltcpay_webhook():
             event.get("invoiceId", "?"),
         )
         return "Temporary settlement retry", 503, {"Retry-After": "10"}
-    if result.get("status") in {"paid", "needs_review"}:
+    if result.get("status") == "paid" or (
+        result.get("status") == "needs_review" and result.get("notify", True)
+    ):
         _schedule_ltcpay_notice(result)
     return "", 200
 
