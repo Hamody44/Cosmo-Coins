@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from database import get_guild_db
 
 
-BOT_DEVELOPER_NAME = os.getenv("BOT_DEVELOPER_NAME", "Hamody44").strip() or "Hamody44"
+BOT_DEVELOPER_NAME = os.getenv("BOT_DEVELOPER_NAME", "7amody77777").strip() or "7amody77777"
 BOT_KNOWLEDGE_CONTEXT = f"""معلومات تعريفية عن البيئة التي تعمل داخلها:
 - اسم البوت: Cosmo Coins.
 - المطور: {BOT_DEVELOPER_NAME}.
