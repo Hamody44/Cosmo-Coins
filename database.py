@@ -341,6 +341,23 @@ def get_guild_db(guild_id: int):
     ):
         _ensure_guild_db_column(cur, "leveling_daily_reports", column, definition, schema_key)
 
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_voice_config (
+        guild_id INTEGER PRIMARY KEY,
+        is_enabled INTEGER NOT NULL DEFAULT 0
+    )''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_voice_daily (
+        user_id INTEGER NOT NULL,
+        local_date TEXT NOT NULL,
+        seconds REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, local_date)
+    )''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_voice_daily_date ON leveling_voice_daily(local_date, seconds DESC)')
+    cur.execute('''CREATE TABLE IF NOT EXISTS leveling_voice_sessions (
+        user_id INTEGER PRIMARY KEY,
+        channel_id INTEGER NOT NULL,
+        last_tick REAL NOT NULL
+    )''')
+
     # ترقية الجداول في حال وجود قواعد بيانات منشأة مسبقاً
     _ensure_guild_db_column(cur, "premium_info", "custom_banner_url", "TEXT", schema_key)
     _ensure_guild_db_column(cur, "settings", "ticket_log", "INTEGER", schema_key)

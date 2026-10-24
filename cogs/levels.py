@@ -19,6 +19,7 @@ from leveling_store import (
     XP_PER_LEVEL,
     add_level_channel,
     ensure_level_config,
+    ensure_voice_config,
     finish_daily_report,
     get_level_channels,
     get_level_leaderboard,
@@ -27,6 +28,7 @@ from leveling_store import (
     get_retryable_payouts,
     get_salary_history,
     get_salary_tiers,
+    get_voice_leaderboard,
     mature_pending_messages,
     mark_daily_report_send_attempt,
     pending_reports,
@@ -34,13 +36,16 @@ from leveling_store import (
     record_report_failure,
     record_pending_message,
     remove_level_channel,
+    reset_voice_sessions,
     save_daily_report_message,
     set_announcement_channel,
     set_leveling_enabled,
     set_milestone_reward,
     set_salary_tier,
+    set_voice_leveling_enabled,
     should_track_channel,
     start_daily_report,
+    update_voice_sessions,
 )
 
 RIYADH = ZoneInfo("Asia/Riyadh")
@@ -163,34 +168,83 @@ def leaderboard_embed(
     server_name: str,
     server_icon: str | None,
     period_title: str | None,
-    entries: list[dict],
+    text_entries: list[dict],
+    voice_entries: list[dict],
 ) -> discord.Embed:
     embed = discord.Embed(
         title=f"🏆 المتصدرون — {period_title}" if period_title else "🏆 المتصدرون",
-        description="أفضل خمسة أعضاء حسب النقاط المكتسبة",
+        description="",
         color=discord.Color.from_rgb(123, 103, 238),
     )
     _set_guild_embed_author(embed, server_name, server_icon)
     if server_icon:
         embed.set_thumbnail(url=server_icon)
-    if entries:
-        medals = ("🥇", "🥈", "🥉", "🏅", "🏅")
-        lines = [
-            f"{medals[index]} **المركز {index + 1} —** <@{int(entry['user_id'])}>"
+    medals = ("🥇", "🥈", "🥉", "🏅", "🏅")
+    lines = ["**TOP 5 TEXT**"]
+    if text_entries:
+        lines.extend(
+            f"{medals[index]} **#{index + 1}** <@{int(entry['user_id'])}>"
             f"   •   ⭐ النقاط: **{entry['points']:,}**"
-            f"   •   💬 الرسائل المحتسبة: **{entry['messages']:,}**"
-            for index, entry in enumerate(entries[:5])
-        ]
-        embed.description = "\n".join(lines)
+            f"   •   💬 الرسائل: **{entry['messages']:,}**"
+            for index, entry in enumerate(text_entries[:5])
+        )
     else:
-        embed.description = "لا توجد نقاط أو رسائل محتسبة في هذه الفترة بعد."
-    embed.set_footer(text="الترتيب خاص بهذا السيرفر • توقيت الرياض")
+        lines.append("لا توجد نقاط أو رسائل محتسبة في هذه الفترة.")
+
+    lines.extend(["", "**TOP 5 VOICE**"])
+    if voice_entries:
+        lines.extend(
+            f"{medals[index]} **#{index + 1}** <@{int(entry['user_id'])}>"
+            f"   •   ⭐ النقاط: **{entry['points']:,}**"
+            f"   •   ⏱ الوقت: **{format_voice_duration(entry['seconds'])}**"
+            for index, entry in enumerate(voice_entries[:5])
+        )
+    else:
+        lines.append("لا يوجد وقت صوتي مؤهل في هذه الفترة.")
+    embed.description = "\n".join(lines)
+    embed.set_footer(text="التوب النصي والصوتي منفصلان • توقيت الرياض")
     return embed
+
+
+def eligible_voice_users(guild: discord.Guild) -> dict[int, int]:
+    afk_channel = getattr(guild, "afk_channel", None)
+    afk_channel_id = afk_channel.id if afk_channel else None
+    eligible: dict[int, int] = {}
+    channels = [*getattr(guild, "voice_channels", []), *getattr(guild, "stage_channels", [])]
+    for channel in channels:
+        if channel.id == afk_channel_id:
+            continue
+        participants = []
+        for member in getattr(channel, "members", []):
+            voice = getattr(member, "voice", None)
+            if not member.bot and voice and not getattr(voice, "deaf", False) and not getattr(voice, "self_deaf", False):
+                participants.append(member)
+        if len(participants) >= 2:
+            eligible.update({int(member.id): int(channel.id) for member in participants})
+    return eligible
+
+
+def format_voice_duration(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}ث"
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    parts = []
+    if days:
+        parts.append(f"{days}ي")
+    if hours or days:
+        parts.append(f"{hours}س")
+    parts.append(f"{minutes}د")
+    return " ".join(parts)
 
 
 class Leveling(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._voice_bootstrapped: set[int] = set()
+        self._voice_session_lock = asyncio.Lock()
         if not self.leveling_worker.is_running():
             self.leveling_worker.start()
 
@@ -231,11 +285,37 @@ class Leveling(commands.Cog):
         except Exception as exc:
             print(f"Leveling message listener error in guild {message.guild.id}: {exc}")
 
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ):
+        if member.bot or not member.guild:
+            return
+        try:
+            await self.refresh_voice_sessions(member.guild)
+        except Exception as exc:
+            print(f"Voice leveling listener error in guild {member.guild.id}: {exc}")
+
+    async def refresh_voice_sessions(self, guild: discord.Guild):
+        config = await asyncio.to_thread(ensure_voice_config, guild.id)
+        eligible = eligible_voice_users(guild) if config["enabled"] else {}
+        now = time.time()
+        async with self._voice_session_lock:
+            if guild.id not in self._voice_bootstrapped:
+                await asyncio.to_thread(reset_voice_sessions, guild.id, eligible, now)
+                self._voice_bootstrapped.add(guild.id)
+            else:
+                await asyncio.to_thread(update_voice_sessions, guild.id, eligible, now)
+
     @tasks.loop(seconds=15)
     async def leveling_worker(self):
         for guild in list(self.bot.guilds):
             try:
                 await asyncio.to_thread(mature_pending_messages, guild.id)
+                await self.refresh_voice_sessions(guild)
                 await self.process_retryable_payouts(guild)
                 config = await asyncio.to_thread(ensure_level_config, guild.id)
                 if config["enabled"] and config["announcement_channel_id"]:
@@ -562,6 +642,15 @@ class Leveling(commands.Cog):
             return await ctx.send("ℹ️ لم يتم تحديد رومات لاحتساب النقاط بعد.")
         await ctx.send("📚 رومات احتساب النقاط في هذا السيرفر:\n" + "\n".join(f"• <#{channel_id}>" for channel_id in channel_ids))
 
+    @commands.hybrid_command(name="toggle_voice_level_system", description="فتح أو إغلاق نظام نقاط ووقت الفويس لهذا السيرفر")
+    async def toggle_voice_level_system(self, ctx: commands.Context, enabled: bool):
+        if not ctx.guild or not can_manage_level_settings(ctx):
+            return await ctx.send("⛔ مالك السيرفر أو owner-role أو إدارة Discord فقط يمكنهم إعداد النظام.")
+        await asyncio.to_thread(set_voice_leveling_enabled, ctx.guild.id, enabled)
+        await self.refresh_voice_sessions(ctx.guild)
+        state = "مفتوح ويحتسب الوقت تلقائياً في الرومات الصوتية ✅" if enabled else "مغلق ولن يحتسب وقتاً جديداً ⛔"
+        await ctx.send(f"🎙️ نظام الفويس في **{ctx.guild.name}** أصبح {state}.")
+
     @commands.hybrid_command(name="set_level_reward", description="تحديد مكافأة Cosmo لكل مستوى من مضاعفات 10")
     async def set_level_reward(self, ctx: commands.Context, amount: str):
         if not ctx.guild or not can_manage_level_settings(ctx):
@@ -686,7 +775,7 @@ class Leveling(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="top", description="عرض أفضل خمسة أعضاء يومياً أو أسبوعياً أو شهرياً أو أبدياً")
+    @commands.hybrid_command(name="top", description="عرض أفضل خمسة نصياً ثم صوتياً حسب الفترة المحددة")
     @discord.app_commands.choices(period=[
         discord.app_commands.Choice(name="يومي", value="daily"),
         discord.app_commands.Choice(name="أسبوعي", value="weekly"),
@@ -699,24 +788,27 @@ class Leveling(commands.Cog):
             start_at, end_at = period_bounds(period)
         except ValueError as exc:
             return await ctx.send(f"❌ {exc}")
-        entries = await asyncio.to_thread(get_level_leaderboard, ctx.guild.id, start_at, end_at, 5)
         period_name = None if not period or not period.strip() else {
             "daily": "اليومي", "day": "اليومي", "يومي": "اليومي", "اليومي": "اليومي",
             "weekly": "الأسبوعي", "week": "الأسبوعي", "اسبوعي": "الأسبوعي", "أسبوعي": "الأسبوعي", "الأسبوعي": "الأسبوعي",
             "monthly": "الشهري", "month": "الشهري", "شهري": "الشهري", "الشهري": "الشهري",
         }[period.strip().lower()]
-        display_entries = []
-        for entry in entries:
-            member = ctx.guild.get_member(int(entry["user_id"]))
-            display_entries.append({
-                **entry,
-                "display_name": member.display_name if member else f"عضو {entry['user_id']}",
-            })
+        title = f"الترتيب {period_name}" if period_name else None
+        text_entries = await asyncio.to_thread(
+            get_level_leaderboard, ctx.guild.id, start_at, end_at, 5
+        )
+        await self.refresh_voice_sessions(ctx.guild)
+        start_date = datetime.fromtimestamp(start_at, RIYADH).date().isoformat() if start_at is not None else None
+        end_date = datetime.fromtimestamp(end_at, RIYADH).date().isoformat() if end_at is not None else None
+        voice_entries = await asyncio.to_thread(
+            get_voice_leaderboard, ctx.guild.id, start_date, end_date, 5
+        )
         embed = leaderboard_embed(
             ctx.guild.name,
             ctx.guild.icon.url if ctx.guild.icon else None,
-            f"الترتيب {period_name}" if period_name else None,
-            display_entries,
+            title,
+            text_entries,
+            voice_entries,
         )
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 

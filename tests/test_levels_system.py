@@ -16,6 +16,8 @@ from cogs.levels import (
     RIYADH,
     can_manage_level_settings,
     daily_report_dates_due,
+    eligible_voice_users,
+    format_voice_duration,
     leaderboard_embed,
     period_bounds,
     profile_embed,
@@ -229,12 +231,18 @@ class LevelPeriodAndEmbedTests(unittest.TestCase):
         self.assertTrue(any(field.name == "الرسائل المحتسبة" and "505" in field.value for field in profile.fields))
         self.assertIn("توقيت الرياض", profile.footer.text)
 
-        board = leaderboard_embed("سيرفر كوزمو", None, "الترتيب الأسبوعي", [
-            {"user_id": 123, "display_name": "عضو متصدر", "points": 900, "messages": 505},
-        ])
+        board = leaderboard_embed(
+            "سيرفر كوزمو",
+            None,
+            "الترتيب الأسبوعي",
+            [{"user_id": 123, "points": 900, "messages": 505}],
+            [{"user_id": 456, "points": 30, "seconds": 1800}],
+        )
         self.assertIn("الترتيب الأسبوعي", board.title)
         self.assertIn("<@123>", board.description)
         self.assertIn("900", board.description)
+        self.assertIn("<@456>", board.description)
+        self.assertIn("30", board.description)
 
     def test_primary_bot_owner_can_manage_level_commands(self):
         ctx = SimpleNamespace(
@@ -245,14 +253,19 @@ class LevelPeriodAndEmbedTests(unittest.TestCase):
 
 
 class TopCommandTests(unittest.IsolatedAsyncioTestCase):
-    def test_period_is_optional_and_only_has_daily_weekly_monthly_choices(self):
+    def test_top_has_only_an_optional_period_argument(self):
         command = Leveling.top.app_command
+        self.assertEqual([parameter.name for parameter in command.parameters], ["period"])
         period = next(parameter for parameter in command.parameters if parameter.name == "period")
         self.assertFalse(period.required)
         self.assertEqual(
             {choice.value for choice in period.choices},
             {"daily", "weekly", "monthly"},
         )
+        self.assertEqual(Leveling.toggle_voice_level_system.name, "toggle_voice_level_system")
+        self.assertFalse(hasattr(Leveling, "add_voice_level_channel"))
+        self.assertFalse(hasattr(Leveling, "remove_voice_level_channel"))
+        self.assertFalse(hasattr(Leveling, "list_voice_level_channels"))
 
     async def test_top_sends_mentions_inside_embed_without_separate_content(self):
         member = SimpleNamespace(display_name="المتصدر")
@@ -264,19 +277,30 @@ class TopCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         ctx = SimpleNamespace(guild=guild, send=AsyncMock())
         cog = object.__new__(Leveling)
+        cog.refresh_voice_sessions = AsyncMock()
 
         with patch("cogs.levels.get_level_leaderboard", return_value=[{
             "user_id": 123,
             "points": 900,
             "messages": 505,
-        }]):
+        }]) as get_text, patch("cogs.levels.get_voice_leaderboard", return_value=[{
+            "user_id": 456,
+            "points": 61,
+            "seconds": 3660,
+        }]) as get_voice:
             await Leveling.top.callback(cog, ctx, "weekly")
 
+        get_text.assert_called_once_with(551, *period_bounds("weekly"), 5)
+        get_voice.assert_called_once_with(551, "2026-10-19", "2026-10-26", 5)
+        cog.refresh_voice_sessions.assert_awaited_once_with(guild)
         ctx.send.assert_awaited_once()
         self.assertNotIn("content", ctx.send.await_args.kwargs)
         embed = ctx.send.await_args.kwargs["embed"]
         self.assertIn("<@123>", embed.description)
         self.assertIn("505", embed.description)
+        self.assertIn("<@456>", embed.description)
+        self.assertIn("1س 1د", embed.description)
+        self.assertLess(embed.description.index("TOP 5 TEXT"), embed.description.index("TOP 5 VOICE"))
 
     async def test_top_without_period_shows_overall_board_without_period_label(self):
         ctx = SimpleNamespace(
@@ -284,17 +308,63 @@ class TopCommandTests(unittest.IsolatedAsyncioTestCase):
             send=AsyncMock(),
         )
         cog = object.__new__(Leveling)
+        cog.refresh_voice_sessions = AsyncMock()
         entries = [{"user_id": 123, "points": 900, "messages": 505}]
+        voice_entries = [{"user_id": 456, "points": 20, "seconds": 1200}]
 
-        with patch("cogs.levels.get_level_leaderboard", return_value=entries) as get_board:
+        with patch("cogs.levels.get_level_leaderboard", return_value=entries) as get_text, \
+             patch("cogs.levels.get_voice_leaderboard", return_value=voice_entries) as get_voice:
             await Leveling.top.callback(cog, ctx)
 
-        get_board.assert_called_once_with(552, None, None, 5)
+        get_text.assert_called_once_with(552, None, None, 5)
+        get_voice.assert_called_once_with(552, None, None, 5)
         ctx.send.assert_awaited_once()
         embed = ctx.send.await_args.kwargs["embed"]
         self.assertEqual(embed.title, "🏆 المتصدرون")
         self.assertNotIn("الأبدي", embed.title)
         self.assertIn("<@123>", embed.description)
+        self.assertIn("<@456>", embed.description)
+
+    def test_combined_embed_shows_text_first_then_voice_with_points_and_duration(self):
+        self.assertEqual(format_voice_duration(0), "0ث")
+        self.assertEqual(format_voice_duration(45), "45ث")
+        self.assertEqual(format_voice_duration(90061), "1ي 1س 1د")
+        board = leaderboard_embed(
+            "سيرفر كوزمو",
+            None,
+            None,
+            [{"user_id": 123, "points": 900, "messages": 505}],
+            [{"user_id": 321, "points": 120, "seconds": 7200}],
+        )
+        self.assertEqual(board.title, "🏆 المتصدرون")
+        self.assertLess(board.description.index("TOP 5 TEXT"), board.description.index("TOP 5 VOICE"))
+        self.assertIn("<@123>", board.description)
+        self.assertIn("<@321>", board.description)
+        self.assertIn("120", board.description)
+        self.assertIn("2س 0د", board.description)
+
+    def test_voice_eligibility_auto_tracks_temporary_rooms_but_excludes_afk_and_alone(self):
+        def member(user_id, *, bot=False, deaf=False, self_deaf=False, self_mute=False):
+            return SimpleNamespace(
+                id=user_id,
+                bot=bot,
+                voice=SimpleNamespace(deaf=deaf, self_deaf=self_deaf, self_mute=self_mute),
+            )
+
+        tracked = SimpleNamespace(id=10, members=[member(1, self_mute=True), member(2)])
+        one_person = SimpleNamespace(id=11, members=[member(3)])
+        bot_room = SimpleNamespace(id=12, members=[member(4), member(5, bot=True)])
+        afk_room = SimpleNamespace(id=99, members=[member(6), member(7)])
+        temporary_room = SimpleNamespace(id=13, members=[member(8), member(9)])
+        guild = SimpleNamespace(
+            afk_channel=SimpleNamespace(id=99),
+            voice_channels=[tracked, one_person, bot_room, afk_room, temporary_room],
+            stage_channels=[],
+        )
+        self.assertEqual(
+            eligible_voice_users(guild),
+            {1: 10, 2: 10, 8: 13, 9: 13},
+        )
 
 
 class LevelDailyReportStoreTests(IsolatedGuildDatabase):

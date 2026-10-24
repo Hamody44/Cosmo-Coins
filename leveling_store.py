@@ -1,6 +1,9 @@
 """Per-guild storage and idempotent state transitions for the leveling system."""
 
 import time
+from datetime import datetime, time as datetime_time, timedelta
+from zoneinfo import ZoneInfo
+
 from database import get_guild_db
 
 XP_PER_LEVEL = 100
@@ -9,6 +12,7 @@ SPAM_WINDOW_SECONDS = 10
 SPAM_MESSAGE_THRESHOLD = 5
 SPAM_QUARANTINE_SECONDS = 10
 SPAM_WARNING_COOLDOWN_SECONDS = 60
+RIYADH = ZoneInfo("Asia/Riyadh")
 
 
 def ensure_level_config(guild_id: int) -> dict:
@@ -550,3 +554,125 @@ def pending_reports(guild_id: int, now: int | None = None) -> list[tuple[str, in
     rows = [(str(row[0]), int(row[1])) for row in cur.fetchall()]
     conn.close()
     return rows
+
+
+# Voice leveling is intentionally isolated from message XP, salaries, and payouts.
+def ensure_voice_config(guild_id: int) -> dict:
+    conn, cur = get_guild_db(guild_id)
+    cur.execute("INSERT OR IGNORE INTO leveling_voice_config (guild_id) VALUES (?)", (int(guild_id),))
+    row = cur.execute(
+        "SELECT is_enabled FROM leveling_voice_config WHERE guild_id = ?", (int(guild_id),)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return {"enabled": bool(row and row[0])}
+
+
+def set_voice_leveling_enabled(guild_id: int, enabled: bool) -> None:
+    conn, cur = get_guild_db(guild_id)
+    cur.execute(
+        "INSERT INTO leveling_voice_config (guild_id, is_enabled) VALUES (?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET is_enabled = excluded.is_enabled",
+        (int(guild_id), int(bool(enabled))),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _add_voice_interval(cur, user_id: int, started_at: float, ended_at: float) -> None:
+    cursor = datetime.fromtimestamp(float(started_at), RIYADH)
+    end = datetime.fromtimestamp(float(ended_at), RIYADH)
+    while cursor < end:
+        next_day = datetime.combine(cursor.date() + timedelta(days=1), datetime_time.min, tzinfo=RIYADH)
+        segment_end = min(end, next_day)
+        seconds = (segment_end - cursor).total_seconds()
+        local_date = cursor.date().isoformat()
+        cur.execute(
+            "INSERT INTO leveling_voice_daily (user_id, local_date, seconds) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id, local_date) DO UPDATE SET seconds = seconds + excluded.seconds",
+            (int(user_id), local_date, seconds),
+        )
+        cursor = segment_end
+
+
+def reset_voice_sessions(guild_id: int, eligible_users: dict[int, int], now: float | None = None) -> None:
+    """Discard stale process sessions without crediting bot downtime, then seed live eligible users."""
+    now = float(time.time() if now is None else now)
+    conn, _ = get_guild_db(guild_id)
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("DELETE FROM leveling_voice_sessions")
+    conn.executemany(
+        "INSERT OR REPLACE INTO leveling_voice_sessions (user_id, channel_id, last_tick) VALUES (?, ?, ?)",
+        [(int(user_id), int(channel_id), now) for user_id, channel_id in eligible_users.items()],
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_voice_sessions(guild_id: int, eligible_users: dict[int, int], now: float | None = None) -> None:
+    """Accrue time once per active session and atomically reconcile channel eligibility."""
+    now = float(time.time() if now is None else now)
+    eligible = {int(user_id): int(channel_id) for user_id, channel_id in eligible_users.items()}
+    conn, _ = get_guild_db(guild_id)
+    conn.execute("BEGIN IMMEDIATE")
+    rows = conn.execute(
+        "SELECT user_id, channel_id, last_tick FROM leveling_voice_sessions"
+    ).fetchall()
+    existing_users = set()
+    for user_id, channel_id, last_tick in rows:
+        user_id, channel_id = int(user_id), int(channel_id)
+        last_tick = float(last_tick)
+        checkpoint = max(now, last_tick)
+        if checkpoint > last_tick:
+            _add_voice_interval(conn, user_id, last_tick, checkpoint)
+        if eligible.get(user_id) == channel_id:
+            conn.execute(
+                "UPDATE leveling_voice_sessions SET last_tick = ? WHERE user_id = ?",
+                (checkpoint, user_id),
+            )
+            existing_users.add(user_id)
+        else:
+            conn.execute("DELETE FROM leveling_voice_sessions WHERE user_id = ?", (user_id,))
+
+    for user_id, channel_id in eligible.items():
+        if user_id not in existing_users:
+            conn.execute(
+                "INSERT OR REPLACE INTO leveling_voice_sessions (user_id, channel_id, last_tick) VALUES (?, ?, ?)",
+                (user_id, channel_id, now),
+            )
+    conn.commit()
+    conn.close()
+
+
+def get_voice_leaderboard(
+    guild_id: int,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 5,
+) -> list[dict]:
+    limit = max(1, min(int(limit), 100))
+    conn, cur = get_guild_db(guild_id)
+    clauses = []
+    params: list[object] = []
+    if start_date is not None:
+        clauses.append("local_date >= ?")
+        params.append(str(start_date))
+    if end_date is not None:
+        clauses.append("local_date < ?")
+        params.append(str(end_date))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = cur.execute(
+        "SELECT user_id, SUM(seconds) AS voice_seconds FROM leveling_voice_daily "
+        f"{where} GROUP BY user_id ORDER BY voice_seconds DESC, user_id ASC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+    conn.close()
+    result = []
+    for user_id, seconds in rows:
+        total_seconds = max(0, int(float(seconds or 0)))
+        result.append({
+            "user_id": int(user_id),
+            "seconds": total_seconds,
+            "points": total_seconds // 60,
+        })
+    return result
