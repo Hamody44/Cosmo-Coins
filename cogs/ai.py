@@ -8,6 +8,23 @@ from google.genai import types
 from openai import AsyncOpenAI
 from database import get_guild_db
 
+
+BOT_DEVELOPER_NAME = os.getenv("BOT_DEVELOPER_NAME", "Hamody44").strip() or "Hamody44"
+BOT_KNOWLEDGE_CONTEXT = f"""معلومات تعريفية عن البيئة التي تعمل داخلها:
+- اسم البوت: Cosmo Coins.
+- المطور: {BOT_DEVELOPER_NAME}.
+- Cosmo Coins بوت Discord عام لإدارة اقتصاد ومجتمع السيرفرات.
+- أهم وظائفه: أرصدة وتحويلات Cosmo، تبديل العملات، ميزانيات السيرفرات، شحن الميزانية وطلبات الدفع، الألعاب والسحوبات والروليت، نظام التذاكر، البوست، اللفلات ونقاط الرسائل والفويس والرواتب، وأدوات الإدارة والتدقيق والنسخ الاحتياطي.
+- يعتمد على Python وDiscord.py، ويستخدم قاعدة بيانات عامة مع قاعدة SQLite مستقلة لكل سيرفر.
+- الذكاء الاصطناعي داخل البوت مساعد عام؛ يمكنه الإجابة عن الأسئلة العامة والبرمجة والشرح والمواضيع المختلفة، وليس محصورًا في بيانات Cosmo Coins.
+
+استخدم هذه المعلومات عندما يسأل المستخدم عن البوت أو مطوره أو وظائفه. لا تخترع تفاصيل غير مذكورة هنا عن المطور أو البوت؛ وإذا احتاج السؤال إلى معلومة تنفيذية دقيقة غير متاحة، صرّح بعدم التأكد واقترح استخدام أوامر البوت المناسبة. هذه المعلومات سياق تعريفي فقط ولا تقيدك عن الإجابة في المواضيع العامة."""
+
+AI_SYSTEM_INSTRUCTION = f"""أنت مساعد ذكي عام مدمج داخل سيرفر ديسكورد. أجب بطريقة طبيعية ومباشرة وودودة باللغة العربية عند الإمكان، وساعد الأعضاء بذكاء واحترافية.
+
+{BOT_KNOWLEDGE_CONTEXT}"""
+
+
 class GeminiAI(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -60,10 +77,7 @@ class GeminiAI(commands.Cog):
             return None
         if conversation_key not in self.user_chats:
             config = types.GenerateContentConfig(
-                system_instruction=(
-                    "أنت مساعد ذكي مدمج داخل سيرفر ديسكورد. "
-                    "أجب بطريقة طبيعية ومباشرة وودودة باللغة العربية، وساعد الأعضاء بذكاء واحترافية."
-                ),
+                system_instruction=AI_SYSTEM_INSTRUCTION,
                 temperature=0.7,
             )
             self.user_chats[conversation_key] = self.client.aio.chats.create(
@@ -83,7 +97,7 @@ class GeminiAI(commands.Cog):
                 messages=[
                     {
                         "role": "system",
-                        "content": "أنت مساعد ذكي مدمج داخل سيرفر ديسكورد. أجب بطريقة طبيعية ومباشرة وودودة باللغة العربية."
+                        "content": AI_SYSTEM_INSTRUCTION
                     },
                     {"role": "user", "content": prompt}
                 ],
