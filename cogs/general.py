@@ -141,7 +141,7 @@ class HelpView(discord.ui.View):
                     "• `/add_level_channel` و`/remove_level_channel` و`/list_level_channels` — تحديد رومات احتساب الرسائل.\n"
                     "• `/toggle_level_system <true|false>` — فتح النظام أو إغلاقه لهذا السيرفر فقط.\n"
                     "• `/set_level_reward <amount>` — مكافأة من ميزانية السيرفر لكل مستوى من مضاعفات 10.\n"
-                    "• `/level_points` و`/top <daily|weekly|monthly|all>` — إحصاءات النقاط والمستوى والمتصدرون عبر embeds مع منشن المتصدرين.\n"
+                    "• `/level_points` و`/top [daily|weekly|monthly]` — إحصاءات النقاط والمستوى والمتصدرون عبر embeds مع منشن المتصدرين.\n"
                     "• `/set_level_announcement_channel` و`/set_level_salary <500|1000|2000|3000> <amount>` — روم التقرير ومبالغ شرائح admin.\n"
                     "• `/level_salary_history [member] [limit]` — سجل الرواتب السابقة؛ متاح لمالك البوت ومالك السيرفر وowner-role والإدارة المخولة.\n"
                     "كل 100 نقطة ترفع المستوى؛ تُمنح نقطة بحد مرة كل 30 ثانية. 5 رسائل خلال 10 ثوانٍ تُعد سباماً ولا تُحتسب. التصفير والتقرير اليومي الساعة 23:55 بتوقيت الرياض؛ الأسبوع يبدأ الاثنين والشهر يوم 1.\n"

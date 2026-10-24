@@ -61,8 +61,10 @@ def can_manage_level_settings(ctx: commands.Context) -> bool:
     return is_bot_admin(ctx)
 
 
-def period_bounds(period: str, now: datetime | None = None):
+def period_bounds(period: str | None, now: datetime | None = None):
     """Return UTC epoch bounds for a Riyadh-local calendar period."""
+    if period is None or not period.strip():
+        return None, None
     period = period.strip().lower()
     aliases = {
         "daily": "daily", "day": "daily", "يومي": "daily", "اليومي": "daily",
@@ -160,11 +162,11 @@ def profile_embed(
 def leaderboard_embed(
     server_name: str,
     server_icon: str | None,
-    period_title: str,
+    period_title: str | None,
     entries: list[dict],
 ) -> discord.Embed:
     embed = discord.Embed(
-        title=f"🏆 المتصدرون — {period_title}",
+        title=f"🏆 المتصدرون — {period_title}" if period_title else "🏆 المتصدرون",
         description="أفضل خمسة أعضاء حسب النقاط المكتسبة",
         color=discord.Color.from_rgb(123, 103, 238),
     )
@@ -689,9 +691,8 @@ class Leveling(commands.Cog):
         discord.app_commands.Choice(name="يومي", value="daily"),
         discord.app_commands.Choice(name="أسبوعي", value="weekly"),
         discord.app_commands.Choice(name="شهري", value="monthly"),
-        discord.app_commands.Choice(name="أبدي", value="all"),
     ])
-    async def top(self, ctx: commands.Context, period: str):
+    async def top(self, ctx: commands.Context, period: str | None = None):
         if not ctx.guild:
             return await ctx.send("⛔ استخدم هذا الأمر داخل السيرفر.")
         try:
@@ -699,11 +700,10 @@ class Leveling(commands.Cog):
         except ValueError as exc:
             return await ctx.send(f"❌ {exc}")
         entries = await asyncio.to_thread(get_level_leaderboard, ctx.guild.id, start_at, end_at, 5)
-        period_name = {
+        period_name = None if not period or not period.strip() else {
             "daily": "اليومي", "day": "اليومي", "يومي": "اليومي", "اليومي": "اليومي",
             "weekly": "الأسبوعي", "week": "الأسبوعي", "اسبوعي": "الأسبوعي", "أسبوعي": "الأسبوعي", "الأسبوعي": "الأسبوعي",
             "monthly": "الشهري", "month": "الشهري", "شهري": "الشهري", "الشهري": "الشهري",
-            "all": "الأبدي", "alltime": "الأبدي", "all-time": "الأبدي", "ابدي": "الأبدي", "أبدي": "الأبدي", "الكل": "الأبدي",
         }[period.strip().lower()]
         display_entries = []
         for entry in entries:
@@ -715,7 +715,7 @@ class Leveling(commands.Cog):
         embed = leaderboard_embed(
             ctx.guild.name,
             ctx.guild.icon.url if ctx.guild.icon else None,
-            f"الترتيب {period_name}",
+            f"الترتيب {period_name}" if period_name else None,
             display_entries,
         )
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())

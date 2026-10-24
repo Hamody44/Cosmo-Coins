@@ -218,6 +218,7 @@ class LevelPeriodAndEmbedTests(unittest.TestCase):
     def test_profile_and_leaderboard_embeds_preserve_guild_stats_and_progress(self):
         self.assertEqual(Leveling.top.name, "top")
         self.assertEqual(period_bounds("all"), (None, None))
+        self.assertEqual(period_bounds(None), (None, None))
         profile = profile_embed("سيرفر كوزمو", None, "عضو تجريبي", None, {
             "rank": 2, "messages": 505, "level": 10, "points": 900,
             "next_level_points": 100, "progress": 0,
@@ -244,6 +245,15 @@ class LevelPeriodAndEmbedTests(unittest.TestCase):
 
 
 class TopCommandTests(unittest.IsolatedAsyncioTestCase):
+    def test_period_is_optional_and_only_has_daily_weekly_monthly_choices(self):
+        command = Leveling.top.app_command
+        period = next(parameter for parameter in command.parameters if parameter.name == "period")
+        self.assertFalse(period.required)
+        self.assertEqual(
+            {choice.value for choice in period.choices},
+            {"daily", "weekly", "monthly"},
+        )
+
     async def test_top_sends_mentions_inside_embed_without_separate_content(self):
         member = SimpleNamespace(display_name="المتصدر")
         guild = SimpleNamespace(
@@ -267,6 +277,24 @@ class TopCommandTests(unittest.IsolatedAsyncioTestCase):
         embed = ctx.send.await_args.kwargs["embed"]
         self.assertIn("<@123>", embed.description)
         self.assertIn("505", embed.description)
+
+    async def test_top_without_period_shows_overall_board_without_period_label(self):
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=552, name="سيرفر الاختبار", icon=None, get_member=lambda _user_id: None),
+            send=AsyncMock(),
+        )
+        cog = object.__new__(Leveling)
+        entries = [{"user_id": 123, "points": 900, "messages": 505}]
+
+        with patch("cogs.levels.get_level_leaderboard", return_value=entries) as get_board:
+            await Leveling.top.callback(cog, ctx)
+
+        get_board.assert_called_once_with(552, None, None, 5)
+        ctx.send.assert_awaited_once()
+        embed = ctx.send.await_args.kwargs["embed"]
+        self.assertEqual(embed.title, "🏆 المتصدرون")
+        self.assertNotIn("الأبدي", embed.title)
+        self.assertIn("<@123>", embed.description)
 
 
 class LevelDailyReportStoreTests(IsolatedGuildDatabase):
