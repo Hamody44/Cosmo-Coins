@@ -71,7 +71,10 @@
             {% if user %}
                 <a href="/profile" class="btn btn-outline-info btn-sm">👤 الملف الشخصي</a>
                 <a href="/servers" class="btn btn-outline-light btn-sm">🏛️ السيرفرات</a>
-                <a href="/logout" class="btn btn-danger btn-sm">خروج</a>
+                <form method="post" action="{{ url_for('logout') }}" class="m-0">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-danger btn-sm">خروج</button>
+                </form>
             {% else %}
                 <a href="/login" class="btn btn-discord btn-sm">تسجيل الدخول بديسكورد</a>
             {% endif %}

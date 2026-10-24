@@ -125,16 +125,10 @@ def get_global_db():
     return conn, conn.cursor()
 
 def get_bot_guild_ids():
-    if not BOT_TOKEN:
+    if _discord_bot is None:
         return set()
     try:
-        r = requests.get(
-            f"{DISCORD_API_BASE}/users/@me/guilds",
-            headers={"Authorization": f"Bot {BOT_TOKEN}"},
-            timeout=5
-        )
-        if r.status_code == 200:
-            return {int(g["id"]) for g in r.json()}
+        return {int(guild.id) for guild in _discord_bot.guilds}
     except Exception as e:
         print(f"Error fetching bot guilds: {e}")
     return set()
@@ -336,7 +330,7 @@ def login():
     })
     return redirect(discord_auth_url)
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def logout():
     session.clear()
     return redirect(url_for("index"))
@@ -533,7 +527,6 @@ def manage(guild_id):
                 patch_payload = {}
                 if new_nick:
                     patch_payload["nick"] = new_nick[:32]
-                    cur.execute("UPDATE premium_info SET custom_name = ? WHERE guild_id = ?", (new_nick[:32], guild_id))
 
                 if banner_link:
                     fetched = fetch_public_image(banner_link)
@@ -541,8 +534,6 @@ def manage(guild_id):
                         content_type, image_bytes = fetched
                         b64_str = base64.b64encode(image_bytes).decode("utf-8")
                         patch_payload["banner"] = f"data:{content_type};base64,{b64_str}"
-                        cur.execute("UPDATE premium_info SET custom_banner_url = ? WHERE guild_id = ?", (banner_link, guild_id))
-                        banner_url = banner_link
                     else:
                         flash("تعذر استخدام رابط البنر: يجب أن يكون HTTPS لصورة عامة صالحة وألا يتجاوز 8MB.", "warning")
 
@@ -552,8 +543,6 @@ def manage(guild_id):
                         content_type, image_bytes = fetched
                         b64_str = base64.b64encode(image_bytes).decode("utf-8")
                         patch_payload["avatar"] = f"data:{content_type};base64,{b64_str}"
-                        cur.execute("UPDATE premium_info SET custom_avatar_url = ? WHERE guild_id = ?", (avatar_link, guild_id))
-                        avatar_url = avatar_link
                     else:
                         flash("تعذر استخدام رابط الصورة: يجب أن يكون HTTPS لصورة عامة صالحة وألا يتجاوز 8MB.", "warning")
 
@@ -571,19 +560,39 @@ def manage(guild_id):
                     )
                     currency_label = stored_currency_label or "Cosmo"
 
+                identity_update_succeeded = None
                 if patch_payload:
                     try:
-                        requests.patch(
+                        response = requests.patch(
                             f"{DISCORD_API_BASE}/guilds/{guild_id}/members/@me",
                             headers=bot_headers,
                             json=patch_payload,
                             timeout=8
                         )
+                        if not 200 <= response.status_code < 300:
+                            raise requests.HTTPError(f"Discord returned HTTP {response.status_code}")
+                        identity_update_succeeded = True
                     except Exception as e:
                         print(f"Error updating bot member in Discord: {e}")
+                        identity_update_succeeded = False
+
+                if identity_update_succeeded:
+                    if "nick" in patch_payload:
+                        cur.execute("UPDATE premium_info SET custom_name = ? WHERE guild_id = ?", (patch_payload["nick"], guild_id))
+                    if "banner" in patch_payload:
+                        cur.execute("UPDATE premium_info SET custom_banner_url = ? WHERE guild_id = ?", (banner_link, guild_id))
+                        banner_url = banner_link
+                    if "avatar" in patch_payload:
+                        cur.execute("UPDATE premium_info SET custom_avatar_url = ? WHERE guild_id = ?", (avatar_link, guild_id))
+                        avatar_url = avatar_link
 
                 conn.commit()
-                flash("تم تحديث مظهر وهوية البوت في السيرفر بنجاح!", "success")
+                if identity_update_succeeded is False:
+                    flash("رفض Discord تحديث هوية البوت؛ لم تُحفظ تغييرات الاسم أو الصور. تحقق من صلاحيات البوت وحاول مجدداً.", "danger")
+                elif identity_update_succeeded:
+                    flash("تم تحديث مظهر وهوية البوت في السيرفر بنجاح!", "success")
+                else:
+                    flash("تم حفظ إعدادات العملة.", "success")
                 conn.close()
                 return redirect(url_for("manage", guild_id=guild_id))
 

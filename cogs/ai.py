@@ -55,10 +55,10 @@ class GeminiAI(commands.Cog):
             print(f"[DEBUG] خطأ أثناء فحص حالة الذكاء الاصطناعي: {e}")
             return True
 
-    async def get_user_chat(self, user_id: int):
+    async def get_user_chat(self, conversation_key):
         if not self.client:
             return None
-        if user_id not in self.user_chats:
+        if conversation_key not in self.user_chats:
             config = types.GenerateContentConfig(
                 system_instruction=(
                     "أنت مساعد ذكي مدمج داخل سيرفر ديسكورد. "
@@ -66,11 +66,11 @@ class GeminiAI(commands.Cog):
                 ),
                 temperature=0.7,
             )
-            self.user_chats[user_id] = self.client.aio.chats.create(
+            self.user_chats[conversation_key] = self.client.aio.chats.create(
                 model="gemini-3.8-flash",
                 config=config
             )
-        return self.user_chats[user_id]
+        return self.user_chats[conversation_key]
 
     async def ask_backup_ai(self, prompt: str) -> str:
         """استدعاء الموديل الاحتياطي المجاني عبر OpenRouter"""
@@ -95,20 +95,23 @@ class GeminiAI(commands.Cog):
             print(f"[DEBUG] خطأ أثناء توليد الرد من المزود الاحتياطي: {e}")
             return f"⚠️ خطأ أثناء توليد الرد من الخادم البديل: {e}"
 
-    async def generate_response(self, user_id: int, prompt: str) -> str:
+    async def generate_response(
+        self, user_id: int, prompt: str, guild_id: int | None = None, channel_id: int | None = None
+    ) -> str:
+        conversation_key = (int(guild_id or 0), int(channel_id or 0), int(user_id))
         if not self.client:
             if self.backup_client:
                 return await self.ask_backup_ai(prompt)
             return "❌ خدمة الذكاء الاصطناعي غير مفعلة؛ يرجى التأكد من وضع المفاتيح في ملف `.env`."
         
         try:
-            chat = await self.get_user_chat(user_id)
+            chat = await self.get_user_chat(conversation_key)
             response = await chat.send_message(prompt)
             return response.text or "عذراً، لم أستطع استخراج إجابة."
         except Exception as e:
             err_str = str(e)
             print(f"[DEBUG] Gemini Error: {err_str}")
-            self.user_chats.pop(user_id, None)
+            self.user_chats.pop(conversation_key, None)
 
             # عند حدوث 503 أو أي خطأ في جيميناي يتم التحويل تلقائياً
             print("⚠️ تعثر رد Gemini، جاري التبديل التلقائي إلى المزود الاحتياطي...")
@@ -147,7 +150,11 @@ class GeminiAI(commands.Cog):
                 cur.execute("ALTER TABLE settings ADD COLUMN ai_enabled INTEGER DEFAULT 1")
                 conn.commit()
 
-            cur.execute("UPDATE settings SET ai_enabled = ? WHERE guild_id = ?", (is_enable, ctx.guild.id))
+            cur.execute(
+                "INSERT INTO settings (guild_id, ai_enabled) VALUES (?, ?) "
+                "ON CONFLICT(guild_id) DO UPDATE SET ai_enabled = excluded.ai_enabled",
+                (ctx.guild.id, is_enable),
+            )
             conn.commit()
             conn.close()
 
@@ -168,7 +175,9 @@ class GeminiAI(commands.Cog):
             return await ctx.send("⛔ ميزة الذكاء الاصطناعي معطلة في هذا السيرفر حالياً.", ephemeral=True)
 
         await ctx.defer()
-        reply_text = await self.generate_response(ctx.author.id, prompt)
+        reply_text = await self.generate_response(
+            ctx.author.id, prompt, ctx.guild.id if ctx.guild else None, ctx.channel.id
+        )
         await self.send_split_message(ctx, f"💬 **{ctx.author.mention}**:\n{reply_text}")
 
     @commands.hybrid_command(
@@ -180,8 +189,9 @@ class GeminiAI(commands.Cog):
         if ctx.guild and not self.is_ai_enabled(ctx.guild.id):
             return await ctx.send("⛔ ميزة الذكاء الاصطناعي معطلة في هذا السيرفر حالياً.", ephemeral=True)
 
-        if ctx.author.id in self.user_chats:
-            del self.user_chats[ctx.author.id]
+        conversation_key = (int(ctx.guild.id if ctx.guild else 0), int(ctx.channel.id), int(ctx.author.id))
+        if conversation_key in self.user_chats:
+            del self.user_chats[conversation_key]
             await ctx.send("🧹 تم مسح سياق محادثتك السابقة بنجاح!")
         else:
             await ctx.send("ℹ️ ليس لديك محادثة سابقة محفوظة لمسحها.")
@@ -200,7 +210,9 @@ class GeminiAI(commands.Cog):
                 return await message.reply("أهلاً بك! كيف يمكنني مساعدتك اليوم؟ 🤖")
 
             async with message.channel.typing():
-                reply_text = await self.generate_response(message.author.id, clean_content)
+                reply_text = await self.generate_response(
+                    message.author.id, clean_content, message.guild.id, message.channel.id
+                )
                 if len(reply_text) <= 1900:
                     await message.reply(reply_text)
                 else:

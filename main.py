@@ -70,27 +70,33 @@ def run_tunnel():
 async def check_premium_expiry_task():
     now = int(time.time())
     for guild in bot.guilds:
-        g_conn, g_cur = get_guild_db(guild.id)
-        g_cur.execute("SELECT premium_end FROM premium_info WHERE premium_end > 0 AND premium_end <= ?", (now,))
-        row = g_cur.fetchone()
-        if row:
-            g_cur.execute("UPDATE premium_info SET premium_end = 0, custom_banner_url = NULL WHERE guild_id = ?", (guild.id,))
-            g_conn.commit()
-            if guild.me:
-                try:
-                    await guild.me.edit(nick=None)
-                except:
-                    pass
-                try:
-                    await guild.me.edit(avatar=None)
-                except:
-                    pass
-                try:
-                    route = discord.http.Route("PATCH", "/guilds/{guild_id}/members/@me", guild_id=guild.id)
-                    await bot.http.request(route, json={"banner": None})
-                except:
-                    pass
-        g_conn.close()
+        g_conn = None
+        try:
+            g_conn, g_cur = get_guild_db(guild.id)
+            g_cur.execute("SELECT premium_end FROM premium_info WHERE premium_end > 0 AND premium_end <= ?", (now,))
+            row = g_cur.fetchone()
+            if row:
+                g_cur.execute("UPDATE premium_info SET premium_end = 0, custom_banner_url = NULL WHERE guild_id = ?", (guild.id,))
+                g_conn.commit()
+                if guild.me:
+                    try:
+                        await guild.me.edit(nick=None)
+                    except Exception:
+                        pass
+                    try:
+                        await guild.me.edit(avatar=None)
+                    except Exception:
+                        pass
+                    try:
+                        route = discord.http.Route("PATCH", "/guilds/{guild_id}/members/@me", guild_id=guild.id)
+                        await bot.http.request(route, json={"banner": None})
+                    except Exception:
+                        pass
+        except Exception as exc:
+            print(f"⚠️ تعذر فحص انتهاء البريميوم في السيرفر {guild.id}: {exc}")
+        finally:
+            if g_conn:
+                g_conn.close()
 
 @bot.event
 async def on_message(message: discord.Message):

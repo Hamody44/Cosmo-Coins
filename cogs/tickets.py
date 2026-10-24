@@ -1,4 +1,6 @@
 import discord
+import asyncio
+from functools import wraps
 from discord.ext import commands
 import io
 import datetime
@@ -7,6 +9,20 @@ from database import (
     get_guild_db, is_bot_admin, PRIMARY_OWNER_ID,
     get_guild_management_role_ids, has_guild_role,
 )
+
+_ticket_creation_locks: dict[tuple[int, int], asyncio.Lock] = {}
+
+
+def serialize_ticket_creation(callback):
+    @wraps(callback)
+    async def wrapped(view, interaction, button):
+        guild = interaction.guild
+        user = interaction.user
+        key = (int(guild.id), int(user.id))
+        lock = _ticket_creation_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            return await callback(view, interaction, button)
+    return wrapped
 
 def can_manage_ticket_member(guild, member, admin_role_id=None, owner_role_id=None) -> bool:
     """صلاحيات التذاكر التشغيلية: owner/admin المعرّفان ومالكو السيرفر."""
@@ -210,11 +226,12 @@ class TicketControlView(discord.ui.View):
                 embed.add_field(name="📅 تاريخ الفتح:", value=f"`{opened_at}`", inline=False)
                 await log_chan.send(embed=embed, file=transcript_file)
 
-        g_cur.execute("DELETE FROM tickets WHERE channel_id = ?", (interaction.channel.id,))
-        g_conn.commit()
-        g_conn.close()
-
-        await interaction.channel.delete(reason=f"Deleted by {interaction.user.name}")
+        try:
+            await interaction.channel.delete(reason=f"Deleted by {interaction.user.name}")
+            g_cur.execute("DELETE FROM tickets WHERE channel_id = ?", (interaction.channel.id,))
+            g_conn.commit()
+        finally:
+            g_conn.close()
 
 
 # واجهة زر فتح التذكرة الأساسية
@@ -228,6 +245,7 @@ class TicketCreateView(discord.ui.View):
         emoji="📩",
         custom_id="persistent_open_ticket_button"
     )
+    @serialize_ticket_creation
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         user = interaction.user
@@ -245,6 +263,8 @@ class TicketCreateView(discord.ui.View):
                     f"⚠️ لديك تذكرة مفتوحة بالفعل: {existing_channel.mention}",
                     ephemeral=True
                 )
+            g_cur.execute("UPDATE tickets SET is_closed = 1 WHERE channel_id = ? AND is_closed = 0", (existing_ticket[0],))
+            g_conn.commit()
 
         await interaction.response.defer(ephemeral=True)
 
@@ -263,6 +283,7 @@ class TicketCreateView(discord.ui.View):
                     overwrites[staff_role] = discord.PermissionOverwrite(
                         view_channel=True, send_messages=True, read_message_history=True
                     )
+        g_conn.close()
 
         channel_name = f"ticket-{user.name[:10]}"
         ticket_channel = await guild.create_text_channel(
@@ -273,12 +294,25 @@ class TicketCreateView(discord.ui.View):
         )
 
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        g_cur.execute(
-            "INSERT INTO tickets (channel_id, user_id, opened_at, is_closed) VALUES (?, ?, ?, 0)",
-            (ticket_channel.id, user.id, now_str)
-        )
-        g_conn.commit()
-        g_conn.close()
+        ticket_conn = None
+        try:
+            ticket_conn, ticket_cur = get_guild_db(guild.id)
+            ticket_cur.execute(
+                "INSERT INTO tickets (channel_id, user_id, opened_at, is_closed) VALUES (?, ?, ?, 0)",
+                (ticket_channel.id, user.id, now_str)
+            )
+            ticket_conn.commit()
+        except Exception:
+            if ticket_conn:
+                ticket_conn.rollback()
+            try:
+                await ticket_channel.delete(reason="Ticket database registration failed")
+            except Exception:
+                pass
+            raise
+        finally:
+            if ticket_conn:
+                ticket_conn.close()
 
         # رسالة الترحيب مرفقة بالأزرار التفاعلية
         embed = discord.Embed(
@@ -498,11 +532,12 @@ class Tickets(commands.Cog):
                 embed.add_field(name="📅 تاريخ الفتح:", value=f"`{opened_at}`", inline=False)
                 await log_chan.send(embed=embed, file=transcript_file)
 
-        g_cur.execute("DELETE FROM tickets WHERE channel_id = ?", (ctx.channel.id,))
-        g_conn.commit()
-        g_conn.close()
-
-        await ctx.channel.delete(reason=f"Deleted by {ctx.author.name}")
+        try:
+            await ctx.channel.delete(reason=f"Deleted by {ctx.author.name}")
+            g_cur.execute("DELETE FROM tickets WHERE channel_id = ?", (ctx.channel.id,))
+            g_conn.commit()
+        finally:
+            g_conn.close()
 
 async def setup(bot):
     await bot.add_cog(Tickets(bot))

@@ -1,5 +1,7 @@
 import unittest
 import os
+import tempfile
+import time
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
@@ -29,6 +31,65 @@ class DashboardSecurityTests(unittest.TestCase):
             session["oauth_state"] = "expected-state"
         response = self.client.get("/callback?code=unused&state=wrong")
         self.assertEqual(response.status_code, 400)
+
+    def test_logout_requires_post_and_valid_csrf_token(self):
+        with self.client.session_transaction() as session:
+            session["user"] = {"id": "123", "username": "test"}
+            session["csrf_token"] = "logout-csrf"
+
+        self.assertEqual(self.client.get("/logout").status_code, 405)
+        self.assertEqual(self.client.post("/logout").status_code, 400)
+        response = self.client.post("/logout", data={"csrf_token": "logout-csrf"})
+        self.assertEqual(response.status_code, 302)
+        with self.client.session_transaction() as session:
+            self.assertNotIn("user", session)
+
+    def test_bot_guild_ids_come_from_running_gateway_cache(self):
+        bot = type("Bot", (), {"guilds": [type("Guild", (), {"id": 123})(), type("Guild", (), {"id": 456})()]})()
+        with patch.object(dashboard, "_discord_bot", bot):
+            self.assertEqual(dashboard.get_bot_guild_ids(), {123, 456})
+
+    def test_failed_discord_identity_patch_does_not_persist_local_identity(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                os.makedirs("guilds_data", exist_ok=True)
+                guild_id = 987654
+                conn, cur = dashboard.get_guild_db(guild_id)
+                cur.execute(
+                    "INSERT INTO premium_info (guild_id, premium_end) VALUES (?, ?)",
+                    (guild_id, int(time.time()) + 3600),
+                )
+                conn.commit()
+                conn.close()
+
+                with self.client.session_transaction() as session:
+                    session["user"] = {"id": "123", "username": "test"}
+                    session["access_token"] = "oauth-token"
+                    session["csrf_token"] = "identity-csrf"
+
+                denied = type("Response", (), {"status_code": 403})()
+                with patch("dashboard.app.user_can_manage_guild", return_value=True), \
+                     patch("dashboard.app.get_bot_guild_ids", return_value={guild_id}), \
+                     patch("dashboard.app.requests.patch", return_value=denied):
+                    response = self.client.post(f"/manage/{guild_id}", data={
+                        "csrf_token": "identity-csrf",
+                        "action": "update_bot_identity",
+                        "bot_nick": "new bot name",
+                        "currency_name": "Coins",
+                    })
+
+                self.assertEqual(response.status_code, 302)
+                conn, cur = dashboard.get_guild_db(guild_id)
+                row = cur.execute(
+                    "SELECT custom_name, custom_currency_name FROM premium_info WHERE guild_id = ?",
+                    (guild_id,),
+                ).fetchone()
+                conn.close()
+                self.assertEqual(row, (None, "Coins"))
+            finally:
+                os.chdir(original_cwd)
 
     def test_post_without_csrf_token_is_rejected_before_route_logic(self):
         response = self.client.post("/profile", data={})

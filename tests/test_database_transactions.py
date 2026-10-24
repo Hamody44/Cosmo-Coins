@@ -117,6 +117,47 @@ class FinancialTransactionTests(unittest.TestCase):
             database.update_balance(14, -6)
         self.assertEqual(self.balance(14), 5)
 
+    def test_balance_credit_rejects_sqlite_integer_overflow(self):
+        with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO balances (user_id, balance) VALUES (?, ?)",
+                (140, database.MAX_SQLITE_INTEGER),
+            )
+        with self.assertRaises(ValueError):
+            database.update_balance(140, 1)
+        self.assertEqual(self.balance(140), database.MAX_SQLITE_INTEGER)
+
+    def test_parse_amount_keeps_large_integer_precision_and_truncates_fraction(self):
+        self.assertEqual(database.parse_amount("9007199254740993"), 9_007_199_254_740_993)
+        self.assertEqual(database.parse_amount("1.239k"), 1239)
+        self.assertEqual(database.parse_amount("1.9"), 1)
+        with self.assertRaises(ValueError):
+            database.parse_amount("")
+
+    def test_concurrent_server_budget_deductions_never_overspend(self):
+        with database.sqlite3.connect(self.cosmo_db_path) as conn:
+            conn.execute("ALTER TABLE settings ADD COLUMN spending_balance INTEGER DEFAULT 0")
+            conn.execute("INSERT INTO settings (guild_id, spending_balance) VALUES (99, 100)")
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _index: database.deduct_server_spending(99, 30), range(8)))
+        self.assertEqual(sum(success for success, _message in results), 3)
+        with database.sqlite3.connect(self.cosmo_db_path) as conn:
+            self.assertEqual(conn.execute("SELECT spending_balance FROM settings WHERE guild_id = 99").fetchone()[0], 10)
+
+    def test_guarded_server_budget_credit_rejects_integer_overflow(self):
+        with database.sqlite3.connect(self.cosmo_db_path) as conn:
+            conn.execute("ALTER TABLE settings ADD COLUMN spending_balance INTEGER DEFAULT 0")
+            conn.execute(
+                "INSERT INTO settings (guild_id, spending_balance) VALUES (?, ?)",
+                (100, database.MAX_SQLITE_INTEGER),
+            )
+            with self.assertRaises(OverflowError):
+                database.guarded_server_budget_credit(conn.cursor(), 100, 1)
+            balance = conn.execute(
+                "SELECT spending_balance FROM settings WHERE guild_id = 100"
+            ).fetchone()[0]
+            self.assertEqual(balance, database.MAX_SQLITE_INTEGER)
+
     def test_concurrent_transfers_cannot_overdraw(self):
         database.update_balance(15, 100)
         with ThreadPoolExecutor(max_workers=10) as pool:

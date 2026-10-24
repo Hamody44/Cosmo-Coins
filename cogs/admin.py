@@ -22,7 +22,7 @@ from database import (
     create_crypto_budget_payment_order, update_crypto_budget_payment_order,
     fail_crypto_budget_payment_order, transfer_balance_to_server_budget,
     set_auto_budget_payment_enabled, set_global_exchange_enabled,
-    PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID
+    PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID, guarded_server_budget_credit
 )
 from ltcpay import (
     LTCPayError, INVOICE_TTL_SECONDS, MIN_CRYPTO_BUDGET, MIN_CRYPTO_USD,
@@ -803,7 +803,9 @@ class Admin(commands.Cog):
     async def add_server_budget(self, ctx: commands.Context, amount: str):
         if not await check_is_owner(self.bot, ctx):
             return await ctx.send("⛔ هذا الأمر متاح فقط لمالك ومطور البوت الأساسي.")
-        currency_label = get_currency_label(ctx.guild.id if ctx.guild else None)
+        if not ctx.guild:
+            return await ctx.send("⛔ هذا الأمر مخصص للسيرفرات فقط.")
+        currency_label = get_currency_label(ctx.guild.id)
 
         try:
             parsed = parse_amount(amount)
@@ -812,23 +814,26 @@ class Admin(commands.Cog):
         if parsed <= 0:
             return await ctx.send("❌ المبلغ المضاف يجب أن يكون أكبر من 0.")
 
-        current_budget = get_server_spending_balance(ctx.guild.id)
-        new_total_budget = current_budget + parsed
-
         g_conn, g_cur = get_guild_db(ctx.guild.id)
-        g_cur.execute(
-            "INSERT INTO settings (guild_id, spending_balance) VALUES (?, ?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET spending_balance = spending_balance + excluded.spending_balance",
-            (ctx.guild.id, parsed)
-        )
-        
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        g_cur.execute(
-            "INSERT INTO budget_logs (action, amount, old_balance, new_balance, admin_id, timestamp) VALUES ('إضافة', ?, ?, ?, ?, ?)",
-            (parsed, current_budget, new_total_budget, ctx.author.id, now_str)
-        )
-        g_conn.commit()
-        g_conn.close()
+        try:
+            g_conn.execute("BEGIN IMMEDIATE")
+            row = g_cur.execute(
+                "SELECT COALESCE(spending_balance, 0) FROM settings WHERE guild_id = ?", (ctx.guild.id,)
+            ).fetchone()
+            current_budget = int(row[0]) if row else 0
+            new_total_budget = guarded_server_budget_credit(g_cur, ctx.guild.id, parsed)
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            g_cur.execute(
+                "INSERT INTO budget_logs (action, amount, old_balance, new_balance, admin_id, timestamp) "
+                "VALUES ('إضافة', ?, ?, ?, ?, ?)",
+                (parsed, current_budget, new_total_budget, ctx.author.id, now_str)
+            )
+            g_conn.commit()
+        except OverflowError:
+            g_conn.rollback()
+            return await ctx.send("❌ لا يمكن إضافة هذا المبلغ لأن الميزانية ستتجاوز الحد المدعوم.")
+        finally:
+            g_conn.close()
 
         await ctx.send(
             f"🏦 **تمت إضافة ميزانية جديدة للسيرفر بنجاح!**\n"

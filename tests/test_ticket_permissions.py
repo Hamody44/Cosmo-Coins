@@ -1,4 +1,5 @@
 import os
+import asyncio
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -6,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 import database
-from cogs.tickets import Tickets, can_manage_ticket_member
+from cogs.tickets import TicketControlView, Tickets, can_manage_ticket_member, serialize_ticket_creation
 
 
 class TicketPermissionTests(unittest.TestCase):
@@ -207,6 +208,66 @@ class TicketAddPersonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.send.await_args.args[0], "⚠️ لا يمكن إضافة عضو إلى تذكرة مغلقة.")
         ctx.channel.set_permissions.assert_not_awaited()
         ctx.guild.fetch_member.assert_not_awaited()
+
+
+class TicketReliabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ticket_creation_lock_serializes_same_user(self):
+        active = 0
+        max_active = 0
+
+        @serialize_ticket_creation
+        async def callback(_view, _interaction, _button):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=70001),
+            user=SimpleNamespace(id=80001),
+        )
+        await asyncio.gather(
+            callback(None, interaction, None),
+            callback(None, interaction, None),
+        )
+        self.assertEqual(max_active, 1)
+
+    async def test_delete_button_preserves_database_row_if_discord_delete_fails(self):
+        cursor = SimpleNamespace(
+            execute=Mock(),
+            fetchone=Mock(side_effect=[(None, None), (123, "opened", None), (None,)]),
+        )
+        conn = SimpleNamespace(close=Mock())
+
+        async def empty_history(**_kwargs):
+            if False:
+                yield None
+
+        channel = SimpleNamespace(
+            id=456,
+            name="ticket-test",
+            history=empty_history,
+            delete=AsyncMock(side_effect=RuntimeError("Discord delete failed")),
+        )
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=70002, name="Guild", get_channel=Mock(return_value=None)),
+            channel=channel,
+            user=SimpleNamespace(id=999, name="Staff", mention="<@999>"),
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        with patch("cogs.tickets.get_guild_db", return_value=(conn, cursor)), \
+             patch("cogs.tickets.can_manage_ticket_member", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "Discord delete failed"):
+                await TicketControlView.btn_delete(TicketControlView(), interaction, SimpleNamespace())
+
+        self.assertFalse(any(
+            "DELETE FROM tickets" in call.args[0]
+            for call in cursor.execute.call_args_list
+        ))
+        conn.close.assert_called_once()
+        channel.delete.assert_awaited_once()
 
 
 if __name__ == "__main__":

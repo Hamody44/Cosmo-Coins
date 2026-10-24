@@ -11,6 +11,7 @@ from database import (
     refund_server_spending, update_balance, is_blacklisted, get_guild_db,
     clean_display_name, get_unicode_font, PRIMARY_OWNER_ID, get_currency_label,
     credit_giveaway_prize, giveaway_has_any_payout,
+    guarded_server_budget_credit,
 )
 from PIL import Image, ImageDraw, ImageOps
 
@@ -75,14 +76,7 @@ def _set_giveaway_prize_state(
             if current_state != "pending":
                 conn.rollback()
                 return "stale"
-            cur.execute(
-                "INSERT OR IGNORE INTO settings (guild_id, spending_balance) VALUES (?, 0)",
-                (guild_id,),
-            )
-            cur.execute(
-                "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) + ? WHERE guild_id = ?",
-                (amount, guild_id),
-            )
+            guarded_server_budget_credit(cur, guild_id, amount)
             cur.execute(
                 "UPDATE giveaway_winners SET state = 'refunded' "
                 "WHERE message_id = ? AND generation = ? AND prize_slot = ? AND state = 'pending'",
@@ -150,15 +144,33 @@ def can_manage_server_games(ctx: commands.Context) -> bool:
     return ctx.author.id == ctx.guild.owner_id or is_bot_admin(ctx)
 
 class RouletteSession:
-    def __init__(self, guild_id: int):
+    def __init__(self, guild_id: int, amount: int):
         self.guild_id = guild_id
+        self.amount = int(amount)
         self.is_stopped = False
+        self.closed = False
         self.current_view = None
 
+    def refund(self):
+        if self.closed:
+            return False
+        refund_server_spending(self.guild_id, self.amount)
+        self.closed = True
+        return True
+
+    def finish(self):
+        if self.closed:
+            return False
+        self.closed = True
+        return True
+
     def stop(self):
+        if self.closed:
+            return False
         self.is_stopped = True
         if self.current_view:
             self.current_view.stop()
+        return self.refund()
 
 class ClaimVerificationView(discord.ui.View):
     def __init__(
@@ -498,14 +510,7 @@ class Games(commands.Cog):
             unfilled = int(winners_count) - len(winners)
             if unfilled:
                 refund_amount = unfilled * int(amount)
-                g_cur.execute(
-                    "INSERT OR IGNORE INTO settings (guild_id, spending_balance) VALUES (?, 0)",
-                    (guild.id,),
-                )
-                g_cur.execute(
-                    "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) + ? WHERE guild_id = ?",
-                    (refund_amount, guild.id),
-                )
+                guarded_server_budget_credit(g_cur, guild.id, refund_amount)
             g_conn.commit()
         except Exception:
             g_conn.rollback()
@@ -717,6 +722,7 @@ class Games(commands.Cog):
                 g_conn.close()
             await msg.add_reaction("🎉")
         except Exception as exc:
+            refund_completed = False
             if row_created:
                 g_conn, g_cur = get_guild_db(ctx.guild.id)
                 try:
@@ -727,10 +733,8 @@ class Games(commands.Cog):
                         (msg.id,),
                     )
                     if g_cur.rowcount == 1:
-                        g_cur.execute(
-                            "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) + ? WHERE guild_id = ?",
-                            (total_cost, ctx.guild.id),
-                        )
+                        guarded_server_budget_credit(g_cur, ctx.guild.id, total_cost)
+                        refund_completed = True
                     g_conn.commit()
                 except Exception:
                     g_conn.rollback()
@@ -738,14 +742,20 @@ class Games(commands.Cog):
                 finally:
                     g_conn.close()
             else:
-                refund_server_spending(ctx.guild.id, total_cost)
+                try:
+                    refund_server_spending(ctx.guild.id, total_cost)
+                    refund_completed = True
+                except Exception as refund_exc:
+                    print(f"Could not refund failed giveaway setup {ctx.guild.id}: {refund_exc}")
             if msg:
                 try:
                     await msg.delete()
                 except discord.HTTPException:
                     pass
             print(f"Could not start giveaway in guild {ctx.guild.id}: {exc}")
-            return await ctx.send("❌ تعذر بدء الجيف؛ أُعيدت الميزانية المحجوزة للسيرفر.")
+            if refund_completed:
+                return await ctx.send("❌ تعذر بدء الجيف؛ أُعيدت الميزانية المحجوزة للسيرفر.")
+            return await ctx.send("❌ تعذر بدء الجيف وتعذر تأكيد استرداد الميزانية؛ يرجى مراجعة سجل ميزانية السيرفر.")
 
         asyncio.create_task(self.monitor_giveaway(ctx.guild.id, ctx.channel.id, msg.id, duration_seconds))
 
@@ -786,11 +796,7 @@ class Games(commands.Cog):
                     return await ctx.send("❌ لم أجد جيفاً نشطاً بهذا المعرّف؛ ربما انتهى أو أُوقف مسبقاً.")
                 channel_id, amount, winners_count, _status = row
                 refund_amount = int(amount) * int(winners_count)
-                cur.execute("INSERT OR IGNORE INTO settings (guild_id, spending_balance) VALUES (?, 0)", (ctx.guild.id,))
-                cur.execute(
-                    "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) + ? WHERE guild_id = ?",
-                    (refund_amount, ctx.guild.id),
-                )
+                guarded_server_budget_credit(cur, ctx.guild.id, refund_amount)
                 cur.execute(
                     "UPDATE active_giveaways SET is_finished = 1, status = 'stopped' "
                     "WHERE message_id = ? AND status = 'active'",
@@ -950,7 +956,7 @@ class Games(commands.Cog):
         if not allowed:
             return await ctx.send(pool_msg)
 
-        session = RouletteSession(ctx.guild.id)
+        session = RouletteSession(ctx.guild.id, parsed_amount)
         active_roulettes[ctx.guild.id] = session
 
         lobby_view = RouletteLobbyView(parsed_amount, condition)
@@ -960,21 +966,21 @@ class Games(commands.Cog):
         for _ in range(30):
             if session.is_stopped:
                 active_roulettes.pop(ctx.guild.id, None)
-                refund_server_spending(ctx.guild.id, parsed_amount)
+                session.refund()
                 return
             await asyncio.sleep(1)
 
         participants = [ctx.guild.get_member(uid) for uid in lobby_view.participants if ctx.guild.get_member(uid) and not is_blacklisted(ctx.guild.get_member(uid))]
         if len(participants) < 4:
             active_roulettes.pop(ctx.guild.id, None)
-            refund_server_spending(ctx.guild.id, parsed_amount)
+            session.refund()
             return await ctx.channel.send("⚠️ تم إلغاء الروليت لعدم اكتمال 4 لاعبين على الأقل (أُعيدت الجائزة لميزانية السيرفر).")
 
         round_num = 1
         while len(participants) > 2:
             if session.is_stopped:
                 active_roulettes.pop(ctx.guild.id, None)
-                refund_server_spending(ctx.guild.id, parsed_amount)
+                session.refund()
                 return
 
             chosen_index = random.randint(0, len(participants) - 1)
@@ -991,7 +997,7 @@ class Games(commands.Cog):
 
             if session.is_stopped:
                 active_roulettes.pop(ctx.guild.id, None)
-                refund_server_spending(ctx.guild.id, parsed_amount)
+                session.refund()
                 return
 
             eliminated = None
@@ -1014,11 +1020,20 @@ class Games(commands.Cog):
 
         if session.is_stopped:
             active_roulettes.pop(ctx.guild.id, None)
-            refund_server_spending(ctx.guild.id, parsed_amount)
+            session.refund()
             return
 
         await ctx.channel.send(f"🚨 **المواجهة النهائية الحاسمة بين:** {participants[0].mention} و {participants[1].mention}!\nالعجلة تدور الآن لتحديد الفائز...")
         await asyncio.sleep(2)
+
+        if session.is_stopped:
+            active_roulettes.pop(ctx.guild.id, None)
+            session.refund()
+            return
+        if not session.finish():
+            active_roulettes.pop(ctx.guild.id, None)
+            return
+        active_roulettes.pop(ctx.guild.id, None)
 
         winner_index = random.randint(0, 1)
         final_winner = participants[winner_index]
@@ -1026,8 +1041,6 @@ class Games(commands.Cog):
         final_wheel_buf = await generate_roulette_wheel_image(ctx.guild, participants, winner_index)
         final_wheel_file = discord.File(final_wheel_buf, filename="final_wheel.png")
         await ctx.channel.send(f"🎡 **العجلة وقفت على الفائز النهائي:** {final_winner.mention}!", file=final_wheel_file)
-
-        active_roulettes.pop(ctx.guild.id, None)
 
         if not condition:
             update_balance(final_winner.id, parsed_amount)
@@ -1049,10 +1062,13 @@ class Games(commands.Cog):
     async def stop_roulette(self, ctx: commands.Context):
         if not is_bot_admin(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية (أو انتهى اشتراك البريميوم بالسيرفر).")
-        if ctx.guild.id not in active_roulettes:
+        session = active_roulettes.get(ctx.guild.id)
+        if not session:
             return await ctx.send("❌ لا توجد لعبة نشطة.")
-        session = active_roulettes.pop(ctx.guild.id)
-        session.stop()
+        if not session.stop():
+            active_roulettes.pop(ctx.guild.id, None)
+            return await ctx.send("❌ انتهت اللعبة بالفعل.")
+        active_roulettes.pop(ctx.guild.id, None)
         await ctx.send("🛑 تم إيقاف لعبة الروليت بدون فائز (أُعيدت الميزانية للسيرفر).")
 
 async def setup(bot):

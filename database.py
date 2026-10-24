@@ -17,6 +17,7 @@ PRIMARY_OWNER_ID = 988840428591808584
 COSMO_GUILD_ID = 1540014549179039867
 PROBOT_PAYMENT_BOT_ID = 282859044593598464
 ADAMC_PAYMENT_BOT_ID = 1505622388975468684
+MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
 if not os.path.exists("guilds_data"):
     os.makedirs("guilds_data")
@@ -1072,10 +1073,10 @@ def _settle_budget_payment_locked(guild_id: int, method: str, channel_id: int, p
         g_conn.execute("BEGIN IMMEDIATE")
         order = g_conn.execute(
             "SELECT id, user_id, budget_amount, expected_payment FROM budget_payment_orders "
-            "WHERE guild_id = ? AND method = ? AND payer_name = ? "
+            "WHERE guild_id = ? AND channel_id = ? AND method = ? AND payer_name = ? "
             "AND expected_payment = ? AND status = 'pending' AND created_at <= ? AND expires_at >= ? "
             "ORDER BY created_at ASC LIMIT 1",
-            (guild_id, method, payer_name, int(expected_payment), int(payment_timestamp), int(payment_timestamp)),
+            (guild_id, channel_id, method, payer_name, int(expected_payment), int(payment_timestamp), int(payment_timestamp)),
         ).fetchone()
         if not order:
             g_conn.rollback()
@@ -1180,6 +1181,27 @@ def get_server_spending_balance(guild_id: int) -> int:
     return row[0] if row and row[0] else 0
 
 
+def guarded_server_budget_credit(cursor, guild_id: int, amount: int) -> int:
+    """Credit one guild budget inside its caller's transaction without SQLite integer overflow."""
+    amount = int(amount)
+    if amount <= 0 or amount > MAX_SQLITE_INTEGER:
+        raise ValueError("مبلغ إضافة الميزانية خارج النطاق الصحيح.")
+    cursor.execute(
+        "INSERT OR IGNORE INTO settings (guild_id, spending_balance) VALUES (?, 0)", (int(guild_id),)
+    )
+    cur = cursor.execute(
+        "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) + ? "
+        "WHERE guild_id = ? AND COALESCE(spending_balance, 0) <= ?",
+        (amount, int(guild_id), MAX_SQLITE_INTEGER - amount),
+    )
+    if cur.rowcount != 1:
+        raise OverflowError("إضافة المبلغ ستتجاوز الحد الصحيح المدعوم لميزانية السيرفر.")
+    row = cursor.execute(
+        "SELECT COALESCE(spending_balance, 0) FROM settings WHERE guild_id = ?", (int(guild_id),)
+    ).fetchone()
+    return int(row[0])
+
+
 def payout_from_server_budget(
     guild_id: int,
     user_id: int,
@@ -1250,14 +1272,18 @@ def payout_from_server_budget(
             return {"status": "insufficient", "amount": amount, "budget": old_budget, "user_id": int(user_id)}
 
         new_budget = old_budget - amount
+        conn.execute("INSERT OR IGNORE INTO global_wallet.balances (user_id, balance) VALUES (?, 0)", (user_id,))
+        credit = conn.execute(
+            "UPDATE global_wallet.balances SET balance = balance + ? "
+            "WHERE user_id = ? AND balance <= ?",
+            (amount, user_id, MAX_SQLITE_INTEGER - amount),
+        )
+        if credit.rowcount != 1:
+            conn.rollback()
+            return {"status": "balance_limit", "amount": amount, "budget": old_budget, "user_id": int(user_id)}
         conn.execute(
             "UPDATE settings SET spending_balance = ? WHERE guild_id = ?",
             (new_budget, guild_id),
-        )
-        conn.execute(
-            "INSERT INTO global_wallet.balances (user_id, balance) VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance",
-            (user_id, amount),
         )
         conn.execute(
             "INSERT INTO budget_logs (action, amount, old_balance, new_balance, admin_id, timestamp) "
@@ -1275,26 +1301,46 @@ def payout_from_server_budget(
         return {"status": "paid", "amount": amount, "budget": new_budget, "user_id": int(user_id)}
 
 def deduct_server_spending(guild_id: int, amount: int) -> tuple[bool, str]:
+    amount = int(amount)
     g_conn, g_cur = get_guild_db(guild_id)
-    g_cur.execute("SELECT spending_balance FROM settings WHERE guild_id = ?", (guild_id,))
-    row = g_cur.fetchone()
-    current_pool = row[0] if row and row[0] else 0
+    try:
+        g_conn.execute("BEGIN IMMEDIATE")
+        row = g_cur.execute(
+            "SELECT COALESCE(spending_balance, 0) FROM settings WHERE guild_id = ?", (guild_id,)
+        ).fetchone()
+        current_pool = int(row[0]) if row else 0
+        if amount <= 0:
+            g_conn.rollback()
+            return False, "⛔ يجب أن يكون مبلغ الصرف أكبر من صفر."
+        if current_pool < amount:
+            g_conn.rollback()
+            return False, f"⛔ ميزانية السيرفر المتاحة للصرف غير كافية! المطلوب: `{amount:,}` Cosmo، والمتبقي: `{current_pool:,}` Cosmo."
 
-    if current_pool < amount:
+        cur = g_cur.execute(
+            "UPDATE settings SET spending_balance = COALESCE(spending_balance, 0) - ? "
+            "WHERE guild_id = ? AND COALESCE(spending_balance, 0) >= ?",
+            (amount, guild_id, amount),
+        )
+        if cur.rowcount != 1:
+            g_conn.rollback()
+            return False, f"⛔ ميزانية السيرفر المتاحة للصرف غير كافية! المطلوب: `{amount:,}` Cosmo، والمتبقي: `{current_pool:,}` Cosmo."
+        new_pool = current_pool - amount
+        g_conn.commit()
+        return True, f"🪙 المتبقي من ميزانية السيرفر: `{new_pool:,}` Cosmo."
+    finally:
         g_conn.close()
-        return False, f"⛔ ميزانية السيرفر المتاحة للصرف غير كافية! المطلوب: `{amount:,}` Cosmo، والمتبقي: `{current_pool:,}` Cosmo."
-
-    new_pool = current_pool - amount
-    g_cur.execute("UPDATE settings SET spending_balance = ? WHERE guild_id = ?", (new_pool, guild_id))
-    g_conn.commit()
-    g_conn.close()
-    return True, f"🪙 المتبقي من ميزانية السيرفر: `{new_pool:,}` Cosmo."
 
 def refund_server_spending(guild_id: int, amount: int):
     g_conn, g_cur = get_guild_db(guild_id)
-    g_cur.execute("UPDATE settings SET spending_balance = spending_balance + ? WHERE guild_id = ?", (amount, guild_id))
-    g_conn.commit()
-    g_conn.close()
+    try:
+        g_conn.execute("BEGIN IMMEDIATE")
+        guarded_server_budget_credit(g_cur, guild_id, amount)
+        g_conn.commit()
+    except Exception:
+        g_conn.rollback()
+        raise
+    finally:
+        g_conn.close()
 
 def is_blacklisted(member: discord.Member) -> bool:
     if not member or not hasattr(member, "guild") or not member.guild:
@@ -1316,12 +1362,15 @@ def get_balance(user_id):
 
 def update_balance(user_id, amount):
     amount = int(amount)
+    if amount > MAX_SQLITE_INTEGER or amount < -MAX_SQLITE_INTEGER:
+        raise ValueError("المبلغ يتجاوز الحد الصحيح المدعوم للرصيد.")
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (user_id,))
         cur = conn.execute(
-            "UPDATE balances SET balance = balance + ? WHERE user_id = ? AND balance + ? >= 0",
-            (amount, user_id, amount),
+            "UPDATE balances SET balance = balance + ? WHERE user_id = ? "
+            "AND balance + ? >= 0 AND balance <= ?",
+            (amount, user_id, amount, MAX_SQLITE_INTEGER - max(0, amount)),
         )
         if cur.rowcount != 1:
             conn.rollback()
@@ -1368,7 +1417,13 @@ def credit_giveaway_prize(
             return {"status": "already_paid", "user_id": int(user_id), "amount": amount}
 
         conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (user_id,))
-        conn.execute("UPDATE balances SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        credit = conn.execute(
+            "UPDATE balances SET balance = balance + ? WHERE user_id = ? AND balance <= ?",
+            (amount, user_id, MAX_SQLITE_INTEGER - amount),
+        )
+        if credit.rowcount != 1:
+            conn.rollback()
+            raise ValueError("رصيد الفائز سيتجاوز الحد الصحيح المدعوم؛ لم تُصرف الجائزة.")
         conn.execute(
             "INSERT INTO giveaway_prize_payouts "
             "(payout_key, guild_id, giveaway_message_id, generation, prize_slot, user_id, amount, created_at) "
@@ -1425,7 +1480,13 @@ def transfer_balance(sender_id: int, receiver_id: int, amount: int, timestamp: s
             conn.rollback()
             return False
         conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (receiver_id,))
-        conn.execute("UPDATE balances SET balance = balance + ? WHERE user_id = ?", (amount, receiver_id))
+        credit = conn.execute(
+            "UPDATE balances SET balance = balance + ? WHERE user_id = ? AND balance <= ?",
+            (amount, receiver_id, MAX_SQLITE_INTEGER - amount),
+        )
+        if credit.rowcount != 1:
+            conn.rollback()
+            return False
         conn.execute(
             "INSERT INTO transfer_logs (sender_id, receiver_id, amount, timestamp) VALUES (?, ?, ?, ?)",
             (sender_id, receiver_id, amount, timestamp),
@@ -1605,18 +1666,38 @@ def deny_exchange_request(request_id: int):
             return None
         user_id, amount = row
         conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (user_id,))
-        conn.execute("UPDATE balances SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        credit = conn.execute(
+            "UPDATE balances SET balance = balance + ? WHERE user_id = ? AND balance <= ?",
+            (amount, user_id, MAX_SQLITE_INTEGER - int(amount)),
+        )
+        if credit.rowcount != 1:
+            conn.rollback()
+            raise ValueError("استرداد الطلب سيتجاوز الحد الصحيح المدعوم؛ بقي الطلب دون تغيير.")
         conn.commit()
         return row
 
 def parse_amount(amount_str: str) -> int:
     amount_str = str(amount_str).strip().lower()
     multipliers = {'k': 1_000, 'm': 1_000_000, 'b': 1_000_000_000}
+    if not amount_str:
+        raise ValueError("المبلغ فارغ.")
     if amount_str[-1] in multipliers:
         unit = amount_str[-1]
-        number = float(amount_str[:-1])
-        return int(number * multipliers[unit])
-    return int(float(amount_str))
+        number_text = amount_str[:-1]
+        multiplier = multipliers[unit]
+    else:
+        number_text = amount_str
+        multiplier = 1
+    try:
+        number = Decimal(number_text)
+        if not number.is_finite():
+            raise ValueError("المبلغ يجب أن يكون رقماً منتهياً.")
+        result = int(number * multiplier)
+    except (InvalidOperation, OverflowError) as exc:
+        raise ValueError("صيغة المبلغ غير صحيحة.") from exc
+    if result > MAX_SQLITE_INTEGER or result < -MAX_SQLITE_INTEGER:
+        raise ValueError("المبلغ يتجاوز الحد الصحيح المدعوم.")
+    return result
 
 def parse_duration(time_str: str) -> int:
     units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
