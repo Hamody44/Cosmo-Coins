@@ -19,7 +19,21 @@ class HelpView(discord.ui.View):
     async def show_page(self, interaction, title, description, color, fields, footer):
         embed = discord.Embed(title=title, description=description, color=color)
         for name, value in fields:
-            embed.add_field(name=name, value=value, inline=False)
+            # Discord limits each embed field value to 1024 characters. Keep the
+            # help button usable even when a command section grows over time.
+            value = str(value)
+            chunks = []
+            remaining = value
+            while len(remaining) > 1024:
+                split_at = remaining.rfind("\n", 0, 1024)
+                if split_at <= 0:
+                    split_at = 1024
+                chunks.append(remaining[:split_at])
+                remaining = remaining[split_at:].lstrip("\n")
+            chunks.append(remaining)
+            for index, chunk in enumerate(chunks):
+                field_name = name if index == 0 else f"{name} (تابع {index + 1})"
+                embed.add_field(name=field_name[:256], value=chunk[:1024] or "—", inline=False)
         embed.set_footer(text=footer)
         await interaction.response.edit_message(embed=embed, view=self)
 

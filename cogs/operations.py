@@ -41,9 +41,11 @@ class Operations(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.periodic_report_worker.start()
+        self.exchange_expiry_worker.start()
 
     def cog_unload(self):
         self.periodic_report_worker.cancel()
+        self.exchange_expiry_worker.cancel()
 
     @commands.hybrid_command(name="audit_log", aliases=["سجل_التدقيق"], description="عرض سجل التدقيق الموحّد للعمليات")
     async def audit_log(self, ctx: commands.Context, limit: int = 20):
@@ -217,6 +219,26 @@ class Operations(commands.Cog):
 
     @periodic_report_worker.before_loop
     async def before_periodic_report_worker(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(minutes=10)
+    async def exchange_expiry_worker(self):
+        expired = await asyncio.to_thread(database.expire_old_exchange_requests, 24 * 60 * 60)
+        for item in expired:
+            try:
+                user = self.bot.get_user(item["user_id"]) or await self.bot.fetch_user(item["user_id"])
+                if user:
+                    await user.send(
+                        f"❌ تم رفض طلب التبديل رقم `#{item['request_id']}` تلقائيًا لأنه بقي قيد الانتظار أكثر من 24 ساعة. "
+                        f"تمت إعادة `{item['amount']:,}` Cosmo إلى رصيدك."
+                    )
+            except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                # The refund and status update already succeeded; a closed DM must
+                # not make the worker retry or reverse the transaction.
+                pass
+
+    @exchange_expiry_worker.before_loop
+    async def before_exchange_expiry_worker(self):
         await self.bot.wait_until_ready()
 
 

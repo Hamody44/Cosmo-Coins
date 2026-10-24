@@ -1683,6 +1683,49 @@ def deny_exchange_request(request_id: int):
         conn.commit()
         return row
 
+
+def expire_old_exchange_requests(max_age_seconds: int = 24 * 60 * 60) -> list[dict]:
+    """Reject stale exchange requests and refund their reserved balances atomically."""
+    cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - int(max_age_seconds)))
+    expired = []
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=15)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT id, guild_id, user_id, cosmo_amount, timestamp FROM exchange_logs "
+            "WHERE status = 'قيد الانتظار' AND timestamp <= ? ORDER BY id ASC",
+            (cutoff,),
+        ).fetchall()
+        for request_id, guild_id, user_id, amount, created_at in rows:
+            updated = conn.execute(
+                "UPDATE exchange_logs SET status = 'مرفوض تلقائياً' "
+                "WHERE id = ? AND status = 'قيد الانتظار'",
+                (int(request_id),),
+            )
+            if updated.rowcount != 1:
+                continue
+            conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (int(user_id),))
+            credited = conn.execute(
+                "UPDATE balances SET balance = balance + ? WHERE user_id = ? AND balance <= ?",
+                (int(amount), int(user_id), MAX_SQLITE_INTEGER - int(amount)),
+            )
+            if credited.rowcount != 1:
+                conn.rollback()
+                raise ValueError(f"تعذر إعادة رصيد طلب التبديل القديم #{request_id}؛ أُلغيت العملية كاملة.")
+            expired.append({
+                "request_id": int(request_id), "guild_id": int(guild_id), "user_id": int(user_id),
+                "amount": int(amount), "created_at": created_at,
+            })
+        conn.commit()
+    for item in expired:
+        record_audit(
+            "exchange_request_auto_rejected", guild_id=item["guild_id"],
+            target_user_id=item["user_id"], amount=item["amount"],
+            reason=f"pending for more than {int(max_age_seconds) // 3600} hours",
+            before={"status": "قيد الانتظار"}, after={"status": "مرفوض تلقائياً", "refunded": True},
+            source="worker", correlation_id=f"exchange:{item['request_id']}",
+        )
+    return expired
+
 def parse_amount(amount_str: str) -> int:
     amount_str = str(amount_str).strip().lower()
     multipliers = {'k': 1_000, 'm': 1_000_000, 'b': 1_000_000_000}
