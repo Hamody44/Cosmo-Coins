@@ -22,7 +22,7 @@ from database import (
     create_crypto_budget_payment_order, update_crypto_budget_payment_order,
     fail_crypto_budget_payment_order, transfer_balance_to_server_budget,
     set_auto_budget_payment_enabled, set_global_exchange_enabled,
-    PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID, guarded_server_budget_credit
+    PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID, guarded_server_budget_credit, record_audit
 )
 from ltcpay import (
     LTCPayError, INVOICE_TTL_SECONDS, MIN_CRYPTO_BUDGET, MIN_CRYPTO_USD,
@@ -1203,6 +1203,7 @@ class Admin(commands.Cog):
         )
         g_conn.commit()
         g_conn.close()
+        record_audit("role_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="set owner role", before={"owner_role_id": old_owner_role_id}, after={"owner_role_id": role.id}, source="discord")
         await sync_ticket_staff_roles(
             ctx.guild,
             previous_role_ids=(old_owner_role_id,),
@@ -1228,6 +1229,7 @@ class Admin(commands.Cog):
         )
         g_conn.commit()
         g_conn.close()
+        record_audit("role_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="set staff role", before={"staff_role_id": old_admin_role_id}, after={"staff_role_id": role.id}, source="discord")
         await sync_ticket_staff_roles(
             ctx.guild,
             previous_role_ids=(old_admin_role_id,),
@@ -1246,6 +1248,7 @@ class Admin(commands.Cog):
         g_cur.execute("UPDATE settings SET blacklist_role_id = ? WHERE guild_id = ?", (role.id, ctx.guild.id))
         g_conn.commit()
         g_conn.close()
+        record_audit("role_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="set blacklist role", after={"blacklist_role_id": role.id}, source="discord")
         await ctx.send(f"✅ تم اعتماد رتبة البلاك ليست: {role.mention}.")
 
     @commands.hybrid_command(name="allow_bot", aliases=["سماح_لبوت"], description="السماح لبوت معين باستخدام أوامر الإدارة في روم محدد")

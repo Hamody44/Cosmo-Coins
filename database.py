@@ -8,6 +8,7 @@ import random
 import io
 import glob
 import threading
+import audit
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from contextlib import closing
 import discord
@@ -1047,6 +1048,7 @@ def process_ltcpay_webhook(event: dict, invoice: dict):
             ("إضافة تلقائية (crypto)", int(budget_amount), old_balance, new_balance, int(user_id), timestamp),
         )
         g_conn.commit()
+        record_audit("payment_settled", guild_id=guild_id, actor_id=user_id, target_user_id=user_id, amount=int(budget_amount), reason="LTCPay webhook settlement", after={"status": "paid", "order_id": int(order_id), "new_balance": new_balance}, source="webhook", correlation_id=f"payment:{order_id}")
         return {
             "status": "paid", "order_id": int(order_id), "guild_id": guild_id,
             "user_id": int(user_id), "channel_id": int(channel_id),
@@ -1116,6 +1118,7 @@ def _settle_budget_payment_locked(guild_id: int, method: str, channel_id: int, p
             (f"إضافة تلقائية ({method})", int(budget_amount), old_balance, new_balance, int(user_id), timestamp),
         )
         g_conn.commit()
+        record_audit("payment_settled", guild_id=guild_id, actor_id=user_id, target_user_id=user_id, amount=int(budget_amount), reason=f"{method} receipt settlement", after={"status": "paid", "order_id": int(order_id), "new_balance": new_balance}, source="discord", correlation_id=f"payment:{order_id}")
         return {
             "order_id": int(order_id), "user_id": int(user_id), "budget_amount": int(budget_amount),
             "old_balance": old_balance, "new_balance": new_balance, "method": method,
@@ -1298,6 +1301,7 @@ def payout_from_server_budget(
             (payout_key, user_id, payout_type, amount, timestamp, timestamp),
         )
         conn.commit()
+        record_audit("level_payout_paid", guild_id=guild_id, actor_id=PRIMARY_OWNER_ID, target_user_id=user_id, amount=amount, reason=payout_type, after={"budget": new_budget}, source="worker")
         return {"status": "paid", "amount": amount, "budget": new_budget, "user_id": int(user_id)}
 
 def deduct_server_spending(guild_id: int, amount: int) -> tuple[bool, str]:
@@ -1326,6 +1330,7 @@ def deduct_server_spending(guild_id: int, amount: int) -> tuple[bool, str]:
             return False, f"⛔ ميزانية السيرفر المتاحة للصرف غير كافية! المطلوب: `{amount:,}` Cosmo، والمتبقي: `{current_pool:,}` Cosmo."
         new_pool = current_pool - amount
         g_conn.commit()
+        record_audit("budget_spent", guild_id=guild_id, amount=amount, reason="server-funded operation", after={"balance": new_pool}, source="worker")
         return True, f"🪙 المتبقي من ميزانية السيرفر: `{new_pool:,}` Cosmo."
     finally:
         g_conn.close()
@@ -1431,6 +1436,7 @@ def credit_giveaway_prize(
             (payout_key, guild_id, giveaway_message_id, generation, prize_slot, user_id, amount, created_at),
         )
         conn.commit()
+        record_audit("giveaway_prize_paid", guild_id=guild_id, target_user_id=user_id, amount=amount, reason=f"giveaway {giveaway_message_id}", source="worker")
         return {"status": "paid", "user_id": int(user_id), "amount": amount}
 
 
@@ -1556,6 +1562,7 @@ def transfer_balance_to_server_budget(user_id: int, guild_id: int, amount: int, 
             ("إضافة من رصيد Cosmo", amount, old_budget, new_budget, user_id, timestamp),
         )
         conn.commit()
+        record_audit("budget_contributed", guild_id=guild_id, actor_id=user_id, amount=amount, reason="personal Cosmo to server budget", after={"old_budget": old_budget, "new_budget": new_budget}, source="discord")
         return {
             "amount": amount,
             "old_personal_balance": old_balance,
@@ -1750,3 +1757,50 @@ async def send_global_action_log(bot: discord.Client, embed: discord.Embed):
                 await log_chan.send(embed=embed)
     except Exception as e:
         print(f"[Global Log Error]: {e}")
+
+
+# Unified audit and payment inspection API used by the operations cog.
+def record_audit(event_type: str, **kwargs) -> str:
+    try:
+        return audit.record_event(GLOBAL_DB_PATH, event_type, **kwargs)
+    except (sqlite3.Error, OSError) as exc:
+        # Auditing must never roll back a successful financial/permission action.
+        print(f"[Audit Error] {exc}")
+        return ""
+
+
+def _payment_keys():
+    return ("id", "guild_id", "user_id", "payer_name", "channel_id", "method", "budget_amount", "expected_payment", "created_at", "expires_at", "status", "payment_message_id", "payment_author_id", "paid_at", "provider_order_id", "provider_payment_id", "quote_usd", "pay_address", "pay_currency", "provider_status")
+
+
+def get_payment_order(guild_id: int, order_id: int, user_id: int | None = None) -> dict | None:
+    conn, _ = get_guild_db(int(guild_id))
+    try:
+        query = "SELECT id,guild_id,user_id,payer_name,channel_id,method,budget_amount,expected_payment,created_at,expires_at,status,payment_message_id,payment_author_id,paid_at,provider_order_id,provider_payment_id,quote_usd,pay_address,pay_currency,provider_status FROM budget_payment_orders WHERE guild_id = ? AND id = ?"
+        params = [int(guild_id), int(order_id)]
+        if user_id is not None:
+            query += " AND user_id = ?"; params.append(int(user_id))
+        row = conn.execute(query, params).fetchone()
+    finally:
+        conn.close()
+    return dict(zip(_payment_keys(), row)) if row else None
+
+
+def list_payment_orders(guild_id: int | None = None, *, pending_only: bool = False, overdue_only: bool = False, limit: int = 25) -> list[dict]:
+    paths = [os.path.abspath(f"guilds_data/guild_{int(guild_id)}.db")] if guild_id is not None else sorted(glob.glob(os.path.abspath("guilds_data/guild_*.db")))
+    now = int(time.time()); result = []
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            with closing(sqlite3.connect(path, timeout=5)) as conn:
+                clauses, params = [], []
+                if pending_only: clauses.append("status IN ('pending','creating','processing','needs_review')")
+                if overdue_only: clauses.append("expires_at < ? AND status IN ('pending','creating','processing')"); params.append(now)
+                where = " WHERE " + " AND ".join(clauses) if clauses else ""
+                rows = conn.execute("SELECT id,guild_id,user_id,payer_name,channel_id,method,budget_amount,expected_payment,created_at,expires_at,status,payment_message_id,payment_author_id,paid_at,provider_order_id,provider_payment_id,quote_usd,pay_address,pay_currency,provider_status FROM budget_payment_orders" + where + " ORDER BY created_at DESC LIMIT ?", (*params, max(1, min(int(limit), 200)))).fetchall()
+                result.extend(dict(zip(_payment_keys(), row)) for row in rows)
+        except sqlite3.DatabaseError:
+            continue
+    result.sort(key=lambda item: int(item.get("created_at") or 0), reverse=True)
+    return result[:max(1, min(int(limit), 200))]

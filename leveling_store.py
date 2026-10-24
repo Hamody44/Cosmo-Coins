@@ -676,3 +676,52 @@ def get_voice_leaderboard(
             "points": total_seconds // 60,
         })
     return result
+
+
+# Administrative inspection and correction helpers. History is retained; only the
+# current aggregate/session state is changed, and the caller must audit the action.
+def get_level_admin_config(guild_id: int) -> dict:
+    level = ensure_level_config(guild_id)
+    voice = ensure_voice_config(guild_id)
+    level["channels"] = get_level_channels(guild_id)
+    level["salary_tiers"] = get_salary_tiers(guild_id)
+    level["voice_enabled"] = voice["enabled"]
+    return level
+
+
+def get_voice_member_status(guild_id: int, user_id: int) -> dict:
+    conn, _ = get_guild_db(guild_id)
+    total = conn.execute("SELECT COALESCE(SUM(seconds), 0) FROM leveling_voice_daily WHERE user_id = ?", (int(user_id),)).fetchone()[0]
+    today = datetime.now(RIYADH).date().isoformat()
+    today_seconds = conn.execute("SELECT COALESCE(seconds, 0) FROM leveling_voice_daily WHERE user_id = ? AND local_date = ?", (int(user_id), today)).fetchone()
+    session = conn.execute("SELECT channel_id, last_tick FROM leveling_voice_sessions WHERE user_id = ?", (int(user_id),)).fetchone()
+    conn.close()
+    return {"user_id": int(user_id), "seconds": int(float(total or 0)), "today_seconds": int(float(today_seconds[0] if today_seconds else 0)), "session": {"channel_id": int(session[0]), "last_tick": float(session[1])} if session else None}
+
+
+def adjust_level_points(guild_id: int, user_id: int, points: int) -> dict:
+    points = int(points)
+    if points < 0:
+        raise ValueError("النقاط لا يمكن أن تكون سالبة")
+    conn, _ = get_guild_db(guild_id)
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("INSERT OR IGNORE INTO leveling_users (user_id) VALUES (?)", (int(user_id),))
+    old = conn.execute("SELECT total_points FROM leveling_users WHERE user_id = ?", (int(user_id),)).fetchone()
+    old_points = int(old[0] or 0) if old else 0
+    conn.execute("UPDATE leveling_users SET total_points = ?, last_point_at = 0 WHERE user_id = ?", (points, int(user_id)))
+    conn.commit(); conn.close()
+    return {"before": old_points, "after": points}
+
+
+def reset_level_member(guild_id: int, user_id: int) -> dict:
+    conn, _ = get_guild_db(guild_id)
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("INSERT OR IGNORE INTO leveling_users (user_id) VALUES (?)", (int(user_id),))
+    old = conn.execute("SELECT total_points FROM leveling_users WHERE user_id = ?", (int(user_id),)).fetchone()
+    old_points = int(old[0] or 0) if old else 0
+    voice = conn.execute("SELECT COALESCE(SUM(seconds), 0) FROM leveling_voice_daily WHERE user_id = ?", (int(user_id),)).fetchone()[0]
+    conn.execute("UPDATE leveling_users SET total_points = 0, last_point_at = 0 WHERE user_id = ?", (int(user_id),))
+    conn.execute("DELETE FROM leveling_voice_daily WHERE user_id = ?", (int(user_id),))
+    conn.execute("DELETE FROM leveling_voice_sessions WHERE user_id = ?", (int(user_id),))
+    conn.commit(); conn.close()
+    return {"before_points": old_points, "after_points": 0, "before_voice_seconds": int(float(voice or 0)), "after_voice_seconds": 0}

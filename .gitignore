@@ -13,6 +13,8 @@ guilds_data/
 *.db-journal
 *.db-wal
 *.db-shm
+backups/
+*.tar.gz
 
 # Python artifacts and virtual environments
 __pycache__/

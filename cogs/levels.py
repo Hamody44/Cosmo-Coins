@@ -14,6 +14,7 @@ from database import (
     is_bot_admin,
     parse_amount,
     payout_from_server_budget,
+    record_audit,
 )
 from leveling_store import (
     XP_PER_LEVEL,
@@ -614,6 +615,7 @@ class Leveling(commands.Cog):
         if not ctx.guild or not can_manage_level_settings(ctx):
             return await ctx.send("⛔ مالك السيرفر أو owner-role أو إدارة Discord فقط يمكنهم إعداد النظام.")
         await asyncio.to_thread(set_leveling_enabled, ctx.guild.id, enabled)
+        record_audit("level_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="toggle text leveling", after={"enabled": bool(enabled)}, source="discord")
         state = "مفتوح ويحتسب الرسائل في الرومات المحددة ✅" if enabled else "مغلق ولن يحتسب رسائل جديدة ⛔"
         await ctx.send(f"⚙️ نظام اللفلات في **{ctx.guild.name}** أصبح {state}.")
 
@@ -624,6 +626,8 @@ class Leveling(commands.Cog):
         if channel.guild.id != ctx.guild.id:
             return await ctx.send("❌ يجب اختيار روم من هذا السيرفر.")
         added = await asyncio.to_thread(add_level_channel, ctx.guild.id, channel.id)
+        if added:
+            record_audit("level_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="add level channel", after={"channel_id": channel.id}, source="discord")
         await ctx.send(f"✅ تمت إضافة {channel.mention} إلى رومات احتساب النقاط." if added else f"ℹ️ {channel.mention} موجود بالفعل في القائمة.")
 
     @commands.hybrid_command(name="remove_level_channel", description="إزالة روم من رومات احتساب الرسائل")
@@ -631,6 +635,8 @@ class Leveling(commands.Cog):
         if not ctx.guild or not can_manage_level_settings(ctx):
             return await ctx.send("⛔ لا تملك صلاحية إعداد نظام اللفلات.")
         removed = await asyncio.to_thread(remove_level_channel, ctx.guild.id, channel.id)
+        if removed:
+            record_audit("level_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="remove level channel", after={"channel_id": channel.id}, source="discord")
         await ctx.send(f"✅ أُزيل {channel.mention} من رومات احتساب النقاط." if removed else f"ℹ️ {channel.mention} غير موجود في القائمة.")
 
     @commands.hybrid_command(name="list_level_channels", description="عرض الرومات المحددة لنظام اللفلات")
@@ -647,6 +653,7 @@ class Leveling(commands.Cog):
         if not ctx.guild or not can_manage_level_settings(ctx):
             return await ctx.send("⛔ مالك السيرفر أو owner-role أو إدارة Discord فقط يمكنهم إعداد النظام.")
         await asyncio.to_thread(set_voice_leveling_enabled, ctx.guild.id, enabled)
+        record_audit("voice_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="toggle voice leveling", after={"enabled": bool(enabled)}, source="discord")
         await self.refresh_voice_sessions(ctx.guild)
         state = "مفتوح ويحتسب الوقت تلقائياً في الرومات الصوتية ✅" if enabled else "مغلق ولن يحتسب وقتاً جديداً ⛔"
         await ctx.send(f"🎙️ نظام الفويس في **{ctx.guild.name}** أصبح {state}.")
@@ -662,6 +669,7 @@ class Leveling(commands.Cog):
         if parsed < 0:
             return await ctx.send("❌ لا يمكن أن يكون المبلغ سالباً.")
         await asyncio.to_thread(set_milestone_reward, ctx.guild.id, parsed)
+        record_audit("level_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), amount=parsed, reason="set level reward", after={"milestone_reward": parsed}, source="discord")
         await ctx.send(
             f"✅ تم ضبط مكافأة المستوى إلى `{parsed:,}` Cosmo لكل مستوى من مضاعفات 10. "
             "تُدفع من ميزانية هذا السيرفر عند بلوغ المستوى."
@@ -674,6 +682,7 @@ class Leveling(commands.Cog):
         if channel.guild.id != ctx.guild.id:
             return await ctx.send("❌ يجب اختيار روم من هذا السيرفر.")
         await asyncio.to_thread(set_announcement_channel, ctx.guild.id, channel.id)
+        record_audit("level_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="set level announcement channel", after={"channel_id": channel.id}, source="discord")
         await ctx.send(
             f"✅ سيتم إرسال التوب 5 اليومي والرواتب إلى {channel.mention} قبل منتصف الليل بتوقيت الرياض. "
             "كما أُعيدت التقارير المتعثرة إلى قائمة المحاولة."
@@ -698,6 +707,7 @@ class Leveling(commands.Cog):
         if parsed < 0:
             return await ctx.send("❌ لا يمكن أن يكون الراتب سالباً؛ استخدم `0` لتعطيل الشريحة.")
         await asyncio.to_thread(set_salary_tier, ctx.guild.id, threshold, parsed)
+        record_audit("salary_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), amount=parsed, reason="set salary tier", after={"threshold": threshold, "amount": parsed}, source="discord")
         await ctx.send(
             f"✅ راتب الشريحة `{threshold:,}` رسالة أصبح `{parsed:,}` Cosmo. "
             "عند التصفير يأخذ الإداري مبلغ أعلى شريحة بلغها فقط، من ميزانية السيرفر."
