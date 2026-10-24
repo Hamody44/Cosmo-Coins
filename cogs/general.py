@@ -174,7 +174,7 @@ class HelpView(discord.ui.View):
                 )),
                 ("🔒 مالك البوت فقط", (
                     "• `/add_server_budget <amount>` و`/remove_server_budget <amount>` — إضافة أو خصم ميزانية سيرفر يدويًا (مالك البوت فقط).\n"
-                    "• `/toggle_auto_add_server_budget <credit|adamc|crypto> <true|false>` — تشغيل أو إيقاف وسيلة دفع الشحن التلقائي عالميًا.\n"
+                    "• `/toggle_buy_budget <credit|adamc|crypto> <true|false>` — تشغيل أو إيقاف وسيلة دفع الشحن التلقائي عالميًا.\n"
                     "• إيقاف وسيلة دفع يلغي طلباتها المعلقة؛ من حوّل بالفعل عليه التواصل مع مالك البوت للمراجعة اليدوية.\n"
                     "• `/set_server_budget <guild_id> <amount>` — تعيين ميزانية سيرفر.\n"
                     "• `/premium_code <duration>` — إنشاء كود Premium.\n"

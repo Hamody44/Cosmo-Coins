@@ -745,11 +745,11 @@ class Admin(commands.Cog):
         )
 
     @commands.hybrid_command(
-        name="toggle_auto_add_server_budget",
+        name="toggle_buy_budget",
         aliases=["تحكم_الشحن_التلقائي"],
         description="فتح أو إغلاق وسيلة دفع للشحن التلقائي (مالك البوت فقط)"
     )
-    async def toggle_auto_add_server_budget(self, ctx: commands.Context, method: str, enabled: bool):
+    async def toggle_buy_budget(self, ctx: commands.Context, method: str, enabled: bool):
         if not await check_is_owner(self.bot, ctx):
             return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
         aliases = {

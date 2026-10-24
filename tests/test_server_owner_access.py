@@ -28,6 +28,12 @@ class ServerOwnerAccessTests(unittest.TestCase):
         self.assertEqual(commands["set_staff_role"].app_command.name, "set_staff_role")
         self.assertNotIn("set_admin_role", commands["set_staff_role"].aliases)
 
+    def test_buy_budget_toggle_has_new_slash_name(self):
+        commands = {command.name: command for command in Admin.__cog_commands__}
+        self.assertIn("toggle_buy_budget", commands)
+        self.assertNotIn("toggle_auto_add_server_budget", commands)
+        self.assertEqual(commands["toggle_buy_budget"].app_command.name, "toggle_buy_budget")
+
     def test_discord_admin_and_manage_guild_can_configure_management_roles(self):
         with patch("cogs.admin.get_guild_management_role_ids", return_value=(None, None)), \
              patch("cogs.admin.is_bot_admin", return_value=False):

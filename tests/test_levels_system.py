@@ -8,7 +8,7 @@ import discord
 from datetime import datetime
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import database
 from cogs.levels import (
@@ -17,7 +17,6 @@ from cogs.levels import (
     can_manage_level_settings,
     daily_report_dates_due,
     leaderboard_embed,
-    leaderboard_mention_payload,
     period_bounds,
     profile_embed,
 )
@@ -234,12 +233,8 @@ class LevelPeriodAndEmbedTests(unittest.TestCase):
         ])
         self.assertIn("الترتيب الأسبوعي", board.title)
         self.assertIn("عضو متصدر", board.fields[0].name)
+        self.assertIn("<@123>", board.fields[0].name)
         self.assertIn("900", board.fields[0].value)
-        content, allowed = leaderboard_mention_payload([{"user_id": 123}])
-        self.assertIn("<@123>", content)
-        self.assertEqual([user.id for user in allowed.users], [123])
-        self.assertFalse(allowed.roles)
-        self.assertFalse(allowed.everyone)
 
     def test_primary_bot_owner_can_manage_level_commands(self):
         ctx = SimpleNamespace(
@@ -247,6 +242,32 @@ class LevelPeriodAndEmbedTests(unittest.TestCase):
             author=SimpleNamespace(id=database.PRIMARY_OWNER_ID, guild_permissions=SimpleNamespace(administrator=False, manage_guild=False)),
         )
         self.assertTrue(can_manage_level_settings(ctx))
+
+
+class TopCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_top_sends_mentions_inside_embed_without_separate_content(self):
+        member = SimpleNamespace(display_name="المتصدر")
+        guild = SimpleNamespace(
+            id=551,
+            name="سيرفر الاختبار",
+            icon=None,
+            get_member=lambda user_id: member if user_id == 123 else None,
+        )
+        ctx = SimpleNamespace(guild=guild, send=AsyncMock())
+        cog = object.__new__(Leveling)
+
+        with patch("cogs.levels.get_level_leaderboard", return_value=[{
+            "user_id": 123,
+            "points": 900,
+            "messages": 505,
+        }]):
+            await Leveling.top.callback(cog, ctx, "weekly")
+
+        ctx.send.assert_awaited_once()
+        self.assertNotIn("content", ctx.send.await_args.kwargs)
+        embed = ctx.send.await_args.kwargs["embed"]
+        self.assertIn("<@123>", embed.fields[0].name)
+        self.assertIn("المتصدر", embed.fields[0].name)
 
 
 class LevelDailyReportStoreTests(IsolatedGuildDatabase):
