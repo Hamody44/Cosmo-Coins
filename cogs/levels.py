@@ -173,15 +173,13 @@ def leaderboard_embed(
         embed.set_thumbnail(url=server_icon)
     if entries:
         medals = ("🥇", "🥈", "🥉", "🏅", "🏅")
-        for index, entry in enumerate(entries[:5]):
-            member_name = discord.utils.escape_markdown(
-                str(entry.get("display_name") or f"عضو {entry['user_id']}")
-            )[:200]
-            embed.add_field(
-                name=f"{medals[index]} المركز {index + 1} — <@{int(entry['user_id'])}> · {member_name}",
-                value=f"⭐ النقاط: **{entry['points']:,}**   •   💬 الرسائل المحتسبة: **{entry['messages']:,}**",
-                inline=False,
-            )
+        lines = [
+            f"{medals[index]} **المركز {index + 1} —** <@{int(entry['user_id'])}>"
+            f"   •   ⭐ النقاط: **{entry['points']:,}**"
+            f"   •   💬 الرسائل المحتسبة: **{entry['messages']:,}**"
+            for index, entry in enumerate(entries[:5])
+        ]
+        embed.description = "\n".join(lines)
     else:
         embed.description = "لا توجد نقاط أو رسائل محتسبة في هذه الفترة بعد."
     embed.set_footer(text="الترتيب خاص بهذا السيرفر • توقيت الرياض")

@@ -232,9 +232,8 @@ class LevelPeriodAndEmbedTests(unittest.TestCase):
             {"user_id": 123, "display_name": "عضو متصدر", "points": 900, "messages": 505},
         ])
         self.assertIn("الترتيب الأسبوعي", board.title)
-        self.assertIn("عضو متصدر", board.fields[0].name)
-        self.assertIn("<@123>", board.fields[0].name)
-        self.assertIn("900", board.fields[0].value)
+        self.assertIn("<@123>", board.description)
+        self.assertIn("900", board.description)
 
     def test_primary_bot_owner_can_manage_level_commands(self):
         ctx = SimpleNamespace(
@@ -266,8 +265,8 @@ class TopCommandTests(unittest.IsolatedAsyncioTestCase):
         ctx.send.assert_awaited_once()
         self.assertNotIn("content", ctx.send.await_args.kwargs)
         embed = ctx.send.await_args.kwargs["embed"]
-        self.assertIn("<@123>", embed.fields[0].name)
-        self.assertIn("المتصدر", embed.fields[0].name)
+        self.assertIn("<@123>", embed.description)
+        self.assertIn("505", embed.description)
 
 
 class LevelDailyReportStoreTests(IsolatedGuildDatabase):
