@@ -291,7 +291,7 @@ class EightBall(commands.Cog):
     async def before_settlement_worker(self):
         await self.bot.wait_until_ready()
 
-    @commands.hybrid_command(name="8ball", description="بدء بطولة 8Ball بنظام لوبي الروليت")
+    @commands.hybrid_command(name="8ball", aliases=["eightball", "8_ball", "8-ball"], description="بدء بطولة 8Ball بنظام لوبي الروليت")
     async def eightball(self, ctx: commands.Context, amount: str, *, condition: str = None):
         if not ctx.guild:
             return await ctx.send("⛔ هذا الأمر متاح داخل السيرفرات فقط.")

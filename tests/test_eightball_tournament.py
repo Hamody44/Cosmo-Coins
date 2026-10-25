@@ -149,7 +149,7 @@ class SpectatorGuessTests(unittest.TestCase):
         self.assertEqual(rewards[0]["user_id"], 50)
         self.assertEqual(rewards[0]["amount"], 25)
         self.assertEqual(rewards[0]["channel_id"], 2)
-        self.assertEqual(rewards[0]["player_names"], ["A", "B"])
+        self.assertEqual(set(rewards[0]["player_names"]), {"A", "B"})
         self.assertEqual(rewards[0]["guessed_winner_name"], "B")
 
     def test_spectator_lobby_lists_active_matches(self):

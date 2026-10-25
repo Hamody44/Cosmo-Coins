@@ -214,8 +214,49 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash commands.")
+        # يتيح الاختبار الفوري في سيرفر واحد دون انتظار انتشار الأوامر العامة.
+        sync_guild_id = os.getenv("DISCORD_COMMAND_GUILD_ID")
+        if sync_guild_id:
+            guild = discord.Object(id=int(sync_guild_id))
+            bot.tree.copy_global_to(guild=guild)
+            guild_synced = await bot.tree.sync(guild=guild)
+            print(f"Synced {len(guild_synced)} slash commands to guild {sync_guild_id}.")
     except Exception as e:
-        print(f"Error syncing slash commands: {e}")
+        print(f"Error syncing slash commands ({type(e).__name__}): {e}")
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Never leave a failed prefix/hybrid invocation without an explanation."""
+    original = getattr(error, "original", error)
+    if isinstance(original, commands.CommandNotFound):
+        return
+    command_name = getattr(ctx.command, "qualified_name", "unknown")
+    print(f"Command error command={command_name} type={type(original).__name__}: {original}")
+    if command_name in {"8ball", "8ball_guess_reward", "8ball_claim"}:
+        if isinstance(original, commands.MissingRequiredArgument):
+            return await ctx.send("❌ الاستخدام: `!8ball <مبلغ الجائزة> [الشرط]` — مثال: `!8ball 100`")
+        try:
+            await ctx.send(f"❌ تعذر تنفيذ الأمر: {original}")
+        except Exception:
+            pass
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error):
+    original = getattr(error, "original", error)
+    command_name = getattr(interaction.command, "name", "unknown") if interaction.command else "unknown"
+    print(f"Slash command error command={command_name} type={type(original).__name__}: {original}")
+    if command_name not in {"8ball", "8ball_guess_reward", "8ball_claim"}:
+        return
+    message = f"❌ تعذر تنفيذ الأمر: {original}"
+    if isinstance(original, commands.MissingRequiredArgument):
+        message = "❌ أكمل الحقول المطلوبة. مثال: `/8ball amount:100`"
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except Exception:
+        pass
 
 async def load_cogs():
     cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
