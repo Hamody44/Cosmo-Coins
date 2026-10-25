@@ -12,7 +12,7 @@ from datetime import timedelta, datetime
 import time
 import requests
 import base64
-from flask import Flask, redirect, request, session, render_template, url_for, flash, abort
+from flask import Flask, redirect, request, session, render_template, url_for, flash, abort, Response
 from dotenv import load_dotenv
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -315,6 +315,10 @@ def make_session_permanent():
 def index():
     user = session.get("user")
     return render_template("index.html", user=user)
+
+@app.route("/favicon.ico")
+def favicon():
+    return Response(status=204)
 
 @app.route("/game")
 def game():

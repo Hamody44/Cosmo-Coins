@@ -112,6 +112,7 @@ async def health(request):
 async def game_socket(websocket: WebSocket):
     """Handle the safe transport contract used by the future game client."""
     await websocket.accept()
+    LOGGER.info("WebSocket accepted path=/game-ws client=%s", websocket.client)
     connection = GameConnection(websocket)
     if not room_manager.add(connection):
         await websocket.close(code=1013, reason="server connection limit")
@@ -145,6 +146,8 @@ async def game_socket(websocket: WebSocket):
                     connection.user_id = identity["user_id"]
                     connection.display_name = identity["display_name"]
                     connection.authenticated = True
+                    LOGGER.info("game auth accepted user_id=%s", connection.user_id)
+                    print(f"[8Ball] launch ticket accepted user_id={connection.user_id}")
                     await websocket.send_json({
                         "type": "authenticated",
                         "user": {"user_id": connection.user_id, "display_name": connection.display_name},
@@ -173,6 +176,33 @@ async def game_socket(websocket: WebSocket):
                     await websocket.send_json({"type": "tournament_state", "state": state})
                 except (TournamentError, TypeError, ValueError) as exc:
                     await websocket.send_json({"type": "error", "code": "state_unavailable", "message": str(exc)[:200]})
+            elif message_type == "watch_match":
+                try:
+                    tournament_id = str(message.get("tournament_id", ""))[:40]
+                    match_id = str(message.get("match_id", ""))[:100]
+                    tournament = tournament_manager.get(tournament_id)
+                    if not tournament or match_id not in tournament.matches:
+                        raise TournamentError("match not found")
+                    room_manager.join_room(connection, f"tournament:{tournament_id}")
+                    state = tournament_manager.state(tournament_id)
+                    LOGGER.info("spectator joined tournament=%s match=%s", tournament_id, match_id)
+                    await websocket.send_json({"type": "tournament_state", "state": state, "watching_match": match_id})
+                except (TournamentError, TypeError, ValueError) as exc:
+                    await websocket.send_json({"type": "error", "code": "watch_rejected", "message": str(exc)[:200]})
+            elif message_type == "enter_match":
+                try:
+                    if not connection.authenticated or not connection.user_id:
+                        raise TournamentError("authenticate with the Discord launch button first")
+                    tournament_id = str(message.get("tournament_id", ""))[:40]
+                    match_id = str(message.get("match_id", ""))[:100]
+                    state = tournament_manager.enter_match(tournament_id, match_id, connection.user_id)
+                    room_manager.join_room(connection, f"tournament:{tournament_id}")
+                    LOGGER.info("match entry accepted tournament=%s match=%s user_id=%s", tournament_id, match_id, connection.user_id)
+                    entered = next((item.get("entered_count") for item in state.get("matches", []) if item.get("match_id") == match_id), "?")
+                    print(f"[8Ball] player entered tournament={tournament_id} match={match_id} user_id={connection.user_id} entered={entered}")
+                    await _broadcast_tournament_state(tournament_id, state=state)
+                except (TournamentError, TypeError, ValueError) as exc:
+                    await websocket.send_json({"type": "error", "code": "match_entry_rejected", "message": str(exc)[:200]})
             elif message_type == "report_match_result":
                 try:
                     if not connection.authenticated or not connection.user_id:
@@ -214,6 +244,7 @@ async def game_socket(websocket: WebSocket):
     except Exception:
         LOGGER.exception("Unexpected realtime WebSocket failure")
     finally:
+        LOGGER.info("WebSocket closed user_id=%s room=%s", connection.user_id, connection.room_id)
         room_manager.remove(connection)
 
 

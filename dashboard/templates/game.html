@@ -6,7 +6,7 @@
   <title>Cosmo 8Ball</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='game.css') }}">
 </head>
-<body data-client-id="{{ discord_client_id }}" data-tournament="{{ request.args.get('tournament', '') }}" data-initial-token="{{ initial_token }}">
+<body data-client-id="{{ discord_client_id }}" data-tournament="{{ request.args.get('tournament', '') }}" data-match="{{ request.args.get('match', '') }}" data-ticket="{{ request.args.get('ticket', '') }}" data-spectator="{{ request.args.get('spectator', '') }}" data-initial-token="{{ initial_token }}">
   <main class="game-shell">
     <header class="topbar">
       <div>
@@ -25,10 +25,10 @@
       <div class="auth-box">
         <div class="avatar-orb">◉</div>
         <div>
-          <strong id="identity-label">بانتظار توثيق Discord</strong>
-          <small id="identity-help">يجب توثيق حسابك قبل دخول الغرفة.</small>
+        <strong id="identity-label">بانتظار زر المباراة</strong>
+        <small id="identity-help">افتح الرابط من زر مباراة Discord؛ لا تحتاج إلى تسجيل دخول إضافي.</small>
         </div>
-        <button id="connect-button" class="primary-button">الاتصال بـ Discord</button>
+        <button id="connect-button" class="primary-button">فتح اتصال المباراة</button>
       </div>
       <div class="lobby-stats">
         <div><small>البطولة</small><strong id="tournament-label">—</strong></div>

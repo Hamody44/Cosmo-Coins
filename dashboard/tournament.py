@@ -38,6 +38,13 @@ class Match:
     loser_id: int | None = None
     result_nonce: str | None = None
     completed_at: float | None = None
+    entry_deadline: float | None = None
+    entered_ids: set[int] = field(default_factory=set)
+    launch_sent: bool = False
+    guess_deadline: float | None = None
+    guesses: dict[int, int] = field(default_factory=dict)
+    guess_prompt_sent: bool = False
+    guess_settled_ids: set[int] = field(default_factory=set)
 
     def public(self, players: dict[int, Player]) -> dict[str, Any]:
         return {
@@ -49,6 +56,13 @@ class Match:
                 for player_id in self.player_ids if player_id in players
             ],
             "status": self.status,
+            "entry_deadline": int(self.entry_deadline) if self.entry_deadline else None,
+            "entry_remaining": max(0, int(self.entry_deadline - time.time())) if self.entry_deadline and self.status == "waiting_entry" else 0,
+            "entered_ids": sorted(self.entered_ids),
+            "entered_count": len(self.entered_ids),
+            "guess_deadline": int(self.guess_deadline) if self.guess_deadline else None,
+            "guess_remaining": max(0, int(self.guess_deadline - time.time())) if self.guess_deadline and self.status == "ready" else 0,
+            "guess_open": bool(self.guess_deadline and self.status == "ready" and time.time() <= self.guess_deadline),
             "winner_id": self.winner_id,
             "loser_id": self.loser_id,
         }
@@ -75,6 +89,8 @@ class Tournament:
     completion_nonce: str | None = None
     cancelled_reason: str | None = None
     settlement_status: str = "pending"
+    guess_reward: int = 0
+    spectator_rounds_sent: set[int] = field(default_factory=set)
 
     def state(self, viewer_id: int | None = None, now: float | None = None) -> dict[str, Any]:
         now = float(now if now is not None else time.time())
@@ -97,6 +113,7 @@ class Tournament:
             "has_condition": bool(self.condition),
             "completion_nonce": self.completion_nonce,
             "settlement_status": self.settlement_status,
+            "guess_reward": self.guess_reward,
             "cancelled_reason": self.cancelled_reason,
             "viewer_id": viewer_id,
         }
@@ -117,14 +134,18 @@ class TournamentManager:
         prize_amount: int,
         condition: str | None = None,
         registration_seconds: int = 30,
+        guess_reward: int = 0,
         now: float | None = None,
     ) -> dict[str, Any]:
         prize_amount = int(prize_amount)
         registration_seconds = int(registration_seconds)
+        guess_reward = int(guess_reward)
         if prize_amount <= 0:
             raise TournamentError("prize_amount must be positive")
         if registration_seconds <= 0 or registration_seconds > 300:
             raise TournamentError("registration_seconds must be between 1 and 300")
+        if guess_reward < 0:
+            raise TournamentError("guess_reward cannot be negative")
         with self._lock:
             active = [t for t in self._tournaments.values() if t.guild_id == int(guild_id) and t.status in ("registration", "active")]
             if active:
@@ -143,6 +164,7 @@ class TournamentManager:
                 registration_seconds=registration_seconds,
                 created_at=now,
                 registration_deadline=now + registration_seconds,
+                guess_reward=guess_reward,
             )
             self._tournaments[tournament_id] = tournament
             return tournament.state(now=now)
@@ -174,6 +196,7 @@ class TournamentManager:
             for tournament in list(self._tournaments.values()):
                 before = (tournament.status, tournament.round_number, tournament.winner_id)
                 self._advance_if_due_locked(tournament, now)
+                self._expire_match_entries_locked(tournament, float(now if now is not None else time.time()))
                 after = (tournament.status, tournament.round_number, tournament.winner_id)
                 if after != before:
                     transitions.append(tournament.state(now=now))
@@ -184,6 +207,7 @@ class TournamentManager:
         with self._lock:
             tournament = self._require(tournament_id)
             self._advance_if_due_locked(tournament, now)
+            self._expire_match_entries_locked(tournament, float(now if now is not None else time.time()))
             return tournament.state(viewer_id=viewer_id, now=now)
 
     def report_match_result(
@@ -225,6 +249,131 @@ class TournamentManager:
             match.completed_at = float(now if now is not None else time.time())
             self._advance_round_if_complete_locked(tournament, now)
             return tournament.state(viewer_id=referee_id, now=now)
+
+    def enter_match(self, tournament_id: str, match_id: str, user_id: int, now: float | None = None) -> dict[str, Any]:
+        with self._lock:
+            tournament = self._require(tournament_id)
+            self._advance_if_due_locked(tournament, now)
+            self._expire_match_entries_locked(tournament, float(now if now is not None else time.time()))
+            match = tournament.matches.get(str(match_id))
+            user_id = int(user_id)
+            if tournament.status != "active" or not match or match.match_id not in tournament.round_match_ids:
+                raise TournamentError("match is not accepting players")
+            if match.status != "waiting_entry":
+                if user_id in match.entered_ids and match.status == "ready":
+                    return tournament.state(viewer_id=user_id, now=now)
+                raise TournamentError("match entry is closed")
+            if user_id not in match.player_ids:
+                raise TournamentError("you are not a player in this match")
+            match.entered_ids.add(user_id)
+            if len(match.entered_ids) == 2:
+                match.status = "ready"
+                match.guess_deadline = float(now if now is not None else time.time()) + 10
+            return tournament.state(viewer_id=user_id, now=now)
+
+    def submit_guess(self, tournament_id: str, match_id: str, user_id: int, guessed_winner_id: int, now: float | None = None) -> dict[str, Any]:
+        with self._lock:
+            tournament = self._require(tournament_id)
+            match = tournament.matches.get(str(match_id))
+            now_value = float(now if now is not None else time.time())
+            if not match or match.match_id not in tournament.round_match_ids or match.status != "ready":
+                raise TournamentError("guessing is not open for this match")
+            if not match.guess_deadline or now_value > match.guess_deadline:
+                raise TournamentError("the 10-second guessing window is closed")
+            if int(guessed_winner_id) not in match.player_ids:
+                raise TournamentError("choose one of the two match players")
+            match.guesses[int(user_id)] = int(guessed_winner_id)
+            return tournament.state(viewer_id=int(user_id), now=now)
+
+    def pending_guess_prompts(self) -> list[dict[str, Any]]:
+        with self._lock:
+            result = []
+            for tournament in self._tournaments.values():
+                for match_id in tournament.round_match_ids:
+                    match = tournament.matches.get(match_id)
+                    if tournament.status == "active" and match and match.status == "ready" and not match.guess_prompt_sent:
+                        result.append({"tournament_id": tournament.tournament_id, "guild_id": tournament.guild_id,
+                                       "channel_id": tournament.channel_id, "guess_reward": tournament.guess_reward,
+                                       "match": match.public(tournament.players)})
+            return result
+
+    def mark_guess_prompt_sent(self, tournament_id: str, match_id: str) -> None:
+        with self._lock:
+            tournament = self._require(tournament_id)
+            match = tournament.matches.get(str(match_id))
+            if match:
+                match.guess_prompt_sent = True
+
+    def pending_guess_rewards(self, now: float | None = None) -> list[dict[str, Any]]:
+        now_value = float(now if now is not None else time.time())
+        with self._lock:
+            result = []
+            for tournament in self._tournaments.values():
+                for match in tournament.matches.values():
+                    if match.status != "completed" or not match.guess_deadline or now_value < match.guess_deadline:
+                        continue
+                    for user_id, guessed_winner_id in match.guesses.items():
+                        if guessed_winner_id == match.winner_id and user_id not in match.guess_settled_ids:
+                            result.append({
+                                "tournament_id": tournament.tournament_id,
+                                "match_id": match.match_id,
+                                "guild_id": tournament.guild_id,
+                                "channel_id": tournament.channel_id,
+                                "user_id": user_id,
+                                "amount": tournament.guess_reward,
+                                "winner_id": match.winner_id,
+                                "guessed_winner_name": tournament.players.get(guessed_winner_id, Player(guessed_winner_id, str(guessed_winner_id))).display_name,
+                                "player_names": [
+                                    tournament.players.get(player_id, Player(player_id, str(player_id))).display_name
+                                    for player_id in match.player_ids
+                                ],
+                            })
+            return result
+
+    def mark_guess_reward_settled(self, tournament_id: str, match_id: str, user_id: int) -> None:
+        with self._lock:
+            tournament = self._require(tournament_id)
+            match = tournament.matches.get(str(match_id))
+            if match:
+                match.guess_settled_ids.add(int(user_id))
+
+    def pending_match_launches(self) -> list[dict[str, Any]]:
+        with self._lock:
+            result = []
+            for tournament in self._tournaments.values():
+                for match_id in tournament.round_match_ids:
+                    match = tournament.matches.get(match_id)
+                    if tournament.status == "active" and match and match.status == "waiting_entry" and not match.launch_sent:
+                        result.append({
+                            "tournament_id": tournament.tournament_id,
+                            "guild_id": tournament.guild_id,
+                            "channel_id": tournament.channel_id,
+                            "match": match.public(tournament.players),
+                        })
+            return result
+
+    def mark_match_launch_sent(self, tournament_id: str, match_id: str) -> None:
+        with self._lock:
+            tournament = self._require(tournament_id)
+            match = tournament.matches.get(str(match_id))
+            if match:
+                match.launch_sent = True
+
+    def pending_spectator_lobbies(self) -> list[dict[str, Any]]:
+        with self._lock:
+            result = []
+            for tournament in self._tournaments.values():
+                if tournament.status != "active" or tournament.round_number in tournament.spectator_rounds_sent:
+                    continue
+                matches = [tournament.matches[mid].public(tournament.players) for mid in tournament.round_match_ids if mid in tournament.matches]
+                result.append({"tournament_id": tournament.tournament_id, "guild_id": tournament.guild_id,
+                               "channel_id": tournament.channel_id, "round": tournament.round_number, "matches": matches})
+            return result
+
+    def mark_spectator_lobby_sent(self, tournament_id: str, round_number: int) -> None:
+        with self._lock:
+            tournament = self._require(tournament_id)
+            tournament.spectator_rounds_sent.add(int(round_number))
 
     def cancel(self, tournament_id: str, reason: str = "cancelled") -> dict[str, Any]:
         with self._lock:
@@ -269,6 +418,26 @@ class TournamentManager:
                 tournament.settlement_status = "review_notified"
             return tournament.state()
 
+    def pending_refunds(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                {
+                    "tournament_id": t.tournament_id,
+                    "guild_id": t.guild_id,
+                    "channel_id": t.channel_id,
+                    "prize_amount": t.prize_amount,
+                    "reason": t.cancelled_reason,
+                }
+                for t in self._tournaments.values()
+                if t.status == "cancelled" and t.settlement_status == "pending_refund"
+            ]
+
+    def mark_refunded(self, tournament_id: str) -> dict[str, Any]:
+        with self._lock:
+            tournament = self._require(tournament_id)
+            tournament.settlement_status = "refunded"
+            return tournament.state()
+
     def _require(self, tournament_id: str) -> Tournament:
         tournament = self._tournaments.get(str(tournament_id))
         if not tournament:
@@ -282,9 +451,10 @@ class TournamentManager:
                 tournament.status = "cancelled"
                 tournament.cancelled_reason = "not enough players"
                 return
-            self._seed_first_round_locked(tournament)
+            self._seed_first_round_locked(tournament, now)
 
-    def _seed_first_round_locked(self, tournament: Tournament) -> None:
+    def _seed_first_round_locked(self, tournament: Tournament, now: float | None = None) -> None:
+        now = float(now if now is not None else time.time())
         ids = list(tournament.players)
         random.SystemRandom().shuffle(ids)
         tournament.status = "active"
@@ -293,15 +463,15 @@ class TournamentManager:
         for slot in range(0, len(ids), 2):
             players = ids[slot:slot + 2]
             match_id = f"{tournament.tournament_id}-r1-m{slot // 2 + 1}"
-            match = Match(match_id, 1, slot // 2 + 1, players)
+            match = Match(match_id, 1, slot // 2 + 1, players, status="waiting_entry", entry_deadline=now + 10)
             tournament.matches[match_id] = match
             tournament.round_match_ids.append(match_id)
             if len(players) == 1:
                 match.status = "completed"
                 match.winner_id = players[0]
                 match.result_nonce = f"bye:{match_id}"
-                match.completed_at = time.time()
-        self._advance_round_if_complete_locked(tournament)
+                match.completed_at = now
+        self._advance_round_if_complete_locked(tournament, now)
 
     def _advance_round_if_complete_locked(self, tournament: Tournament, now: float | None = None) -> None:
         current = [tournament.matches[mid] for mid in tournament.round_match_ids]
@@ -319,7 +489,7 @@ class TournamentManager:
         for slot in range(0, len(winners), 2):
             players = [int(item) for item in winners[slot:slot + 2]]
             match_id = f"{tournament.tournament_id}-r{tournament.round_number}-m{slot // 2 + 1}"
-            match = Match(match_id, tournament.round_number, slot // 2 + 1, players)
+            match = Match(match_id, tournament.round_number, slot // 2 + 1, players, status="waiting_entry", entry_deadline=float(now if now is not None else time.time()) + 10)
             tournament.matches[match_id] = match
             tournament.round_match_ids.append(match_id)
             if len(players) == 1:
@@ -328,6 +498,32 @@ class TournamentManager:
                 match.result_nonce = f"bye:{match_id}"
                 match.completed_at = float(now if now is not None else time.time())
         self._advance_round_if_complete_locked(tournament, now)
+
+    def _expire_match_entries_locked(self, tournament: Tournament, now: float) -> None:
+        if tournament.status != "active":
+            return
+        changed = False
+        for match_id in list(tournament.round_match_ids):
+            match = tournament.matches.get(match_id)
+            if not match or match.status != "waiting_entry" or not match.entry_deadline or now < match.entry_deadline:
+                continue
+            if len(match.entered_ids) == 2:
+                match.status = "ready"
+                match.guess_deadline = now + 10
+            elif len(match.entered_ids) == 1:
+                match.status = "completed"
+                match.winner_id = next(iter(match.entered_ids))
+                match.loser_id = next(pid for pid in match.player_ids if pid != match.winner_id)
+                match.result_nonce = f"entry-forfeit:{match.match_id}"
+                match.completed_at = now
+            else:
+                tournament.status = "cancelled"
+                tournament.cancelled_reason = "both players did not enter the match within 10 seconds"
+                tournament.settlement_status = "pending_refund"
+                return
+            changed = True
+        if changed:
+            self._advance_round_if_complete_locked(tournament, now)
 
     def _prune_locked(self, now: float | None = None) -> None:
         now = float(now if now is not None else time.time())

@@ -1,7 +1,8 @@
 const root = document.body;
 const tournamentId = root.dataset.tournament;
-const clientId = root.dataset.clientId;
-let authToken = root.dataset.initialToken || "";
+const matchId = root.dataset.match;
+const spectator = root.dataset.spectator === "1";
+let authToken = root.dataset.ticket || root.dataset.initialToken || "";
 let socket = null;
 let identity = null;
 let state = null;
@@ -90,28 +91,22 @@ function renderState(next) {
   const list = document.querySelector("#match-list"); list.innerHTML = "";
   (next.matches || []).forEach(match => { const el=document.createElement("div"); el.className=`match ${match.status === "ready" ? "active" : ""}`; el.innerHTML=`<div class="match-title"><span>Match ${match.slot}</span><span>${match.status}</span></div>${match.players.map(p=>`<div class="match-player ${p.user_id===match.winner_id?'winner':''}"><span>${escapeHtml(p.display_name)}</span><span>${p.user_id===identity?.user_id?'YOU':''}</span></div>`).join("")}`; list.appendChild(el); });
   if (!next.matches?.length) list.innerHTML = '<p class="muted">ستظهر المجموعات بعد إغلاق التسجيل.</p>';
-  currentMatch = next.matches?.find(m => m.players.some(p => p.user_id === identity?.user_id)) || null;
-  overlay.classList.toggle("hidden", canPlay()); shootButton.disabled = !canPlay();
+  currentMatch = spectator ? (next.matches?.find(m => m.match_id === matchId) || null) : (next.matches?.find(m => m.players.some(p => p.user_id === identity?.user_id)) || null);
+  if (spectator) { overlay.textContent = "وضع المشاهدة المباشرة"; overlay.classList.add("hidden"); }
+  else if (canPlay()) { overlay.textContent = "ابدأ اللعب"; overlay.classList.add("hidden"); }
+  else if (currentMatch?.status === "waiting_entry") { overlay.textContent = `بانتظار اللاعب الآخر… ${currentMatch.entry_remaining || 0} ث`; overlay.classList.remove("hidden"); }
+  else if (currentMatch?.status === "ready") { overlay.textContent = "المباراة جاهزة"; overlay.classList.add("hidden"); }
+  else { overlay.textContent = "هذه المباراة ليست جاهزة للعب"; overlay.classList.remove("hidden"); }
+  shootButton.disabled = !canPlay();
 }
 function escapeHtml(v) { return String(v).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 
-async function discordAuthorize() {
-  if (authToken) return;
-  try {
-    const { DiscordSDK } = await import("https://cdn.jsdelivr.net/npm/@discord/embedded-app-sdk@2/+esm");
-    const sdk = new DiscordSDK(clientId); await sdk.ready();
-    const { code } = await sdk.commands.authorize({ client_id: clientId, response_type: "code", state: crypto.randomUUID(), scope: ["identify"] });
-    const response = await fetch("/game-auth/discord", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ code, redirect_uri: location.origin + "/game" }) });
-    if (!response.ok) throw new Error("Discord authorization failed");
-    authToken = (await response.json()).token;
-  } catch (error) { toast("افتح اللعبة داخل Discord لإتمام التوثيق."); throw error; }
-}
 function connect() {
   socket = new WebSocket(wsUrl()); setStatus("جارٍ الاتصال…");
-  socket.onopen = async () => { try { await discordAuthorize(); send({type:"auth",token:authToken}); } catch { socket.close(); } };
-  socket.onmessage = event => { const message=JSON.parse(event.data); if(message.type==="hello") return; if(message.type==="authenticated"){identity=message.user;identityEl.textContent=identity.display_name;helpEl.textContent=`Discord ID: ${identity.user_id}`;setStatus("موثق ومتصل",true);connectButton.disabled=true;send({type:"join_tournament",tournament_id:tournamentId});} else if(message.type==="tournament_state") renderState(message.state); else if(message.type==="error") toast(message.message || "تعذر تنفيذ العملية"); };
+  socket.onopen = async () => { if (authToken) send({type:"auth",token:authToken}); else if (spectator) send({type:"watch_match",tournament_id:tournamentId,match_id:matchId}); else { toast("افتح اللعبة من زر مباراة Discord."); socket.close(); } };
+  socket.onmessage = event => { const message=JSON.parse(event.data); if(message.type==="hello") return; if(message.type==="authenticated"){identity=message.user;identityEl.textContent=identity.display_name;helpEl.textContent=`Discord ID: ${identity.user_id}`;setStatus("متصل",true);connectButton.disabled=true;send(matchId ? {type:"enter_match",tournament_id:tournamentId,match_id:matchId} : {type:"join_tournament",tournament_id:tournamentId});} else if(message.type==="tournament_state"){renderState(message.state);if(spectator){identityEl.textContent="مشاهد";helpEl.textContent="المشاهدة فقط — لا يمكنك التحكم بالكرات.";setStatus("مشاهدة مباشرة",true);connectButton.disabled=true;}} else if(message.type==="error") toast(message.message || "تعذر تنفيذ العملية"); };
   socket.onclose = () => { setStatus("انقطع الاتصال"); connectButton.disabled=false; };
 }
 connectButton.addEventListener("click", connect);
 initRack(); physics();
-if (authToken) connect();
+if (authToken || spectator) connect();

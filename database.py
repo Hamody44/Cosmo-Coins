@@ -369,6 +369,7 @@ def get_guild_db(guild_id: int):
                 "UPDATE settings SET owner_role_id = admin_role_id, admin_role_id = NULL "
                 "WHERE admin_role_id IS NOT NULL"
             )
+    _ensure_guild_db_column(cur, "settings", "eightball_guess_reward", "INTEGER NOT NULL DEFAULT 0", schema_key)
     _ensure_guild_db_column(cur, "premium_info", "custom_currency_name", "TEXT", schema_key)
 
     if schema_key not in _guild_schema_initialized:
@@ -418,6 +419,27 @@ def get_currency_label(guild_id: int | None = None) -> str:
         return label.replace("@", "@\u200b").replace("`", "ˋ").replace("<", "‹").replace(">", "›")
     finally:
         g_conn.close()
+
+def get_eightball_guess_reward(guild_id: int) -> int:
+    conn, cur = get_guild_db(int(guild_id))
+    try:
+        row = cur.execute("SELECT COALESCE(eightball_guess_reward, 0) FROM settings WHERE guild_id = ?", (int(guild_id),)).fetchone()
+        return max(0, int(row[0] or 0)) if row else 0
+    finally:
+        conn.close()
+
+def set_eightball_guess_reward(guild_id: int, amount: int, actor_id: int | None = None) -> int:
+    amount = int(amount)
+    if amount < 0:
+        raise ValueError("مكافأة التخمين لا يمكن أن تكون سالبة.")
+    conn, cur = get_guild_db(int(guild_id))
+    try:
+        cur.execute("UPDATE settings SET eightball_guess_reward = ? WHERE guild_id = ?", (amount, int(guild_id)))
+        conn.commit()
+    finally:
+        conn.close()
+    record_audit("eightball_guess_reward_changed", guild_id=int(guild_id), actor_id=actor_id, amount=amount, reason="8Ball guess reward setting", source="discord")
+    return amount
 
 def get_exchange_currencies(active_only: bool = False):
     """الكتالوج المشترك؛ قاعدة سيرفر Cosmo هي المصدر الوحيد لكل السيرفرات."""

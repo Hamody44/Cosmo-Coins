@@ -85,3 +85,82 @@ class EightBallTournamentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MatchEntryWindowTests(unittest.TestCase):
+    def test_both_players_must_enter_before_match_becomes_ready(self):
+        manager = TournamentManager()
+        created = manager.create(guild_id=1, channel_id=2, created_by=9, prize_amount=100, registration_seconds=1, now=100)
+        tid = created["tournament_id"]
+        manager.join(tid, 10, "A", now=100.1)
+        manager.join(tid, 11, "B", now=100.1)
+        state = manager.state(tid, now=101)
+        match_id = state["matches"][0]["match_id"]
+        waiting = manager.enter_match(tid, match_id, 10, now=101.1)
+        self.assertEqual(waiting["matches"][0]["status"], "waiting_entry")
+        ready = manager.enter_match(tid, match_id, 11, now=101.2)
+        self.assertEqual(ready["matches"][0]["status"], "ready")
+        self.assertEqual(ready["matches"][0]["entered_count"], 2)
+
+    def test_no_player_entry_cancels_and_marks_tournament_for_refund(self):
+        manager = TournamentManager()
+        created = manager.create(guild_id=1, channel_id=2, created_by=9, prize_amount=100, registration_seconds=1, now=100)
+        tid = created["tournament_id"]
+        manager.join(tid, 10, "A", now=100.1)
+        manager.join(tid, 11, "B", now=100.1)
+        state = manager.state(tid, now=101)
+        self.assertEqual(state["status"], "active")
+        manager.tick(now=112)
+        state = manager.state(tid, now=112)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(len(manager.pending_refunds()), 1)
+
+    def test_one_player_entry_forfeits_the_absent_player_without_starting_physics(self):
+        manager = TournamentManager()
+        created = manager.create(guild_id=1, channel_id=2, created_by=9, prize_amount=100, registration_seconds=1, now=100)
+        tid = created["tournament_id"]
+        manager.join(tid, 10, "A", now=100.1)
+        manager.join(tid, 11, "B", now=100.1)
+        match_id = manager.state(tid, now=101)["matches"][0]["match_id"]
+        manager.enter_match(tid, match_id, 10, now=101.1)
+        manager.tick(now=112)
+        completed = manager.completion(tid)
+        self.assertIsNotNone(completed)
+        self.assertEqual(completed["winner_id"], 10)
+
+
+class SpectatorGuessTests(unittest.TestCase):
+    def test_guess_can_be_changed_for_ten_seconds_without_a_stake(self):
+        manager = TournamentManager()
+        created = manager.create(guild_id=1, channel_id=2, created_by=9, prize_amount=100, guess_reward=25, registration_seconds=1, now=100)
+        tid = created["tournament_id"]
+        manager.join(tid, 10, "A", now=100.1)
+        manager.join(tid, 11, "B", now=100.1)
+        match_id = manager.state(tid, now=101)["matches"][0]["match_id"]
+        manager.enter_match(tid, match_id, 10, now=101.1)
+        manager.enter_match(tid, match_id, 11, now=101.2)
+        manager.submit_guess(tid, match_id, 50, 10, now=102)
+        manager.submit_guess(tid, match_id, 50, 11, now=103)
+        with self.assertRaises(TournamentError):
+            manager.submit_guess(tid, match_id, 50, 10, now=112)
+        manager.report_match_result(tid, match_id, 11, referee_id=9, now=104)
+        rewards = manager.pending_guess_rewards(now=112)
+        self.assertEqual(len(rewards), 1)
+        self.assertEqual(rewards[0]["user_id"], 50)
+        self.assertEqual(rewards[0]["amount"], 25)
+        self.assertEqual(rewards[0]["channel_id"], 2)
+        self.assertEqual(rewards[0]["player_names"], ["A", "B"])
+        self.assertEqual(rewards[0]["guessed_winner_name"], "B")
+
+    def test_spectator_lobby_lists_active_matches(self):
+        manager = TournamentManager()
+        created = manager.create(guild_id=1, channel_id=2, created_by=9, prize_amount=100, registration_seconds=1, now=100)
+        tid = created["tournament_id"]
+        for user_id in (10, 11, 12, 13):
+            manager.join(tid, user_id, str(user_id), now=100.1)
+        manager.state(tid, now=101)
+        lobbies = manager.pending_spectator_lobbies()
+        self.assertEqual(len(lobbies), 1)
+        self.assertEqual(len(lobbies[0]["matches"]), 2)
+        manager.mark_spectator_lobby_sent(tid, 1)
+        self.assertEqual(manager.pending_spectator_lobbies(), [])
