@@ -27,6 +27,7 @@ from database import (
     create_exchange_request, deny_exchange_request,
 )
 from ltcpay import active_store_id, get_invoice, verify_webhook_signature
+from dashboard.game_auth import issue_game_token
 
 load_dotenv(os.path.join(project_root, ".env"))
 
@@ -314,6 +315,56 @@ def make_session_permanent():
 def index():
     user = session.get("user")
     return render_template("index.html", user=user)
+
+@app.route("/game")
+def game():
+    user = session.get("user")
+    initial_token = ""
+    if user:
+        try:
+            initial_token = issue_game_token(user)
+        except RuntimeError:
+            pass
+    return render_template("game.html", discord_client_id=CLIENT_ID, user=user, initial_token=initial_token)
+
+@app.route("/game-auth/discord", methods=["POST"])
+def game_auth_discord():
+    """Exchange an Embedded App authorization code and issue a short-lived game ticket."""
+    payload = request.get_json(silent=True) or {}
+    code = str(payload.get("code", "")).strip()
+    if not code or not CLIENT_SECRET:
+        return {"error": "discord_authorization_unavailable"}, 503 if not CLIENT_SECRET else 400
+    redirect_uri = str(payload.get("redirect_uri", "")).strip()
+    configured_url = os.getenv("DASHBOARD_URL", "").rstrip("/")
+    expected_redirect = f"{configured_url}/game" if configured_url else f"{request.scheme}://{request.host}/game"
+    if redirect_uri != expected_redirect:
+        return {"error": "invalid_redirect_uri"}, 400
+    token_response = requests.post(
+        f"{DISCORD_API_BASE}/oauth2/token",
+        data={
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=8,
+    )
+    token_data = token_response.json()
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return {"error": "discord_code_rejected"}, 401
+    user_response = requests.get(
+        f"{DISCORD_API_BASE}/users/@me",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=8,
+    )
+    if user_response.status_code != 200:
+        return {"error": "discord_identity_unavailable"}, 401
+    user = user_response.json()
+    session["user"] = user
+    return {"token": issue_game_token(user), "user": {"id": int(user["id"]), "display_name": user.get("global_name") or user.get("username")}}
 
 @app.route("/login")
 def login():
@@ -956,7 +1007,13 @@ def profile():
     )
 
 def run_dashboard():
-    app.run(host="0.0.0.0", port=2009, debug=False, use_reloader=False)
+    # Serve Flask routes and the game's WebSocket from one ASGI origin/port.
+    # The import is intentionally lazy to avoid a circular import: realtime.py
+    # wraps this Flask app with WsgiToAsgi.
+    import uvicorn
+    from dashboard.realtime import asgi_app
+
+    uvicorn.run(asgi_app, host="0.0.0.0", port=2009, log_level="info")
 
 if __name__ == "__main__":
     run_dashboard()

@@ -5,3 +5,6 @@ google-genai
 Flask
 requests
 openai
+asgiref
+starlette
+uvicorn

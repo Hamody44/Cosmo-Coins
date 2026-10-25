@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cosmo 8Ball</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='game.css') }}">
+</head>
+<body data-client-id="{{ discord_client_id }}" data-tournament="{{ request.args.get('tournament', '') }}" data-initial-token="{{ initial_token }}">
+  <main class="game-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">COSMO ARCADE / 01</p>
+        <h1>بطولة <span>8Ball</span></h1>
+      </div>
+      <div class="status-pill" id="connection-status">غير متصل</div>
+    </header>
+
+    <section class="lobby-panel" id="lobby-panel">
+      <div class="panel-copy">
+        <span class="kicker">TOURNAMENT LOBBY</span>
+        <h2>ادخل البطولة، خذ مكانك، واضرب الكرة الأخيرة.</h2>
+        <p>التسجيل يغلق تلقائيًا بعد 30 ثانية، ثم يبدأ خروج المغلوب 1v1.</p>
+      </div>
+      <div class="auth-box">
+        <div class="avatar-orb">◉</div>
+        <div>
+          <strong id="identity-label">بانتظار توثيق Discord</strong>
+          <small id="identity-help">يجب توثيق حسابك قبل دخول الغرفة.</small>
+        </div>
+        <button id="connect-button" class="primary-button">الاتصال بـ Discord</button>
+      </div>
+      <div class="lobby-stats">
+        <div><small>البطولة</small><strong id="tournament-label">—</strong></div>
+        <div><small>المشاركون</small><strong id="player-count">0 / 64</strong></div>
+        <div><small>الحالة</small><strong id="tournament-status">بانتظار الاتصال</strong></div>
+      </div>
+    </section>
+
+    <section class="play-layout">
+      <div class="table-card">
+        <div class="table-heading"><span>TABLE 08</span><span id="round-label">الجولة —</span></div>
+        <div class="table-wrap">
+          <canvas id="pool-table" width="1000" height="560" aria-label="طاولة 8Ball"></canvas>
+          <div class="table-overlay" id="table-overlay">وثّق حسابك للبدء</div>
+        </div>
+        <div class="controls">
+          <label>القوة <input id="power" type="range" min="10" max="100" value="55"><b id="power-value">55%</b></label>
+          <button id="shoot-button" class="shoot-button" disabled>اضرب الكرة</button>
+        </div>
+      </div>
+
+      <aside class="bracket-card">
+        <div class="bracket-heading"><span>BRACKET</span><span class="live-dot">LIVE</span></div>
+        <div id="match-list" class="match-list"><p class="muted">ستظهر المجموعات بعد إغلاق التسجيل.</p></div>
+        <div class="rules">
+          <strong>قواعد الجولة</strong>
+          <p>مباراة 1 ضد 1. الفائز ينتقل للجولة التالية. النتيجة النهائية لا تُعتمد من المتصفح وحده.</p>
+        </div>
+      </aside>
+    </section>
+    <div id="toast" class="toast" role="status"></div>
+  </main>
+  <script type="module" src="{{ url_for('static', filename='game.js') }}"></script>
+</body>
+</html>

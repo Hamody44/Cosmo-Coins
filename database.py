@@ -1847,3 +1847,50 @@ def list_payment_orders(guild_id: int | None = None, *, pending_only: bool = Fal
             continue
     result.sort(key=lambda item: int(item.get("created_at") or 0), reverse=True)
     return result[:max(1, min(int(limit), 200))]
+
+
+def credit_eightball_prize(guild_id: int, tournament_id: str, user_id: int, amount: int) -> dict:
+    """Credit one already-reserved 8Ball prize exactly once."""
+    guild_id, user_id, amount = int(guild_id), int(user_id), int(amount)
+    tournament_id = str(tournament_id).strip()[:80]
+    if not tournament_id or user_id <= 0 or amount <= 0:
+        raise ValueError("بيانات جائزة 8Ball غير صحيحة.")
+    payout_key = f"8ball:{guild_id}:{tournament_id}"
+    created_at = int(time.time())
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=15)) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS eightball_prize_payouts (
+            payout_key TEXT PRIMARY KEY,
+            guild_id INTEGER NOT NULL,
+            tournament_id TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL CHECK(amount > 0),
+            created_at INTEGER NOT NULL
+        )""")
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT user_id, amount FROM eightball_prize_payouts WHERE payout_key = ?", (payout_key,)
+        ).fetchone()
+        if existing:
+            if int(existing[0]) != user_id or int(existing[1]) != amount:
+                conn.rollback()
+                raise ValueError("بطولة 8Ball مرتبطة بجائزة مختلفة.")
+            conn.commit()
+            return {"status": "already_paid", "user_id": user_id, "amount": amount}
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (user_id,))
+        credit = conn.execute(
+            "UPDATE balances SET balance = balance + ? WHERE user_id = ? AND balance <= ?",
+            (amount, user_id, MAX_SQLITE_INTEGER - amount),
+        )
+        if credit.rowcount != 1:
+            conn.rollback()
+            raise ValueError("رصيد الفائز سيتجاوز الحد الصحيح المدعوم.")
+        conn.execute(
+            "INSERT INTO eightball_prize_payouts (payout_key, guild_id, tournament_id, user_id, amount, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (payout_key, guild_id, tournament_id, user_id, amount, created_at),
+        )
+        conn.commit()
+    record_audit(
+        "eightball_prize_paid", guild_id=guild_id, target_user_id=user_id,
+        amount=amount, reason=f"8Ball tournament {tournament_id}", source="worker",
+    )
+    return {"status": "paid", "user_id": user_id, "amount": amount}
