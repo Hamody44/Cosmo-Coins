@@ -24,6 +24,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from dashboard.app import app as flask_app
 from dashboard.game_auth import verify_game_token
 from dashboard.tournament import TournamentError, TournamentManager
+from dashboard.pool_game import PoolGame
 
 LOGGER = logging.getLogger("cosmo.realtime")
 PROTOCOL_VERSION = "cosmo-8ball-v1"
@@ -38,6 +39,7 @@ class GameConnection:
     user_id: int | None = None
     display_name: str | None = None
     authenticated: bool = False
+    match_key: str | None = None
 
 
 class GameRoomManager:
@@ -98,6 +100,7 @@ class GameRoomManager:
 
 room_manager = GameRoomManager()
 tournament_manager = TournamentManager()
+pool_games: dict[str, PoolGame] = {}
 
 
 async def health(request):
@@ -122,7 +125,7 @@ async def game_socket(websocket: WebSocket):
             "type": "hello",
             "protocol": PROTOCOL_VERSION,
             "server_time": int(time.time()),
-            "features": ["heartbeat", "rooms", "tournament-ready", "discord-auth-required"],
+            "features": ["heartbeat", "rooms", "tournament-ready", "authoritative-pool-physics", "spectator-mode"],
         })
         while True:
             raw = await websocket.receive_text()
@@ -184,9 +187,13 @@ async def game_socket(websocket: WebSocket):
                     if not tournament or match_id not in tournament.matches:
                         raise TournamentError("match not found")
                     room_manager.join_room(connection, f"tournament:{tournament_id}")
+                    match = tournament.matches[match_id]
+                    connection.match_key = f"{tournament_id}:{match_id}"
+                    pool_games.setdefault(connection.match_key, PoolGame.create(connection.match_key, match.player_ids))
                     state = tournament_manager.state(tournament_id)
                     LOGGER.info("spectator joined tournament=%s match=%s", tournament_id, match_id)
                     await websocket.send_json({"type": "tournament_state", "state": state, "watching_match": match_id})
+                    await websocket.send_json({"type": "pool_state", "state": pool_games[connection.match_key].public(), "spectator": True})
                 except (TournamentError, TypeError, ValueError) as exc:
                     await websocket.send_json({"type": "error", "code": "watch_rejected", "message": str(exc)[:200]})
             elif message_type == "enter_match":
@@ -197,12 +204,31 @@ async def game_socket(websocket: WebSocket):
                     match_id = str(message.get("match_id", ""))[:100]
                     state = tournament_manager.enter_match(tournament_id, match_id, connection.user_id)
                     room_manager.join_room(connection, f"tournament:{tournament_id}")
+                    tournament = tournament_manager.get(tournament_id)
+                    match = tournament.matches.get(match_id) if tournament else None
+                    if not match or len(match.player_ids) != 2:
+                        raise TournamentError("match needs two players")
+                    connection.match_key = f"{tournament_id}:{match_id}"
+                    pool_games.setdefault(connection.match_key, PoolGame.create(connection.match_key, match.player_ids))
                     LOGGER.info("match entry accepted tournament=%s match=%s user_id=%s", tournament_id, match_id, connection.user_id)
                     entered = next((item.get("entered_count") for item in state.get("matches", []) if item.get("match_id") == match_id), "?")
                     print(f"[8Ball] player entered tournament={tournament_id} match={match_id} user_id={connection.user_id} entered={entered}")
                     await _broadcast_tournament_state(tournament_id, state=state)
+                    await _broadcast_pool_state(connection.match_key)
+                    await websocket.send_json({"type": "pool_state", "state": pool_games[connection.match_key].public(), "spectator": False})
                 except (TournamentError, TypeError, ValueError) as exc:
                     await websocket.send_json({"type": "error", "code": "match_entry_rejected", "message": str(exc)[:200]})
+            elif message_type == "shoot":
+                try:
+                    if not connection.authenticated or not connection.user_id or not connection.match_key:
+                        raise TournamentError("enter a match before shooting")
+                    game = pool_games.get(connection.match_key)
+                    if not game:
+                        raise TournamentError("pool game is not ready")
+                    game.shoot(connection.user_id, float(message.get("angle", 0)), float(message.get("power", 0.5)))
+                    await _broadcast_pool_state(connection.match_key)
+                except (TournamentError, TypeError, ValueError) as exc:
+                    await websocket.send_json({"type": "error", "code": "shot_rejected", "message": str(exc)[:200]})
             elif message_type == "report_match_result":
                 try:
                     if not connection.authenticated or not connection.user_id:
@@ -258,6 +284,35 @@ async def _broadcast_tournament_state(tournament_id: str, state: dict[str, Any] 
             room_manager.remove(connection)
 
 
+async def _broadcast_pool_state(match_key: str) -> None:
+    game = pool_games.get(match_key)
+    if not game:
+        return
+    payload = {"type": "pool_state", "state": game.public(), "spectator": True}
+    tournament_id = match_key.split(":", 1)[0]
+    for connection in room_manager.room_connections(f"tournament:{tournament_id}"):
+        if connection.match_key != match_key:
+            continue
+        try:
+            await connection.websocket.send_json(payload)
+        except Exception:
+            room_manager.remove(connection)
+
+
+async def _pool_physics_loop() -> None:
+    while True:
+        try:
+            for match_key, game in list(pool_games.items()):
+                if game.step():
+                    await _broadcast_pool_state(match_key)
+            await asyncio.sleep(1 / 30)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("Pool physics loop failure")
+            await asyncio.sleep(0.1)
+
+
 async def _tournament_reaper() -> None:
     while True:
         try:
@@ -275,11 +330,13 @@ async def _tournament_reaper() -> None:
 @asynccontextmanager
 async def lifespan(_app):
     reaper = asyncio.create_task(_tournament_reaper())
+    physics = asyncio.create_task(_pool_physics_loop())
     try:
         yield
     finally:
         reaper.cancel()
-        await asyncio.gather(reaper, return_exceptions=True)
+        physics.cancel()
+        await asyncio.gather(reaper, physics, return_exceptions=True)
 
 
 asgi_app = Starlette(
