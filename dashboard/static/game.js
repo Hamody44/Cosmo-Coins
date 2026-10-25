@@ -40,7 +40,17 @@ function drawTable(){
   ctx.fillStyle="#125c45";roundRect(table.x,table.y,table.w,table.h,table.r);ctx.fill();ctx.strokeStyle="#319d70";ctx.lineWidth=3;ctx.stroke();
   pockets.forEach(([x,y])=>{const p={x:table.x+x*table.w,y:table.y+y*table.h};ctx.beginPath();ctx.arc(p.x,p.y,23,0,Math.PI*2);ctx.fillStyle="#050706";ctx.fill();ctx.strokeStyle="#b66c36";ctx.lineWidth=4;ctx.stroke();});
   (poolState?.balls || fallbackBalls()).filter(b=>!b.pocketed).forEach(drawBall);
-  if(canPlay()){const cue=poolState.balls.find(b=>b.number===0);if(cue){const p=toPixel(cue),a={x:table.x+aim.x*table.w,y:table.y+aim.y*table.h};ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(a.x,a.y);ctx.strokeStyle="#e9f6d588";ctx.setLineDash([10,10]);ctx.lineWidth=2;ctx.stroke();ctx.setLineDash([]);}}
+  if(canPlay()){const cue=poolState.balls.find(b=>b.number===0);if(cue)drawCueStick(cue);}
+}
+function drawCueStick(cue){
+  const p=toPixel(cue), target={x:table.x+aim.x*table.w,y:table.y+aim.y*table.h};
+  const angle=Math.atan2(target.y-p.y,target.x-p.x), length=Math.min(320,table.w*.34);
+  ctx.save();ctx.translate(p.x,p.y);ctx.rotate(angle);
+  ctx.shadowColor="#000b";ctx.shadowBlur=8;
+  ctx.fillStyle="#e3b26a";ctx.fillRect(-length-18,-3,length,6);
+  ctx.fillStyle="#fff0ba";ctx.fillRect(-length+20,-2,length*.64,4);
+  ctx.fillStyle="#512b18";ctx.fillRect(-length-30,-7,28,14);
+  ctx.fillStyle="#d9d9c4";ctx.fillRect(-length+18,-2,7,4);ctx.restore();
 }
 function roundRect(x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r);}
 function renderState(next){
@@ -49,17 +59,29 @@ function renderState(next){
   const list=document.querySelector("#match-list");list.innerHTML="";(next.matches||[]).forEach(match=>{const el=document.createElement("div");el.className=`match ${match.status==="ready"?"active":""}`;el.innerHTML=`<div class="match-title"><span>Match ${match.slot}</span><span>${match.status}</span></div>${match.players.map(p=>`<div class="match-player ${p.user_id===match.winner_id?'winner':''}"><span>${escapeHtml(p.display_name)}</span><span>${p.user_id===identity?.user_id?'YOU':''}</span></div>`).join("")}`;list.appendChild(el);});
   if(!next.matches?.length)list.innerHTML='<p class="muted">ستظهر المباريات بعد إغلاق التسجيل.</p>';
   currentMatch=spectator?(next.matches||[]).find(m=>m.match_id===matchId)||null:(next.matches||[]).find(m=>m.players.some(p=>p.user_id===identity?.user_id))||null;
+  updateHud();
   if(spectator){overlay.textContent="وضع المشاهدة المباشرة";overlay.classList.add("hidden");}
   else if(canPlay()){overlay.textContent=poolState?.moving?"الكرات تتحرك…":"دورك — صوب واضرب";overlay.classList.toggle("hidden",!poolState?.moving);}
   else if(currentMatch?.status==="waiting_entry"){overlay.textContent=`بانتظار اللاعب الآخر… ${currentMatch.entry_remaining||0} ث`;overlay.classList.remove("hidden");}
-  else{overlay.textContent="بانتظار بدء المباراة";overlay.classList.remove("hidden");}
+  else if(currentMatch?.status==="ready" && poolState){overlay.textContent="دور الخصم — انتظر دوره";overlay.classList.remove("hidden");}
+  else{overlay.textContent="تهيئة المباراة…";overlay.classList.remove("hidden");}
   shootButton.disabled=!canPlay();
+}
+function updateHud(){
+  const players=currentMatch?.players||[];
+  document.querySelector("#player-one-name").textContent=players[0]?.display_name||"—";
+  document.querySelector("#player-two-name").textContent=players[1]?.display_name||"—";
+  const turn=poolState?.turn_user_id;
+  document.querySelector("#player-one-turn").textContent=turn===players[0]?.user_id?"دوره":"";
+  document.querySelector("#player-two-turn").textContent=turn===players[1]?.user_id?"دوره":"";
+  document.querySelector("#turn-label").textContent=poolState?.moving?"الكرات تتحرك":turn===identity?.user_id?"دورك":"دور الخصم";
+  document.querySelector("#turn-timer").textContent=String(poolState?.turn_remaining??30);
 }
 function escapeHtml(v){return String(v).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
 function connect(){
   socket=new WebSocket(wsUrl());setStatus("جارٍ الاتصال…");
   socket.onopen=()=>{if(authToken)send({type:"auth",token:authToken});else if(spectator)send({type:"watch_match",tournament_id:tournamentId,match_id:matchId});else{toast("افتح اللعبة من زر مباراة Discord.");socket.close();}};
-  socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.type==="hello")return;if(message.type==="authenticated"){identity=message.user;identityEl.textContent=identity.display_name;helpEl.textContent=`Discord ID: ${identity.user_id}`;setStatus("متصل",true);connectButton.disabled=true;send({type:"enter_match",tournament_id:tournamentId,match_id:matchId});}else if(message.type==="tournament_state"){renderState(message.state);if(spectator){identityEl.textContent="مشاهد";helpEl.textContent="المشاهدة فقط — لا يمكنك التحكم بالكرات.";setStatus("مشاهدة مباشرة",true);connectButton.disabled=true;}}else if(message.type==="pool_state"){poolState=message.state;drawTable();if(state)renderState(state);}else if(message.type==="error")toast(message.message||"تعذر تنفيذ العملية");};
+  socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.type==="hello")return;if(message.type==="authenticated"){identity=message.user;identityEl.textContent=identity.display_name;helpEl.textContent=`Discord ID: ${identity.user_id}`;setStatus("متصل",true);connectButton.disabled=true;send({type:"enter_match",tournament_id:tournamentId,match_id:matchId});}else if(message.type==="tournament_state"){renderState(message.state);if(spectator){identityEl.textContent="مشاهد";helpEl.textContent="المشاهدة فقط — لا يمكنك التحكم بالكرات.";setStatus("مشاهدة مباشرة",true);connectButton.disabled=true;}}else if(message.type==="pool_state"){poolState=message.state;drawTable();updateHud();if(state)renderState(state);}else if(message.type==="error")toast(message.message||"تعذر تنفيذ العملية");};
   socket.onclose=()=>{setStatus("انقطع الاتصال");if(!spectator)connectButton.disabled=false;};
 }
 canvas.addEventListener("pointermove",event=>{const r=canvas.getBoundingClientRect();aim.x=Math.max(0,Math.min(1,(event.clientX-r.left)/r.width));aim.y=Math.max(0,Math.min(1,(event.clientY-r.top)/r.height));drawTable();});

@@ -190,6 +190,8 @@ async def game_socket(websocket: WebSocket):
                     match = tournament.matches[match_id]
                     connection.match_key = f"{tournament_id}:{match_id}"
                     pool_games.setdefault(connection.match_key, PoolGame.create(connection.match_key, match.player_ids))
+                    if match.status == "ready":
+                        pool_games[connection.match_key].start_turn()
                     state = tournament_manager.state(tournament_id)
                     LOGGER.info("spectator joined tournament=%s match=%s", tournament_id, match_id)
                     await websocket.send_json({"type": "tournament_state", "state": state, "watching_match": match_id})
@@ -210,6 +212,8 @@ async def game_socket(websocket: WebSocket):
                         raise TournamentError("match needs two players")
                     connection.match_key = f"{tournament_id}:{match_id}"
                     pool_games.setdefault(connection.match_key, PoolGame.create(connection.match_key, match.player_ids))
+                    if match.status == "ready":
+                        pool_games[connection.match_key].start_turn()
                     LOGGER.info("match entry accepted tournament=%s match=%s user_id=%s", tournament_id, match_id, connection.user_id)
                     entered = next((item.get("entered_count") for item in state.get("matches", []) if item.get("match_id") == match_id), "?")
                     print(f"[8Ball] player entered tournament={tournament_id} match={match_id} user_id={connection.user_id} entered={entered}")
@@ -300,12 +304,17 @@ async def _broadcast_pool_state(match_key: str) -> None:
 
 
 async def _pool_physics_loop() -> None:
+    last_remaining: dict[str, int] = {}
     while True:
         try:
             for match_key, game in list(pool_games.items()):
-                if game.step():
+                changed = game.step()
+                remaining = game.public()["turn_remaining"]
+                timer_changed = last_remaining.get(match_key) != remaining
+                last_remaining[match_key] = remaining
+                if changed or timer_changed:
                     await _broadcast_pool_state(match_key)
-            await asyncio.sleep(1 / 30)
+            await asyncio.sleep(1 / 30 if any(game.moving for game in pool_games.values()) else 0.25)
         except asyncio.CancelledError:
             raise
         except Exception:

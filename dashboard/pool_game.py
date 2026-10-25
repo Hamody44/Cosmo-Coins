@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 POCKETS = ((0.0, 0.0), (0.5, 0.0), (1.0, 0.0), (0.0, 1.0), (0.5, 1.0), (1.0, 1.0))
 BALL_RADIUS = 0.026
+TURN_SECONDS = 30
 
 
 @dataclass
@@ -34,6 +35,7 @@ class PoolGame:
     last_update: float = field(default_factory=time.monotonic)
     shot_number: int = 0
     started_at: float = field(default_factory=time.time)
+    turn_deadline: float | None = None
 
     @classmethod
     def create(cls, match_key: str, player_ids: list[int]) -> "PoolGame":
@@ -54,6 +56,7 @@ class PoolGame:
         return self.player_ids[self.turn_index] if not self.moving else self.player_ids[self.turn_index]
 
     def shoot(self, user_id: int, angle: float, power: float) -> None:
+        self._expire_turn_if_needed()
         if int(user_id) != self.current_player_id:
             raise ValueError("it is not your turn")
         if self.moving:
@@ -68,13 +71,18 @@ class PoolGame:
         cue.vx = math.cos(angle) * speed
         cue.vy = math.sin(angle) * speed
         self.moving = True
+        self.turn_deadline = None
         self.shot_number += 1
         self.last_update = time.monotonic()
 
     def step(self, now: float | None = None) -> bool:
-        if not self.moving:
-            return False
         now = float(now if now is not None else time.monotonic())
+        if not self.moving:
+            if self.turn_deadline is not None and now >= self.turn_deadline:
+                self.turn_index = (self.turn_index + 1) % 2
+                self.turn_deadline = now + TURN_SECONDS
+                return True
+            return False
         dt = max(0.0, min(now - self.last_update, 0.05))
         self.last_update = now
         if dt <= 0:
@@ -114,7 +122,17 @@ class PoolGame:
                 ball.vx = ball.vy = 0.0
             self.moving = False
             self.turn_index = (self.turn_index + 1) % 2
+            self.turn_deadline = now + TURN_SECONDS
         return True
+
+    def start_turn(self, now: float | None = None) -> None:
+        if self.turn_deadline is None and not self.moving:
+            self.turn_deadline = float(now if now is not None else time.monotonic()) + TURN_SECONDS
+
+    def _expire_turn_if_needed(self) -> None:
+        if self.turn_deadline is not None and time.monotonic() >= self.turn_deadline:
+            self.turn_index = (self.turn_index + 1) % 2
+            self.turn_deadline = time.monotonic() + TURN_SECONDS
 
     def public(self) -> dict:
         return {
@@ -123,5 +141,6 @@ class PoolGame:
             "turn_user_id": self.current_player_id,
             "moving": self.moving,
             "shot_number": self.shot_number,
+            "turn_remaining": max(0, int(self.turn_deadline - time.monotonic() + 0.999)) if self.turn_deadline and not self.moving else 0,
             "balls": [{"number": b.number, "x": round(b.x, 5), "y": round(b.y, 5), "pocketed": b.pocketed} for b in self.balls],
         }

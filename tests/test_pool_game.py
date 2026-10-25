@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from dashboard.pool_game import PoolGame
@@ -24,6 +25,15 @@ class PoolGameTests(unittest.TestCase):
         game = PoolGame.create("tournament:match", [10, 11])
         with self.assertRaises(ValueError):
             game.shoot(11, 0.0, 0.5)
+
+    def test_turn_timeout_switches_authoritatively(self):
+        game = PoolGame.create("tournament:match", [10, 11])
+        started = time.monotonic()
+        game.start_turn(now=started)
+        self.assertEqual(game.public()["turn_user_id"], 10)
+        game.step(now=started + 31.0)
+        self.assertEqual(game.public()["turn_user_id"], 11)
+        self.assertGreater(game.public()["turn_remaining"], 0)
 
 
 if __name__ == "__main__":

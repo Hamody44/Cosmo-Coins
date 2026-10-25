@@ -16,6 +16,12 @@
       <div class="status-pill" id="connection-status">غير متصل</div>
     </header>
 
+    <section class="match-hud" aria-label="حالة المباراة">
+      <div class="player-card player-left"><span class="player-avatar">◉</span><span><small>PLAYER 1</small><strong id="player-one-name">—</strong></span><b id="player-one-turn">—</b></div>
+      <div class="turn-clock"><small>TIME</small><strong id="turn-timer">30</strong><span>ثانية للدور</span></div>
+      <div class="player-card player-right"><b id="player-two-turn">—</b><span><small>PLAYER 2</small><strong id="player-two-name">—</strong></span><span class="player-avatar">◉</span></div>
+    </section>
+
     <section class="lobby-panel" id="lobby-panel">
       <div class="panel-copy">
         <span class="kicker">TOURNAMENT LOBBY</span>
@@ -39,7 +45,7 @@
 
     <section class="play-layout">
       <div class="table-card">
-        <div class="table-heading"><span>TABLE 08</span><span id="round-label">الجولة —</span></div>
+        <div class="table-heading"><span>TABLE 08 <i id="turn-label">—</i></span><span id="round-label">الجولة —</span></div>
         <div class="table-wrap">
           <canvas id="pool-table" width="1000" height="560" aria-label="طاولة 8Ball"></canvas>
           <div class="table-overlay" id="table-overlay">بانتظار دخول اللاعبين</div>
