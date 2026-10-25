@@ -35,6 +35,24 @@ def _game_url(tournament_id: str, *, match_id: str | None = None, ticket: str | 
     return f"{base_url}/game?{urlencode(query)}"
 
 
+def _create_tournament_compat(**kwargs):
+    """Create a tournament even if a rolling deployment still has the old manager module."""
+    guess_reward = kwargs.pop("guess_reward", 0)
+    try:
+        return tournament_manager.create(guess_reward=guess_reward, **kwargs)
+    except TypeError as exc:
+        if "guess_reward" not in str(exc):
+            raise
+        print("[8Ball] WARNING: old tournament manager detected; using compatibility mode. Pull dashboard/tournament.py and restart the bot.")
+        state = tournament_manager.create(**kwargs)
+        tournament = tournament_manager.get(state["tournament_id"])
+        if tournament is not None:
+            # Dataclass instances are intentionally mutable; this keeps the setting
+            # available until the complete module update is deployed.
+            tournament.guess_reward = int(guess_reward)
+        return state
+
+
 def _lobby_embed(state: dict, prize: int, currency: str, condition: str | None, guess_reward: int = 0) -> discord.Embed:
     embed = discord.Embed(
         title="🎱 بطولة 8Ball — التسجيل مفتوح",
@@ -199,7 +217,7 @@ class EightBall(commands.Cog):
             tournament_manager.mark_match_launch_sent(launch["tournament_id"], match["match_id"])
             print(f"[8Ball] match invite sent tournament={launch['tournament_id']} match={match['match_id']} players={match['players']}")
 
-        for lobby in tournament_manager.pending_spectator_lobbies():
+        for lobby in getattr(tournament_manager, "pending_spectator_lobbies", lambda: [])():
             channel = self.bot.get_channel(lobby["channel_id"])
             if not channel:
                 continue
@@ -211,7 +229,7 @@ class EightBall(commands.Cog):
                 )
             tournament_manager.mark_spectator_lobby_sent(lobby["tournament_id"], lobby["round"])
 
-        for prompt in tournament_manager.pending_guess_prompts():
+        for prompt in getattr(tournament_manager, "pending_guess_prompts", lambda: [])():
             channel = self.bot.get_channel(prompt["channel_id"])
             if not channel:
                 continue
@@ -224,7 +242,7 @@ class EightBall(commands.Cog):
             )
             tournament_manager.mark_guess_prompt_sent(prompt["tournament_id"], match["match_id"])
 
-        for reward in tournament_manager.pending_guess_rewards():
+        for reward in getattr(tournament_manager, "pending_guess_rewards", lambda: [])():
             if reward["amount"] <= 0:
                 tournament_manager.mark_guess_reward_settled(reward["tournament_id"], reward["match_id"], reward["user_id"])
                 continue
@@ -308,7 +326,7 @@ class EightBall(commands.Cog):
             return await ctx.send(message)
         try:
             guess_reward = get_eightball_guess_reward(ctx.guild.id)
-            state = tournament_manager.create(guild_id=ctx.guild.id, channel_id=ctx.channel.id, created_by=ctx.author.id, prize_amount=prize, condition=condition, registration_seconds=30, guess_reward=guess_reward)
+            state = _create_tournament_compat(guild_id=ctx.guild.id, channel_id=ctx.channel.id, created_by=ctx.author.id, prize_amount=prize, condition=condition, registration_seconds=30, guess_reward=guess_reward)
             print(f"[8Ball] lobby created tournament={state['tournament_id']} guild_id={ctx.guild.id} prize={prize}")
         except (TournamentError, ValueError) as exc:
             refund_server_spending(ctx.guild.id, prize)
