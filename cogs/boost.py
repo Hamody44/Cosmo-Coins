@@ -173,7 +173,8 @@ class Boost(commands.Cog):
         status_str = "مفعلاً ويستقبل بوستات جديدة ✅" if status else "معطلاً ⛔"
         await ctx.send(f"⚙️ أصبح نظام البوست الآن: **{status_str}**.")
 
-    @commands.hybrid_command(name="set_boost_log", aliases=["لوج_البوست"], description="تحديد روم إعلانات البوست وتسليم الدفعات الأسبوعية")
+    # Prefix-only to keep the application below Discord's 100 global slash-command limit.
+    @commands.command(name="set_boost_log", aliases=["لوج_البوست"], help="تحديد روم إعلانات البوست وتسليم الدفعات الأسبوعية")
     async def set_boost_log(self, ctx: commands.Context, channel: discord.TextChannel):
         if not is_bot_admin(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
@@ -188,7 +189,8 @@ class Boost(commands.Cog):
         g_conn.close()
         await ctx.send(f"✅ تم ضبط روم لوج البوست على: {channel.mention}")
 
-    @commands.hybrid_command(name="fake_boost", aliases=["بوست_وهمي"], description="محاكاة بوست لتجربة النظام واختباره (1 للبوست، 2 للدبل بوست)")
+    # Prefix-only diagnostic command; it is not exposed as a global slash command.
+    @commands.command(name="fake_boost", aliases=["بوست_وهمي"], help="محاكاة بوست لتجربة النظام واختباره (1 للبوست، 2 للدبل بوست)")
     async def fake_boost(self, ctx: commands.Context, boost_count: int):
         if not is_bot_admin(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
@@ -200,7 +202,8 @@ class Boost(commands.Cog):
             return await ctx.send(f"⚠️ {msg}")
         await ctx.send(f"🧪 **(تجربة Fake Boost)** {msg}\nتم تسليم الدفعة الأولى فوراً لحسابك!")
 
-    @commands.hybrid_command(name="my_boost_status", aliases=["حالة_البوست_لي"], description="معاينة اشتراكات البوست والدفعات المتبقية لك في هذا السيرفر")
+    # Prefix-only status command to preserve slash-command capacity for core features.
+    @commands.command(name="my_boost_status", aliases=["حالة_البوست_لي"], help="معاينة اشتراكات البوست والدفعات المتبقية لك في هذا السيرفر")
     async def my_boost_status(self, ctx: commands.Context):
         currency_label = get_currency_label(ctx.guild.id)
         g_conn, g_cur = get_guild_db(ctx.guild.id)
