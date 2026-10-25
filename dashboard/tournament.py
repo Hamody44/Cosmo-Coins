@@ -382,7 +382,27 @@ class TournamentManager:
                 return tournament.state()
             tournament.status = "cancelled"
             tournament.cancelled_reason = str(reason)[:300]
+            for match in tournament.matches.values():
+                if match.status not in ("completed", "cancelled"):
+                    match.status = "cancelled"
+            tournament.settlement_status = "pending_refund"
             return tournament.state()
+
+    def cancel_all(self, guild_id: int, reason: str = "cancelled by administrator") -> list[dict[str, Any]]:
+        """Cancel every non-terminal 8Ball tournament in one guild."""
+        with self._lock:
+            states = []
+            for tournament in self._tournaments.values():
+                if tournament.guild_id != int(guild_id) or tournament.status in ("completed", "cancelled"):
+                    continue
+                tournament.status = "cancelled"
+                tournament.cancelled_reason = str(reason)[:300]
+                for match in tournament.matches.values():
+                    if match.status not in ("completed", "cancelled"):
+                        match.status = "cancelled"
+                tournament.settlement_status = "pending_refund"
+                states.append(tournament.state())
+            return states
 
     def completion(self, tournament_id: str) -> dict[str, Any] | None:
         with self._lock:

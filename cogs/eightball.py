@@ -19,7 +19,7 @@ from database import (
 )
 from cogs.games import can_manage_server_games
 from dashboard.game_auth import issue_game_token
-from dashboard.realtime import tournament_manager
+from dashboard.realtime import stop_tournament_connections, tournament_manager
 from dashboard.tournament import TournamentError
 
 
@@ -346,6 +346,36 @@ class EightBall(commands.Cog):
         except Exception:
             return await ctx.send("❌ أدخل مبلغًا صحيحًا أكبر من أو يساوي صفر. استخدم `0` لتعطيل المكافأة.")
         return await ctx.send(f"✅ تم ضبط مكافأة التخمين الصحيح على `{reward:,}` {get_currency_label(ctx.guild.id)}. لا يتم خصم شيء من صاحب التخمين.")
+
+    @commands.hybrid_command(name="8ball_stop", aliases=["إيقاف_8ball"], description="إيقاف بطولة 8Ball محددة بالمعرف")
+    async def eightball_stop(self, ctx: commands.Context, tournament_id: str):
+        if not ctx.guild or not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
+        tournament = tournament_manager.get(tournament_id)
+        if not tournament or tournament.guild_id != ctx.guild.id:
+            return await ctx.send("❌ لم أجد بطولة 8Ball بهذا المعرف داخل هذا السيرفر.")
+        if tournament.status in ("completed", "cancelled"):
+            return await ctx.send(f"ℹ️ البطولة `{tournament_id}` حالتها الحالية: `{tournament.status}`.")
+        state = tournament_manager.cancel(tournament_id, reason=f"stopped by {ctx.author.id}")
+        await stop_tournament_connections(tournament_id, "تم إيقاف بطولة 8Ball من الإدارة.")
+        return await ctx.send(
+            f"🛑 تم إيقاف بطولة 8Ball `{tournament_id}`. "
+            "تم إغلاق جلسات اللعبة وستُعاد الجائزة تلقائيًا عبر عامل التسوية."
+        )
+
+    @commands.hybrid_command(name="8ball_stop_all", aliases=["إيقاف_كل_8ball"], description="إيقاف جميع بطولات 8Ball في السيرفر")
+    async def eightball_stop_all(self, ctx: commands.Context):
+        if not ctx.guild or not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
+        states = tournament_manager.cancel_all(ctx.guild.id, reason=f"all 8ball games stopped by {ctx.author.id}")
+        for state in states:
+            await stop_tournament_connections(state["tournament_id"], "تم إيقاف جميع بطولات 8Ball من الإدارة.")
+        if not states:
+            return await ctx.send("ℹ️ لا توجد بطولات 8Ball نشطة لإيقافها في هذا السيرفر.")
+        return await ctx.send(
+            f"🛑 تم إيقاف `{len(states)}` بطولة/بطولات 8Ball. "
+            "أُغلقت الجلسات وستُعاد الجوائز تلقائيًا عبر عامل التسوية."
+        )
 
     @commands.hybrid_command(name="8ball_claim", description="اعتماد جائزة بطولة 8Ball بعد التحقق من الشرط")
     async def eightball_claim(self, ctx: commands.Context, tournament_id: str):

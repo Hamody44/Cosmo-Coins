@@ -303,6 +303,22 @@ async def _broadcast_pool_state(match_key: str) -> None:
             room_manager.remove(connection)
 
 
+async def stop_tournament_connections(tournament_id: str, reason: str = "تم إيقاف البطولة") -> None:
+    """Close all game clients and discard in-memory pool tables for a stopped tournament."""
+    tournament_id = str(tournament_id)
+    room_id = f"tournament:{tournament_id}"
+    for connection in list(room_manager.room_connections(room_id)):
+        try:
+            await connection.websocket.send_json({"type": "game_stopped", "message": reason})
+            await connection.websocket.close(code=4001, reason=reason[:100])
+        except Exception:
+            pass
+        finally:
+            room_manager.remove(connection)
+    for match_key in [key for key in pool_games if key.startswith(f"{tournament_id}:")]:
+        pool_games.pop(match_key, None)
+
+
 async def _pool_physics_loop() -> None:
     last_remaining: dict[str, int] = {}
     while True:

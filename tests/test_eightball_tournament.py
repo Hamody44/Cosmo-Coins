@@ -115,6 +115,23 @@ class MatchEntryWindowTests(unittest.TestCase):
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(len(manager.pending_refunds()), 1)
 
+    def test_manual_cancel_marks_active_tournament_for_refund(self):
+        manager = TournamentManager()
+        created = manager.create(guild_id=1, channel_id=2, created_by=9, prize_amount=100, registration_seconds=30, now=100)
+        tid = created["tournament_id"]
+        state = manager.cancel(tid, reason="administrator stop")
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["cancelled_reason"], "administrator stop")
+        self.assertEqual(len(manager.pending_refunds()), 1)
+
+    def test_cancel_all_only_affects_non_terminal_tournaments_in_guild(self):
+        manager = TournamentManager()
+        first = manager.create(guild_id=1, channel_id=2, created_by=9, prize_amount=100, now=100)
+        second = manager.create(guild_id=2, channel_id=3, created_by=9, prize_amount=100, now=100)
+        states = manager.cancel_all(1, reason="stop all")
+        self.assertEqual([item["tournament_id"] for item in states], [first["tournament_id"]])
+        self.assertEqual(manager.state(second["tournament_id"], now=100)["status"], "registration")
+
     def test_one_player_entry_forfeits_the_absent_player_without_starting_physics(self):
         manager = TournamentManager()
         created = manager.create(guild_id=1, channel_id=2, created_by=9, prize_amount=100, registration_seconds=1, now=100)
