@@ -91,7 +91,7 @@ class HelpView(discord.ui.View):
                     "• `/reroll_giveaway <message_id>` — إعادة اختيار كل الفائزين بشرط عدم صرف أي جائزة؛ وقد يتطلب إعادة حجز المبالغ المستردة.\n"
                     "• `/roulette <amount> [condition]` — لعبة الروليت.\n"
                     "• `/stop_roulette` — إيقاف الروليت الجارية.\n"
-                    "• `/set_double_event <duration>` — تفعيل مضاعفة جوائز العجلة."
+                    "• `!set_double_event <duration>` — تفعيل مضاعفة جوائز العجلة."
                 )),
             ],
             "Cosmo System • الألعاب والجوائز",
@@ -129,9 +129,9 @@ class HelpView(discord.ui.View):
             discord.Color.red(),
             [
                 ("💬 الردود والاختصارات", (
-                    "• `/add_alias <command> <alias>` و`/list_aliases` — إدارة الاختصارات.\n"
-                    "• `/add_reply <trigger> <reply>` — إضافة رد تلقائي.\n"
-                    "• `/delete_reply <trigger>` و`/list_replies` — حذف الردود وعرضها.\n"
+                    "• `!add_alias <command> <alias>` و`!list_aliases` — إدارة الاختصارات.\n"
+                    "• `!add_reply <trigger> <reply>` — إضافة رد تلقائي.\n"
+                    "• `!delete_reply <trigger>` و`!list_replies` — حذف الردود وعرضها.\n"
                     "• `/ai_toggle` — تشغيل أو إيقاف ميزات الذكاء الاصطناعي."
                 )),
                 ("💱 التبديل والبوست", (
@@ -143,13 +143,14 @@ class HelpView(discord.ui.View):
                     "• `/fake_boost <1|2>` — اختبار مكافآت البوست."
                 )),
                 ("📋 الرتب والسجلات", (
-                    "• `/server_budget_history` — سجل حركة ميزانية الجوائز.\n"
+                    "• `/setup` — فتح معالج إعداد قنوات السيرفر خطوة بخطوة.\n"
+                    "• `!server_budget_history` — سجل حركة ميزانية الجوائز.\n"
                     "• `/set_owner_role` — رتبة بمعاملة مالك السيرفر داخل البوت (لا تتجاوز أوامر مالك البوت).\n"
                     "• `/set_staff_role` — تعيين رتبة محدودة للتذاكر والراتب اليومي فقط.\n"
                     "• `/set_blacklist_role` — تعيين رتبة البلاك ليست.\n"
-                    "• `/set_balance_log` و`/set_boost_log` — قنوات سجلات الرصيد والبوست.\n"
-                    "• `/set_delivery_log` و`/set_success_log` — قنوات التسليم والنجاح.\n"
-                    "• `/set_transfer_log` — قناة سجل التحويلات."
+                    "• `!set_balance_log` و`/set_boost_log` — قنوات سجلات الرصيد والبوست.\n"
+                    "• `!set_delivery_log` و`!set_success_log` — قنوات التسليم والنجاح.\n"
+                    "• `!set_transfer_log` — قناة سجل التحويلات."
                 )),
                 ("📈 النقاط واللفلات والرواتب", (
                     "• `/add_level_channel` و`/remove_level_channel` و`/list_level_channels` — تحديد رومات احتساب الرسائل.\n"
@@ -184,24 +185,24 @@ class HelpView(discord.ui.View):
                     "• `/buy_premium <duration>` — شراء Premium للسيرفر الحالي عبر ProBot أو AdamC أو Cosmo أو LTC، ويُفعّل تلقائيًا بعد التحقق.\n"
                     "• `/active_premium <code>` — تفعيل اشتراك السيرفر.\n"
                     "• `/premium_status` — عرض حالة الاشتراك.\n"
-                    "• `/set_currency_name <name>` — تغيير اسم عرض الرصيد في هذا السيرفر فقط؛ اكتب `Cosmo` لإعادة الاسم الافتراضي.\n"
-                    "• `/set_bot_name <name>` — تخصيص اسم البوت في السيرفر.\n"
-                    "• `/set_bot_avatar <file>` — تخصيص صورة البوت.\n"
-                    "• `/set_bot_banner <file>` — تخصيص بنر البوت."
+                    "• `!set_currency_name <name>` — تغيير اسم عرض الرصيد في هذا السيرفر فقط؛ اكتب `Cosmo` لإعادة الاسم الافتراضي.\n"
+                    "• `!set_bot_name <name>` — تخصيص اسم البوت في السيرفر.\n"
+                    "• `!set_bot_avatar <file>` — تخصيص صورة البوت.\n"
+                    "• `!set_bot_banner <file>` — تخصيص بنر البوت."
                 )),
                 ("🔒 مالك البوت فقط", (
-                    "• `/add_server_budget <amount>` و`/remove_server_budget <amount>` — إضافة أو خصم ميزانية سيرفر يدويًا (مالك البوت فقط).\n"
+                    "• `!add_server_budget <amount>` و`!remove_server_budget <amount>` — إضافة أو خصم ميزانية سيرفر يدويًا (مالك البوت فقط).\n"
                     "• `/toggle_buy_budget <credit|adamc|crypto> <true|false>` — تشغيل أو إيقاف وسيلة دفع الشحن التلقائي عالميًا.\n"
                     "• إيقاف وسيلة دفع يلغي طلباتها المعلقة؛ من حوّل بالفعل عليه التواصل مع مالك البوت للمراجعة اليدوية.\n"
-                    "• `/set_server_budget <guild_id> <amount>` — تعيين ميزانية سيرفر.\n"
+                    "• `!set_server_budget <guild_id> <amount>` — تعيين ميزانية سيرفر.\n"
                     "• `/premium_code <duration>` — إنشاء كود Premium.\n"
                     "• `!set_premium_price <duration> <credit> <adamc> <cosmo> <crypto_usd>` — تحديد أسعار Premium لكل مدة.\n"
                     "• `!toggle_premium_purchase <true|false>` و`!toggle_premium_method <credit|adamc|cosmo|crypto> <true|false>` — فتح/إغلاق الشراء أو وسيلة دفع.\n"
-                    "• `/set_global_log` و`/disable_global_log` — إعداد سجل العمليات العام.\n"
-                    "• `/set_global_request_log` — تحديد قناة الطلبات العامة.\n"
-                    "• `/allow_bot` و`/disallow_bot` — إدارة قائمة البوتات المسموحة.\n"
-                    "• `/auto_backup` — طلب نسخة احتياطية.\n"
-                    "• `/leave_guild <id>` — إخراج البوت من سيرفر."
+                    "• `!set_global_log` و`!disable_global_log` — إعداد سجل العمليات العام.\n"
+                    "• `!set_global_request_log` — تحديد قناة الطلبات العامة.\n"
+                    "• `!allow_bot` و`!disallow_bot` — إدارة قائمة البوتات المسموحة.\n"
+                    "• `!auto_backup` — طلب نسخة احتياطية.\n"
+                    "• `!leave_guild <id>` — إخراج البوت من سيرفر."
                 )),
             ],
             "Cosmo System • Premium والمالك",

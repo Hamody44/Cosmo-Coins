@@ -10,6 +10,7 @@ import asyncio
 import base64
 import math
 import re
+import sqlite3
 import unicodedata
 from datetime import datetime
 from database import (
@@ -321,6 +322,127 @@ class AutoBudgetPaymentView(discord.ui.View):
         super().__init__(timeout=120)
         self.add_item(AutoBudgetPaymentSelect(bot, user_id, budget_amount, methods))
 
+SETUP_CHANNELS = {
+    "transfer_log": ("روم التحويلات", "إشعارات تحويلات الرصيد", "settings", "transfer_log"),
+    "delivery_log": ("روم التسليمات", "طلبات التبديل وإثباتات التسليم", "settings", "delivery_log"),
+    "success_log": ("روم نجاح التبديل", "إعلانات عمليات التبديل الناجحة", "settings", "exchange_success_log"),
+    "balance_log": ("روم الرصيد", "إشعارات إضافة وخصم أرصدة الأعضاء", "settings", "balance_log"),
+    "boost_log": ("روم البوست", "إعلانات البوست والدفعات الأسبوعية", "boost_system_config", "boost_log_channel"),
+    "ticket_log": ("روم أرشيف التذاكر", "حفظ سجلات التذاكر بعد إغلاقها", "settings", "ticket_log"),
+    "level_log": ("روم تقارير اللفلات", "التقارير اليومية والرواتب", "leveling_config", "announcement_channel_id"),
+}
+
+
+def _setup_state(guild_id: int) -> dict[str, int | None]:
+    conn, cur = get_guild_db(guild_id)
+    try:
+        state = {key: None for key in SETUP_CHANNELS}
+        row = cur.execute(
+            "SELECT transfer_log, delivery_log, exchange_success_log, balance_log, ticket_log "
+            "FROM settings WHERE guild_id = ?", (guild_id,),
+        ).fetchone()
+        if row:
+            state.update({"transfer_log": row[0], "delivery_log": row[1], "success_log": row[2], "balance_log": row[3], "ticket_log": row[4]})
+        boost = cur.execute("SELECT boost_log_channel FROM boost_system_config WHERE guild_id = ?", (guild_id,)).fetchone()
+        level = cur.execute("SELECT announcement_channel_id FROM leveling_config WHERE guild_id = ?", (guild_id,)).fetchone()
+        state["boost_log"] = boost[0] if boost else None
+        state["level_log"] = level[0] if level else None
+        return state
+    finally:
+        conn.close()
+
+
+def _setup_summary(guild: discord.Guild) -> str:
+    state = _setup_state(guild.id)
+    lines = ["**الحالة الحالية لإعدادات السيرفر:**"]
+    for key, (label, description, _table, _column) in SETUP_CHANNELS.items():
+        channel_id = state.get(key)
+        channel = guild.get_channel(channel_id) if channel_id else None
+        status = channel.mention if channel else "غير محدد"
+        required = "مهم" if key in {"transfer_log", "delivery_log"} else "اختياري"
+        lines.append(f"• **{label}**: {status} — {required}\n  {description}")
+    lines.append("\nاستخدم القائمتين أسفل الرسالة: اختر نوع السجل، ثم اختر الروم، ثم اضغط **حفظ**.")
+    lines.append("روم استقبال طلبات التبديل العام يحدده مالك البوت فقط عبر `!set_global_request_log #الروم`.")
+    return "\n".join(lines)
+
+
+class SetupPurposeSelect(discord.ui.Select):
+    def __init__(self, setup_view):
+        self.setup_view = setup_view
+        options = [discord.SelectOption(label=data[0], value=key, description=data[1][:100]) for key, data in SETUP_CHANNELS.items()]
+        super().__init__(placeholder="1) اختر نوع الروم", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.setup_view.selected_purpose = self.values[0]
+        await interaction.response.send_message(
+            f"تم اختيار **{SETUP_CHANNELS[self.values[0]][0]}**. اختر الروم الآن ثم اضغط حفظ.", ephemeral=True,
+        )
+
+
+class SetupChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, setup_view):
+        self.setup_view = setup_view
+        super().__init__(placeholder="2) اختر الروم", channel_types=[discord.ChannelType.text], row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.setup_view.selected_purpose:
+            return await interaction.response.send_message("اختر نوع الروم أولًا.", ephemeral=True)
+        self.setup_view.selected_channel_id = self.values[0].id
+        await interaction.response.send_message("تم اختيار الروم. اضغط **حفظ الاختيار**.", ephemeral=True)
+
+
+class SetupView(discord.ui.View):
+    def __init__(self, author: discord.Member, guild: discord.Guild):
+        super().__init__(timeout=600)
+        self.author_id = author.id
+        self.guild = guild
+        self.selected_purpose = None
+        self.selected_channel_id = None
+        self.add_item(SetupPurposeSelect(self))
+        self.add_item(SetupChannelSelect(self))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("هذه لوحة الإعداد تخص الشخص الذي بدأ الأمر فقط.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="حفظ الاختيار", style=discord.ButtonStyle.success, row=2)
+    async def save_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected_purpose or not self.selected_channel_id:
+            return await interaction.response.send_message("اختر نوع الروم والروم نفسه أولًا.", ephemeral=True)
+        _label, _description, table, column = SETUP_CHANNELS[self.selected_purpose]
+        conn, cur = get_guild_db(self.guild.id)
+        try:
+            if table == "leveling_config":
+                cur.execute(
+                    "INSERT INTO leveling_config (guild_id, announcement_channel_id) VALUES (?, ?) "
+                    "ON CONFLICT(guild_id) DO UPDATE SET announcement_channel_id = excluded.announcement_channel_id",
+                    (self.guild.id, self.selected_channel_id),
+                )
+            else:
+                cur.execute(
+                    f"INSERT INTO {table} (guild_id, {column}) VALUES (?, ?) "
+                    f"ON CONFLICT(guild_id) DO UPDATE SET {column} = excluded.{column}",
+                    (self.guild.id, self.selected_channel_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        self.selected_purpose = None
+        self.selected_channel_id = None
+        await interaction.response.edit_message(content=_setup_summary(self.guild), view=self)
+
+    @discord.ui.button(label="تحديث الحالة", style=discord.ButtonStyle.secondary, row=2)
+    async def refresh_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content=_setup_summary(self.guild), view=self)
+
+    @discord.ui.button(label="إغلاق", style=discord.ButtonStyle.danger, row=2)
+    async def close_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="تم إغلاق لوحة إعداد السيرفر.", view=None)
+
+
 def can_manage_bot(ctx: commands.Context) -> bool:
     """
     التحقق من صلاحية إدارة البوت:
@@ -391,6 +513,20 @@ class Admin(commands.Cog):
         self.bot = bot
         if not self.auto_backup_task.is_running():
             self.auto_backup_task.start()
+
+    @commands.hybrid_command(name="setup", aliases=["إعداد", "اعداد"], description="معالج إعداد قنوات السيرفر خطوة بخطوة")
+    async def setup_server(self, ctx: commands.Context):
+        """Interactive server setup wizard."""
+        if not ctx.guild:
+            return await ctx.send("⛔ استخدم الأمر داخل السيرفر.")
+        if not can_manage_bot(ctx):
+            return await ctx.send("⛔ هذا المعالج متاح لمالك السيرفر أو الإدارة المخولة فقط.")
+        await ctx.send(
+            "🧭 **معالج إعداد Cosmo**\n"
+            "اضبط القنوات من القوائم التفاعلية التالية. يمكنك العودة إلى `!setup` في أي وقت لعرض الحالة.\n\n"
+            f"{_setup_summary(ctx.guild)}",
+            view=SetupView(ctx.author, ctx.guild),
+        )
 
     def cog_unload(self):
         self.auto_backup_task.cancel()
@@ -465,7 +601,7 @@ class Admin(commands.Cog):
         except Exception as e:
             print(f"Auto backup error: {e}")
 
-    @commands.hybrid_command(
+    @commands.command(
         name="set_global_log",
         aliases=["لوج_عام", "تحديد_اللوج_العام"],
         description="تحديد روم عام لإرسال لوجات جميع عمليات الشحن والتحويل في كل السيرفرات (مالك البوت فقط)"
@@ -478,7 +614,7 @@ class Admin(commands.Cog):
         global_conn.commit()
         await ctx.send(f"🌐 تم تعيين روم اللوج العام الموحد لعمليات الشحن والتحويل على: {channel.mention} (`ID: {channel.id}`).")
 
-    @commands.hybrid_command(
+    @commands.command(
         name="disable_global_log",
         aliases=["تعطيل_اللوج_العام"],
         description="تعطيل روم اللوج العام الموحد (مالك البوت فقط)"
@@ -491,7 +627,7 @@ class Admin(commands.Cog):
         global_conn.commit()
         await ctx.send("🛑 تم تعطيل روم اللوج العام بنجاح.")
 
-    @commands.hybrid_command(
+    @commands.command(
         name="add_reply",
         aliases=["اضافة_رد", "رد_تلقائي"],
         description="إضافة رد تلقائي (يمسح رسالة العضو ويرسل الرد بدلاً منها)"
@@ -511,7 +647,7 @@ class Admin(commands.Cog):
 
         await ctx.send(f"✅ تم حفظ الرد التلقائي بنجاح!\n• **الكلمة المستهدفة:** `{clean_trigger}`\n• **الرد:** {reply}")
 
-    @commands.hybrid_command(
+    @commands.command(
         name="delete_reply",
         aliases=["حذف_رد"],
         description="حذف رد تلقائي مسجل بالسيرفر"
@@ -532,7 +668,7 @@ class Admin(commands.Cog):
         else:
             await ctx.send(f"❌ لم يتم العثور على رد تلقائي مسجل بالكلمة: `{clean_trigger}`.")
 
-    @commands.hybrid_command(
+    @commands.command(
         name="list_replies",
         aliases=["قائمة_الردود", "الردود_التلقائية"],
         description="عرض جميع الردود التلقائية المفعلة في هذا السيرفر"
@@ -566,7 +702,7 @@ class Admin(commands.Cog):
         embed.set_footer(text=f"إجمالي الردود: {len(rows)}")
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="list_aliases", aliases=["الاختصارات", "قائمة_الاختصارات"], description="عرض جميع الأوامر المختصرة المفعلة في هذا السيرفر")
+    @commands.command(name="list_aliases", aliases=["الاختصارات", "قائمة_الاختصارات"], description="عرض جميع الأوامر المختصرة المفعلة في هذا السيرفر")
     async def list_aliases(self, ctx: commands.Context):
         g_conn, g_cur = get_guild_db(ctx.guild.id)
         g_cur.execute("SELECT original_command, alias FROM command_aliases")
@@ -587,7 +723,7 @@ class Admin(commands.Cog):
         embed.set_footer(text=f"إجمالي الاختصارات: {len(rows)}")
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="add_alias", aliases=["اضافة_اختصار"], description="إضافة اختصار جديد لأي أمر خاص بهذا السيرفر")
+    @commands.command(name="add_alias", aliases=["اضافة_اختصار"], description="إضافة اختصار جديد لأي أمر خاص بهذا السيرفر")
     async def add_alias(self, ctx: commands.Context, original_command: str, new_alias: str):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية لإضافة اختصارات الأوامر.")
@@ -665,7 +801,7 @@ class Admin(commands.Cog):
         budget = get_server_spending_balance(ctx.guild.id)
         await ctx.send(f"🪙 **رصيد ميزانية السيرفر المتاحة للصرف:** `{budget:,}` {get_currency_label(ctx.guild.id)}.")
 
-    @commands.hybrid_command(
+    @commands.command(
         name="set_server_budget",
         aliases=["تحديد_ميزانية_السيرفر", "ضبط_ميزانية_السيرفر"],
         description="تحديد وضبط ميزانية الصرف الإجمالية لسيرفر معين مباشرة (مالك البوت حصرياً)"
@@ -795,7 +931,7 @@ class Admin(commands.Cog):
             summary += " لن تُقبل طلبات LTC جديدة؛ الفواتير الصادرة تبقى قابلة للتسوية من LTCPay."
         await ctx.send(summary)
 
-    @commands.hybrid_command(
+    @commands.command(
         name="add_server_budget", 
         aliases=["اضافة_ميزانية_السيرفر", "شحن_ميزانية_السيرفر", "add_budget_server"], 
         description="إضافة وشحن مبلغ إلى ميزانية الصرف الحالية للسيرفر (مالك البوت فقط)"
@@ -842,7 +978,7 @@ class Admin(commands.Cog):
             f"• **إجمالي الميزانية المتاحة الآن:** `{new_total_budget:,}` {currency_label}"
         )
 
-    @commands.hybrid_command(
+    @commands.command(
         name="remove_server_budget", 
         aliases=["خصم_ميزانية_السيرفر", "remove_budget_server"], 
         description="خصم مبلغ من ميزانية الصرف المتاحة للسيرفر (مالك البوت فقط)"
@@ -885,7 +1021,7 @@ class Admin(commands.Cog):
             f"• **الميزانية المتبقية الآن:** `{new_total_budget:,}` {currency_label}"
         )
 
-    @commands.hybrid_command(
+    @commands.command(
         name="server_budget_history", 
         aliases=["سجل_ميزانية_السيرفر", "budget_history"], 
         description="عرض آخر عمليات الإضافة والخصم على ميزانية السيرفر"
@@ -999,7 +1135,7 @@ class Admin(commands.Cog):
         embed.add_field(name="🪙 اسم الرصيد المعروض", value=f"`{row[5]}`" if len(row) > 5 and row[5] else "Cosmo (الافتراضي)", inline=True)
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="set_currency_name", aliases=["اسم_العملة"], description="تخصيص اسم العرض لرصيد Cosmo في هذا السيرفر (Premium)")
+    @commands.command(name="set_currency_name", aliases=["اسم_العملة"], description="تخصيص اسم العرض لرصيد Cosmo في هذا السيرفر (Premium)")
     async def set_currency_name(self, ctx: commands.Context, *, new_name: str):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية إدارة إعدادات السيرفر.")
@@ -1020,7 +1156,7 @@ class Admin(commands.Cog):
         visible_name = stored_name or "Cosmo"
         await ctx.send(f"✅ اسم عرض رصيدك في هذا السيرفر أصبح **{visible_name}**. لم يتغير الرصيد نفسه، ولا يتأثر أي سيرفر آخر.")
 
-    @commands.hybrid_command(name="set_bot_name", aliases=["تغيير_اسم_البوت"], description="تغيير اسم ولقب البوت داخل هذا السيرفر (بريميوم)")
+    @commands.command(name="set_bot_name", aliases=["تغيير_اسم_البوت"], description="تغيير اسم ولقب البوت داخل هذا السيرفر (بريميوم)")
     async def set_bot_name(self, ctx: commands.Context, new_name: str):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية لإدارة البوت.")
@@ -1036,7 +1172,7 @@ class Admin(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ تعذر تغيير الاسم: {e}")
 
-    @commands.hybrid_command(name="set_bot_avatar", aliases=["تغيير_صورة_البوت"], description="تغيير صورة البوت الخاصة بهذا السيرفر (بريميوم)")
+    @commands.command(name="set_bot_avatar", aliases=["تغيير_صورة_البوت"], description="تغيير صورة البوت الخاصة بهذا السيرفر (بريميوم)")
     async def set_bot_avatar(self, ctx: commands.Context, image: discord.Attachment):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية لإدارة البوت.")
@@ -1055,7 +1191,7 @@ class Admin(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ حدث خطأ: {e}")
 
-    @commands.hybrid_command(
+    @commands.command(
         name="set_bot_banner",
         aliases=["تغيير_بنر_البوت", "بنر_البوت"],
         description="تغيير بنر البوت الخاص بهذا السيرفر فقط (ميزة بريميوم)"
@@ -1098,7 +1234,7 @@ class Admin(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ حدث خطأ غير متوقع: {e}")
 
-    @commands.hybrid_command(name="set_global_request_log", aliases=["لوج_الطلبات_العام"], description="تحديد الروم الموحد لاستقبال طلبات التبديل من كل السيرفرات (مالك البوت فقط)")
+    @commands.command(name="set_global_request_log", aliases=["لوج_الطلبات_العام"], description="تحديد الروم الموحد لاستقبال طلبات التبديل من كل السيرفرات (مالك البوت فقط)")
     async def set_global_request_log(self, ctx: commands.Context, channel: discord.TextChannel):
         if not await check_is_owner(self.bot, ctx):
             return await ctx.send("⛔ هذا الأمر متاح فقط لمالك ومطور البوت الأساسي.")
@@ -1106,7 +1242,7 @@ class Admin(commands.Cog):
         global_conn.commit()
         await ctx.send(f"✅ تم ضبط روم استقبال طلبات التبديل العام على: {channel.mention}")
 
-    @commands.hybrid_command(name="set_delivery_log", aliases=["لوج_التسليمات"], description="تحديد روم تسليمات وإثباتات التبديل لهذا السيرفر")
+    @commands.command(name="set_delivery_log", aliases=["لوج_التسليمات"], description="تحديد روم تسليمات وإثباتات التبديل لهذا السيرفر")
     async def set_delivery_log(self, ctx: commands.Context, channel: discord.TextChannel):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
@@ -1119,7 +1255,7 @@ class Admin(commands.Cog):
         g_conn.close()
         await ctx.send(f"✅ تم ضبط روم تسليمات التبديل لهذا السيرفر على: {channel.mention}")
 
-    @commands.hybrid_command(name="set_transfer_log", aliases=["لوج_التحويل"], description="تحديد روم إشعارات التحويل")
+    @commands.command(name="set_transfer_log", aliases=["لوج_التحويل"], description="تحديد روم إشعارات التحويل")
     async def set_transfer_log(self, ctx: commands.Context, channel: discord.TextChannel):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
@@ -1129,7 +1265,7 @@ class Admin(commands.Cog):
         g_conn.close()
         await ctx.send(f"✅ تم ضبط روم لوج التحويلات على: {channel.mention}")
 
-    @commands.hybrid_command(name="set_success_log", aliases=["لوج_نجاح_التبديل"], description="تحديد روم إعلانات التبديل الناجحة الخاص بهذا السيرفر")
+    @commands.command(name="set_success_log", aliases=["لوج_نجاح_التبديل"], description="تحديد روم إعلانات التبديل الناجحة الخاص بهذا السيرفر")
     async def set_success_log(self, ctx: commands.Context, channel: discord.TextChannel):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
@@ -1139,7 +1275,7 @@ class Admin(commands.Cog):
         g_conn.close()
         await ctx.send(f"✅ تم ضبط روم نجاح التبديل على: {channel.mention}")
 
-    @commands.hybrid_command(name="set_balance_log", aliases=["لوج_الرصيد"], description="تحديد روم إشعارات إضافة وخصم الرصيد")
+    @commands.command(name="set_balance_log", aliases=["لوج_الرصيد"], description="تحديد روم إشعارات إضافة وخصم الرصيد")
     async def set_balance_log(self, ctx: commands.Context, channel: discord.TextChannel):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
@@ -1251,7 +1387,7 @@ class Admin(commands.Cog):
         record_audit("role_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="set blacklist role", after={"blacklist_role_id": role.id}, source="discord")
         await ctx.send(f"✅ تم اعتماد رتبة البلاك ليست: {role.mention}.")
 
-    @commands.hybrid_command(name="allow_bot", aliases=["سماح_لبوت"], description="السماح لبوت معين باستخدام أوامر الإدارة في روم محدد")
+    @commands.command(name="allow_bot", aliases=["سماح_لبوت"], description="السماح لبوت معين باستخدام أوامر الإدارة في روم محدد")
     async def allow_bot(self, ctx: commands.Context, bot_id: str, channel: discord.TextChannel):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
@@ -1265,7 +1401,7 @@ class Admin(commands.Cog):
         g_conn.close()
         await ctx.send(f"✅ تم السماح للبوت (`ID: {b_id}`) في {channel.mention}.")
 
-    @commands.hybrid_command(name="disallow_bot", aliases=["الغاء_سماح_لبوت"], description="إلغاء تصريح البوت من تنفيذ الأوامر")
+    @commands.command(name="disallow_bot", aliases=["الغاء_سماح_لبوت"], description="إلغاء تصريح البوت من تنفيذ الأوامر")
     async def disallow_bot(self, ctx: commands.Context, bot_id: str):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
@@ -1279,7 +1415,7 @@ class Admin(commands.Cog):
         g_conn.close()
         await ctx.send(f"🗑️ تم إلغاء التصريح للبوت (`ID: {b_id}`).")
 
-    @commands.hybrid_command(name="leave_guild", aliases=["خروج_البوت"], description="إخراج البوت من سيرفر معين (مالك البوت)")
+    @commands.command(name="leave_guild", aliases=["خروج_البوت"], description="إخراج البوت من سيرفر معين (مالك البوت)")
     async def leave_guild(self, ctx: commands.Context, guild_id: str):
         if not await check_is_owner(self.bot, ctx):
             return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
@@ -1292,7 +1428,7 @@ class Admin(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ حدث خطأ: {e}")
 
-    @commands.hybrid_command(name="auto_backup", aliases=["باك_اب_تلقائي"], description="إرسال نسخة احتياطية فورية لقاعدة البيانات لخاص المالك")
+    @commands.command(name="auto_backup", aliases=["باك_اب_تلقائي"], description="إرسال نسخة احتياطية فورية لقاعدة البيانات لخاص المالك")
     async def auto_backup(self, ctx: commands.Context):
         if not await check_is_owner(self.bot, ctx):
             return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
@@ -1304,7 +1440,7 @@ class Admin(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ حدث خطأ: {e}")
 
-    @commands.hybrid_command(name="set_double_event", aliases=["تفعيل_الدبل"], description="تفعيل حدث مضاعفة جوائز عجلة الحظ")
+    @commands.command(name="set_double_event", aliases=["تفعيل_الدبل"], description="تفعيل حدث مضاعفة جوائز عجلة الحظ")
     async def set_double_event(self, ctx: commands.Context, duration: str):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
