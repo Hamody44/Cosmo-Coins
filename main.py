@@ -166,8 +166,10 @@ async def on_message(message: discord.Message):
                         print(f"Error handling wheel bot: {e}")
         return
 
-    # 2. فحص نظام الرد التلقائي (حذف رسالة العضو وإرسال الرد بدلاً منها)
-    if message.content:
+    # 2. فحص نظام الرد التلقائي (حذف رسالة العضو وإرسال الرد بدلاً منها).
+    # لا نفحص رسائل الأوامر التي تبدأ بـ !؛ وإلا فإن trigger مثل "hello"
+    # سيعترض !delete_reply hello ويحذف رسالة الأمر قبل أن تصل إلى Discord.py.
+    if message.content and not message.content.lstrip().startswith("!"):
         content_lower = message.content.strip().lower()
         g_conn, g_cur = get_guild_db(message.guild.id)
         g_cur.execute("SELECT trigger_word, reply_content FROM auto_replies")
