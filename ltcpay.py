@@ -135,7 +135,7 @@ def create_ltc_invoice(*, price_usd: Decimal, provider_order_id: str, discord_us
         raise LTCPayError(f"الحد الأدنى لفاتورة LTC هو ${MIN_CRYPTO_USD:.2f}.")
     if not re.fullmatch(r"\d{1,20}", discord_user_id):
         raise LTCPayError("معرّف مستخدم Discord غير صالح.")
-    if not re.fullmatch(r"cosmo:\d{1,20}:[0-9a-f]{32}", str(provider_order_id)):
+    if not re.fullmatch(r"(?:cosmo|premium):\d{1,20}:[0-9a-f]{32}", str(provider_order_id)):
         raise LTCPayError("معرّف طلب الميزانية غير صالح.")
     config = _config()
     base_url, store_id, _, _, _ = config

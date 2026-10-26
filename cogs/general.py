@@ -181,6 +181,7 @@ class HelpView(discord.ui.View):
             discord.Color.gold(),
             [
                 ("💎 Premium", (
+                    "• `/buy_premium <duration>` — شراء Premium للسيرفر الحالي عبر ProBot أو AdamC أو Cosmo أو LTC، ويُفعّل تلقائيًا بعد التحقق.\n"
                     "• `/active_premium <code>` — تفعيل اشتراك السيرفر.\n"
                     "• `/premium_status` — عرض حالة الاشتراك.\n"
                     "• `/set_currency_name <name>` — تغيير اسم عرض الرصيد في هذا السيرفر فقط؛ اكتب `Cosmo` لإعادة الاسم الافتراضي.\n"
@@ -194,6 +195,8 @@ class HelpView(discord.ui.View):
                     "• إيقاف وسيلة دفع يلغي طلباتها المعلقة؛ من حوّل بالفعل عليه التواصل مع مالك البوت للمراجعة اليدوية.\n"
                     "• `/set_server_budget <guild_id> <amount>` — تعيين ميزانية سيرفر.\n"
                     "• `/premium_code <duration>` — إنشاء كود Premium.\n"
+                    "• `!set_premium_price <duration> <credit> <adamc> <cosmo> <crypto_usd>` — تحديد أسعار Premium لكل مدة.\n"
+                    "• `!toggle_premium_purchase <true|false>` و`!toggle_premium_method <credit|adamc|cosmo|crypto> <true|false>` — فتح/إغلاق الشراء أو وسيلة دفع.\n"
                     "• `/set_global_log` و`/disable_global_log` — إعداد سجل العمليات العام.\n"
                     "• `/set_global_request_log` — تحديد قناة الطلبات العامة.\n"
                     "• `/allow_bot` و`/disallow_bot` — إدارة قائمة البوتات المسموحة.\n"

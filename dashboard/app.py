@@ -182,11 +182,14 @@ async def _send_ltcpay_notice(result):
             app.logger.warning("LTCPay notice channel unavailable: %s", exc)
             return
     if result.get("status") == "paid":
-        text = (
-            f"✅ أكد LTCPay تسوية فاتورة LTC للطلب `#{result['order_id']}`؛ "
-            f"أُضيفت `{result['budget_amount']:,}` إلى ميزانية السيرفر. "
-            f"الميزانية: `{result['old_balance']:,}` ← `{result['new_balance']:,}`."
-        )
+        if "premium_end" in result:
+            text = f"✅ أكد LTCPay تسوية Premium للطلب `#{result['order_id']}`؛ ينتهي الاشتراك <t:{result['premium_end']}:F>."
+        else:
+            text = (
+                f"✅ أكد LTCPay تسوية فاتورة LTC للطلب `#{result['order_id']}`؛ "
+                f"أُضيفت `{result['budget_amount']:,}` إلى ميزانية السيرفر. "
+                f"الميزانية: `{result['old_balance']:,}` ← `{result['new_balance']:,}`."
+            )
     else:
         text = (
             f"⚠️ فاتورة LTC للطلب `#{result.get('order_id', '?')}` تحتاج مراجعة يدوية؛ "
@@ -225,7 +228,11 @@ def ltcpay_webhook():
         return "Invalid store or invoice", 400
     try:
         invoice = get_invoice(str(event["invoiceId"]))
-        result = database.process_ltcpay_webhook(event, invoice)
+        # Premium uses a separate ledger; budget settlement remains unchanged.
+        import premium_payments
+        result = premium_payments.process_webhook(event, invoice)
+        if result is None:
+            result = database.process_ltcpay_webhook(event, invoice)
     except Exception:
         app.logger.exception("LTCPay webhook settlement failed")
         return "Temporary settlement error", 500
