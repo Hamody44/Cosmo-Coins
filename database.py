@@ -375,6 +375,35 @@ def get_guild_db(guild_id: int):
     _ensure_guild_db_column(cur, "settings", "eightball_guess_reward", "INTEGER NOT NULL DEFAULT 0", schema_key)
     _ensure_guild_db_column(cur, "premium_info", "custom_currency_name", "TEXT", schema_key)
 
+    # Isolated, idempotent schema for photo contests and invite history.
+    cur.execute('''CREATE TABLE IF NOT EXISTS photo_contests (
+        contest_id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+        participation_channel_id INTEGER, voting_channel_id INTEGER,
+        results_channel_id INTEGER, status TEXT NOT NULL DEFAULT 'draft',
+        prizes_json TEXT NOT NULL DEFAULT '{}', conditions TEXT,
+        update_interval INTEGER NOT NULL DEFAULT 300, results_message_id INTEGER,
+        created_at INTEGER NOT NULL, ended_at INTEGER)''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS contest_entries (
+        contest_id INTEGER NOT NULL, entry_no INTEGER NOT NULL, author_id INTEGER NOT NULL,
+        source_message_id INTEGER NOT NULL, voting_message_id INTEGER, image_url TEXT NOT NULL,
+        created_at INTEGER NOT NULL, PRIMARY KEY (contest_id, entry_no),
+        UNIQUE (contest_id, source_message_id))''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS contest_votes (
+        contest_id INTEGER NOT NULL, entry_no INTEGER NOT NULL, voter_id INTEGER NOT NULL,
+        voted_at INTEGER NOT NULL, excluded INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (contest_id, voter_id))''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS contest_voter_reviews (
+        contest_id INTEGER NOT NULL, voter_id INTEGER NOT NULL, username TEXT,
+        avatar_url TEXT, banner_url TEXT, public_flags INTEGER, suspicion_score INTEGER NOT NULL DEFAULT 0,
+        ai_review_status TEXT, excluded INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+        PRIMARY KEY (contest_id, voter_id))''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS invite_snapshots (
+        guild_id INTEGER NOT NULL, code TEXT NOT NULL, inviter_id INTEGER, uses INTEGER NOT NULL DEFAULT 0,
+        captured_at INTEGER NOT NULL, PRIMARY KEY (guild_id, code))''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS invite_uses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, invite_code TEXT,
+        inviter_id INTEGER, member_id INTEGER NOT NULL, member_username TEXT, joined_at INTEGER NOT NULL)''')
+
     if schema_key not in _guild_schema_initialized:
         cur.execute(
             "UPDATE leveling_daily_reports SET last_send_attempt_at = created_at, last_send_channel_id = channel_id "
