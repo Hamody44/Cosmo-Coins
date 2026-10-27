@@ -66,7 +66,7 @@
     <!-- إعدادات التبديل ورومات لوجات السيرفر -->
     <div class="col-lg-5">
         <div class="card p-4 mb-4">
-            <h5 class="text-white fw-bold mb-3">🪙 ميزانية السيرفر المتاحة</h5>
+            <h5 class="text-white fw-bold mb-3">🪙 ميزانية السيرفر</h5>
             <div class="p-3 bg-dark rounded border border-secondary">
                 <span class="fs-3 text-success fw-bold">{{ "{:,}".format(settings.spending_balance) }}</span>
                 <span class="text-muted-custom">Cosmo</span>
@@ -74,7 +74,7 @@
         </div>
 
         <div class="card p-4 mb-4">
-            <h5 class="text-white fw-bold mb-3">⚙️ حالة التبديل العام ورومات لوجات السيرفر</h5>
+            <h5 class="text-white fw-bold mb-3">⚙️ حالة التبديل ورومات السيرفر</h5>
             <form method="POST">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="save_settings">
@@ -85,12 +85,12 @@
                     {% else %}
                         التبديل مغلق عالميًا في جميع السيرفرات.
                     {% endif %}
-                    <div class="small mt-1">إدارة الفتح والإغلاق تتم من سيرفر Cosmo فقط عبر `/toggle_exchange_system`؛ أما لوجات هذا السيرفر فتظل محلية. إغلاق السوق يمنع الطلبات الجديدة فقط، والطلبات المعلقة تبقى للمعالجة.</div>
+                    <div class="small mt-1">التبديل مفتوح أو مغلق لجميع السيرفرات، بينما الرومات التالية خاصة بهذا السيرفر.</div>
                 </div>
 
                 <!-- 1. لوج التحويلات -->
                 <div class="mb-3">
-                    <label class="form-label text-white fw-semibold">🔄 روم لوج التحويلات (Transfer Log)</label>
+                    <label class="form-label text-white fw-semibold">🔄 روم التحويلات</label>
                     <select name="transfer_log" class="form-select">
                         <option value="">-- بدون روم محددة --</option>
                         {% for ch in channels %}
@@ -101,7 +101,7 @@
 
                 <!-- 2. لوج التسليمات والإثباتات -->
                 <div class="mb-3">
-                    <label class="form-label text-white fw-semibold">📦 روم لوج التسليمات (Delivery Log)</label>
+                    <label class="form-label text-white fw-semibold">📦 روم التسليمات</label>
                     <select name="delivery_log" class="form-select">
                         <option value="">-- بدون روم محددة --</option>
                         {% for ch in channels %}
@@ -112,7 +112,7 @@
 
                 <!-- 3. لوج شحن وخصم الرصيد -->
                 <div class="mb-3">
-                    <label class="form-label text-white fw-semibold">🪙 روم لوج الرصيد (Balance Log)</label>
+                    <label class="form-label text-white fw-semibold">🪙 روم الرصيد</label>
                     <select name="balance_log" class="form-select">
                         <option value="">-- بدون روم محددة --</option>
                         {% for ch in channels %}
@@ -123,7 +123,7 @@
 
                 <!-- 4. لوج نجاح التبديل -->
                 <div class="mb-4">
-                    <label class="form-label text-white fw-semibold">🎉 روم لوج نجاح التبديل (Success Log)</label>
+                    <label class="form-label text-white fw-semibold">🎉 روم نجاح التبديل</label>
                     <select name="exchange_success_log" class="form-select">
                         <option value="">-- بدون روم محددة --</option>
                         {% for ch in channels %}
@@ -133,7 +133,7 @@
                 </div>
 
                 <div class="mb-4">
-                    <label class="form-label text-white fw-semibold">🎫 روم أرشيف التذاكر (خاص بهذا السيرفر)</label>
+                    <label class="form-label text-white fw-semibold">🎫 روم أرشيف التذاكر</label>
                     <select name="ticket_log" class="form-select">
                         <option value="">-- بدون روم محددة --</option>
                         {% for ch in channels %}

@@ -42,7 +42,7 @@ class HelpView(discord.ui.View):
         await self.show_page(
             interaction,
             "🌐 أوامر الأعضاء العامة",
-            "الأوامر المتاحة للأعضاء، مرتبة حسب القسم:",
+            "اختر الأمر المناسب من القائمة:",
             discord.Color.blue(),
             [
                 ("🪙 الرصيد والتحويل والتبديل", (
@@ -76,7 +76,7 @@ class HelpView(discord.ui.View):
         await self.show_page(
             interaction,
             "🎁 الألعاب والجوائز",
-            "أوامر إدارة الرصيد والفعاليات. مالك السيرفر يستطيع تشغيل الجيف والبوكس والروليت دون Premium؛ وتظل الجوائز خاضعة لميزانية السيرفر.",
+            "ألعاب وفعاليات السيرفر:",
             discord.Color.green(),
             [
                 ("🪙 شحن وخصم رصيد الأعضاء", (
@@ -102,7 +102,7 @@ class HelpView(discord.ui.View):
         await self.show_page(
             interaction,
             "🎫 نظام التذاكر",
-            "نظام التذاكر متاح دون Premium. إعداد التذاكر وقناة أرشيفها محفوظان بشكل مستقل لكل سيرفر.",
+            "إنشاء التذاكر وإدارتها:",
             discord.Color.teal(),
             [
                 ("📩 الإعداد والاستخدام", (
@@ -125,7 +125,7 @@ class HelpView(discord.ui.View):
         await self.show_page(
             interaction,
             "⚙️ إدارة السيرفر",
-            "إعدادات ومسؤوليات السيرفر، مرتبة حسب الوظيفة:",
+            "أوامر إدارة السيرفر:",
             discord.Color.red(),
             [
                 ("💬 الردود والاختصارات", (
@@ -156,13 +156,10 @@ class HelpView(discord.ui.View):
                     "• `/add_level_channel` و`/remove_level_channel` و`/list_level_channels` — تحديد رومات احتساب الرسائل.\n"
                     "• `/toggle_level_system <true|false>` — فتح النظام أو إغلاقه لهذا السيرفر فقط.\n"
                     "• `/toggle_voice_level_system <true|false>` — فتح نظام الفويس أو إغلاقه بشكل مستقل؛ يرصد تلقائياً الرومات الصوتية المؤقتة والعادية عدا AFK.\n"
-                    "• `/set_level_reward <amount>` — مكافأة من ميزانية السيرفر لكل مستوى من مضاعفات 10.\n"
-                    "• `/level_points` و`/top [period:daily|weekly|monthly]` — يعرض التوب النصي أولاً ثم توب الفويس بالنقاط والوقت؛ الفترة فارغة تعني الترتيب العام.\n"
-                    "• `/set_level_announcement_channel` و`/set_level_salary <500|1000|2000|3000> <amount>` — روم التقرير ومبالغ شرائح admin.\n"
-                    "• `/level_salary_history [member] [limit]` — سجل الرواتب السابقة؛ متاح لمالك البوت ومالك السيرفر وowner-role والإدارة المخولة.\n"
-                    "كل 100 نقطة ترفع المستوى؛ تُمنح نقطة بحد مرة كل 30 ثانية. 5 رسائل خلال 10 ثوانٍ تُعد سباماً ولا تُحتسب. التصفير والتقرير اليومي الساعة 23:55 بتوقيت الرياض؛ الأسبوع يبدأ الاثنين والشهر يوم 1.\n"
-                    "الفويس منفصل عن نقاط الرسائل والرواتب: نقطة لكل دقيقة في الرومات المحددة، مع تجاهل AFK والعضو وحده أو الـdeafen؛ الكتم العادي لا يوقف الاحتساب.\n"
-                    "تأكد أن للبوت صلاحية قراءة سجل الرسائل في روم الإعلان؛ لإعادة محاولة تقرير فشل أكثر من 8 مرات أعد ضبط `/set_level_announcement_channel`."
+                    "• `/set_level_reward <amount>` — مكافأة المستوى.\n"
+                    "• `/level_points` و`/top` — عرض النقاط والترتيب.\n"
+                    "• `/set_level_announcement_channel` — روم إعلانات اللفلات.\n"
+                    "• `/set_level_salary` و`/level_salary_history` — إعداد ومراجعة الرواتب."
                 )),
                 ("🏦 شحن ميزانية السيرفر", (
                     "• `/buy_budget <amount>` — لمالك السيرفر أو مسؤوليه؛ اختر وسيلة دفع مفعلة.\n"
@@ -178,7 +175,7 @@ class HelpView(discord.ui.View):
         await self.show_page(
             interaction,
             "👑 Premium وأدوات مالك البوت",
-                    "تخصيص اسم عرض الرصيد والصورة والبنر مميزات Premium؛ اسم الرصيد لا يغيّر العملة أو قيمتها.",
+            "أوامر Premium وأدوات المالك:",
             discord.Color.gold(),
             [
                 ("💎 Premium", (
@@ -217,17 +214,10 @@ class General(commands.Cog):
     async def help_command(self, ctx: commands.Context):
         embed = discord.Embed(
             title="✨ قائمة أوامر بوت Cosmo",
-            description=(
-                "مرحباً بك! اختر القسم المطلوب من الأزرار المرتبة حسب نوع الاستخدام:\n\n"
-                "🌐 الأوامر العامة والرصد.\n"
-                "🎁 الألعاب والجوائز وشحن/خصم الرصيد.\n"
-                "🎫 التذاكر وإعداد قناة أرشيف مستقلة لكل سيرفر.\n"
-                "⚙️ إعدادات ومسؤوليات السيرفر.\n"
-                "👑 مميزات Premium وأدوات مالك البوت."
-            ),
+            description="اختر القسم المطلوب لعرض الأوامر المتاحة.",
             color=discord.Color.purple()
         )
-        embed.set_footer(text="Cosmo Currency System • استخدم /help أو !help")
+        embed.set_footer(text="Cosmo • اختر قسمًا من الأزرار")
         view = HelpView(ctx.author)
         await ctx.send(embed=embed, view=view)
 

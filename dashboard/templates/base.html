@@ -12,6 +12,9 @@
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             min-height: 100vh;
         }
+        body.manage-page {
+            background: #080b14;
+        }
         .navbar {
             background-color: #151b2b;
             border-bottom: 1px solid #232c45;
@@ -62,9 +65,58 @@
             background-color: #151b2b;
             color: #e2e8f0;
         }
+        .manage-page .card {
+            box-shadow: 0 10px 28px rgba(0, 0, 0, .16);
+        }
+        .manage-page .form-label {
+            line-height: 1.5;
+        }
+        .manage-page .alert {
+            border-radius: 10px;
+            line-height: 1.8;
+        }
+        @media (max-width: 576px) {
+            body.manage-page .navbar {
+                padding-inline: 14px !important;
+            }
+            body.manage-page .navbar-brand {
+                font-size: 1.05rem !important;
+            }
+            body.manage-page .navbar .btn {
+                padding: .3rem .45rem;
+                font-size: .72rem;
+            }
+            body.manage-page > .container {
+                padding-inline: 14px;
+            }
+            .manage-page .card {
+                border-radius: 16px;
+                padding: 1.15rem !important;
+            }
+            .manage-page h2 {
+                font-size: 1.35rem;
+                line-height: 1.5;
+            }
+            .manage-page h4,
+            .manage-page h5 {
+                line-height: 1.55;
+            }
+            .manage-page .form-label {
+                font-size: .95rem;
+                margin-bottom: .45rem;
+            }
+            .manage-page .form-select,
+            .manage-page .form-control {
+                min-height: 48px;
+                border-radius: 9px;
+            }
+            .manage-page .table {
+                min-width: 520px;
+            }
+        }
     </style>
 </head>
-<body>
+<body class="{% if request.endpoint == 'manage' %}manage-page{% endif %}">
     <nav class="navbar navbar-expand-lg px-4 mb-4">
         <a class="navbar-brand text-light fw-bold fs-4" href="/">🪙 Cosmo Panel</a>
         <div class="ms-auto d-flex align-items-center gap-2">
