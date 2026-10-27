@@ -14,6 +14,15 @@ from discord.ext import commands, tasks
 from database import get_guild_db
 
 VOTE_EMOJI = "👍"
+MIN_VOTER_ACCOUNT_AGE_DAYS = 90
+
+
+def account_age_days(user, now=None):
+    created = getattr(user, "created_at", None)
+    if created is None:
+        return None
+    timestamp = created.timestamp()
+    return max(0, int(((now or time.time()) - timestamp) // 86400))
 
 
 def suspicion_score(user) -> int:
@@ -45,19 +54,31 @@ def record_vote(guild_id, contest_id, entry_no, voter, *, now=None):
             return False, "entry_missing"
         if int(entry[0]) == int(voter.id):
             return False, "self_vote"
+        age_days = account_age_days(voter, now)
+        avatar = getattr(getattr(voter, "display_avatar", None), "url", None)
+        banner = getattr(getattr(voter, "banner", None), "url", None)
+        flags = getattr(getattr(voter, "public_flags", None), "value", 0)
+        if age_days is not None and age_days < MIN_VOTER_ACCOUNT_AGE_DAYS:
+            cur.execute(
+                "INSERT INTO contest_voter_reviews(contest_id,voter_id,username,avatar_url,banner_url,public_flags,suspicion_score,excluded,created_at,account_created_at,account_age_days,classification) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,'fake') ON CONFLICT(contest_id,voter_id) DO UPDATE SET username=excluded.username,avatar_url=excluded.avatar_url,banner_url=excluded.banner_url,public_flags=excluded.public_flags,suspicion_score=excluded.suspicion_score,excluded=1,account_created_at=excluded.account_created_at,account_age_days=excluded.account_age_days,classification='fake'",
+                (contest_id, voter.id, str(getattr(voter, "name", voter.id)), str(avatar) if avatar else None,
+                 str(banner) if banner else None, int(flags or 0), 10, 1, now,
+                 int(getattr(getattr(voter, "created_at", None), "timestamp", lambda: 0)()), age_days),
+            )
+            conn.commit()
+            return False, "account_too_new"
         cur.execute("SELECT entry_no FROM contest_votes WHERE contest_id=? AND voter_id=?", (contest_id, voter.id))
         existing = cur.fetchone()
         # One vote per person. A new reaction deliberately replaces the old one.
         cur.execute("INSERT INTO contest_votes(contest_id,entry_no,voter_id,voted_at,excluded) VALUES(?,?,?,?,0) "
                     "ON CONFLICT(contest_id,voter_id) DO UPDATE SET entry_no=excluded.entry_no,voted_at=excluded.voted_at",
                     (contest_id, entry_no, voter.id, now))
-        avatar = getattr(getattr(voter, "display_avatar", None), "url", None)
-        banner = getattr(getattr(voter, "banner", None), "url", None)
-        flags = getattr(getattr(voter, "public_flags", None), "value", 0)
-        cur.execute("INSERT INTO contest_voter_reviews(contest_id,voter_id,username,avatar_url,banner_url,public_flags,suspicion_score,created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(contest_id,voter_id) DO UPDATE SET username=excluded.username,avatar_url=excluded.avatar_url,banner_url=excluded.banner_url,public_flags=excluded.public_flags",
+        cur.execute("INSERT INTO contest_voter_reviews(contest_id,voter_id,username,avatar_url,banner_url,public_flags,suspicion_score,created_at,account_created_at,account_age_days,classification) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?, 'eligible') ON CONFLICT(contest_id,voter_id) DO UPDATE SET username=excluded.username,avatar_url=excluded.avatar_url,banner_url=excluded.banner_url,public_flags=excluded.public_flags,account_created_at=excluded.account_created_at,account_age_days=excluded.account_age_days,classification=CASE WHEN contest_voter_reviews.classification='left' THEN 'left' ELSE excluded.classification END",
                     (contest_id, voter.id, str(getattr(voter, "name", voter.id)), str(avatar) if avatar else None,
-                     str(banner) if banner else None, int(flags or 0), suspicion_score(voter), now))
+                     str(banner) if banner else None, int(flags or 0), suspicion_score(voter), now,
+                     int(getattr(getattr(voter, "created_at", None), "timestamp", lambda: 0)()), age_days))
         conn.commit()
         return True, "changed" if existing and int(existing[0]) != int(entry_no) else "recorded"
     finally:
@@ -237,12 +258,27 @@ class PhotoContest(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
-        try: current = await member.guild.invites()
-        except (discord.Forbidden, discord.HTTPException): return
+        try:
+            current = await member.guild.invites()
+        except (discord.Forbidden, discord.HTTPException):
+            # Keep the join in the total even when Discord does not reveal its invite.
+            current = []
         conn, cur = get_guild_db(member.guild.id); old = {r[0]: r[1:] for r in cur.execute("SELECT code,uses,inviter_id FROM invite_snapshots WHERE guild_id=?", (member.guild.id,))}; found = next((i for i in current if int(i.uses or 0) > int(old.get(i.code, (0, None))[0])), None)
         inviter = getattr(found.inviter, 'id', None) if found else None; code = found.code if found else None
-        cur.execute("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at) VALUES(?,?,?,?,?,?)", (member.guild.id, code, inviter, member.id, str(member), int(time.time())))
+        age_days = account_age_days(member)
+        status = 'fake' if age_days is not None and age_days < MIN_VOTER_ACCOUNT_AGE_DAYS else 'valid'
+        cur.execute("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at,status,account_age_days) VALUES(?,?,?,?,?,?,?,?)", (member.guild.id, code, inviter, member.id, str(member), int(time.time()), status, age_days))
         conn.commit(); conn.close(); await self._snapshot_invites(member.guild)
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member):
+        """A departed member is never counted as a valid invite and loses contest votes."""
+        conn, cur = get_guild_db(member.guild.id)
+        now = int(time.time())
+        cur.execute("UPDATE invite_uses SET status='left', left_at=? WHERE guild_id=? AND member_id=? AND status IN ('valid','fake','unknown')", (now, member.guild.id, member.id))
+        cur.execute("UPDATE contest_votes SET excluded=1 WHERE voter_id=? AND contest_id IN (SELECT contest_id FROM photo_contests WHERE guild_id=?)", (member.id, member.guild.id))
+        cur.execute("UPDATE contest_voter_reviews SET excluded=1, classification='left' WHERE voter_id=? AND contest_id IN (SELECT contest_id FROM photo_contests WHERE guild_id=?)", (member.id, member.guild.id))
+        conn.commit(); conn.close()
 
     @commands.command(name="photo_voter", aliases=["مسابقة_مصوت"])
     async def photo_voter(self, ctx, voter_id: int):
@@ -269,26 +305,34 @@ class PhotoContest(commands.Cog):
         member = member or ctx.author
         conn, cur = get_guild_db(ctx.guild.id)
         rows = cur.execute(
-            "SELECT invite_code,member_id,member_username,joined_at FROM invite_uses "
+            "SELECT invite_code,member_id,member_username,joined_at,status FROM invite_uses "
             "WHERE inviter_id=? ORDER BY joined_at DESC LIMIT 50",
             (member.id,),
         ).fetchall()
+        counts = {
+            status: cur.execute("SELECT COUNT(*) FROM invite_uses WHERE guild_id=? AND inviter_id=? AND status=?", (ctx.guild.id, member.id, status)).fetchone()[0]
+            for status in ("valid", "fake", "left")
+        }
+        total = cur.execute("SELECT COUNT(*) FROM invite_uses WHERE guild_id=? AND inviter_id=?", (ctx.guild.id, member.id)).fetchone()[0]
         conn.close()
-        text = "\n".join(
-            f"{index}. {username or member_id} — {code or 'غير محدد'}"
-            for index, (code, member_id, username, _joined_at) in enumerate(rows, 1)
+        text = f"دعوات {member.mention}: صالح `{counts['valid']}` • وهمي `{counts['fake']}` • غادر `{counts['left']}` • الإجمالي `{total}`\n" + "\n".join(
+            f"{index}. {username or member_id} — {code or 'غير محدد'} — {status}"
+            for index, (code, member_id, username, _joined_at, status) in enumerate(rows, 1)
         )
         await ctx.send(text or "لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح.")
 
     @commands.command(name="invites_all", aliases=["دعوات_الجميع"])
     async def invites_all(self, ctx):
         if not self._admin(ctx): return await ctx.send("⛔ للإدارة فقط.")
-        conn, cur = get_guild_db(ctx.guild.id); rows = cur.execute("SELECT inviter_id,COUNT(*) FROM invite_uses GROUP BY inviter_id ORDER BY 2 DESC").fetchall(); conn.close(); await ctx.send("\n".join(f"{r[0] or 'غير محدد'}: {r[1]}" for r in rows) or "لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح.")
+        conn, cur = get_guild_db(ctx.guild.id)
+        rows = cur.execute("SELECT inviter_id, SUM(status='valid'), SUM(status='fake'), SUM(status='left'), COUNT(*) FROM invite_uses WHERE guild_id=? GROUP BY inviter_id ORDER BY COUNT(*) DESC", (ctx.guild.id,)).fetchall()
+        conn.close()
+        await ctx.send("\n".join(f"{r[0] or 'غير محدد'}: صالح `{r[1] or 0}` • وهمي `{r[2] or 0}` • غادر `{r[3] or 0}` • الإجمالي `{r[4]}`" for r in rows) or "لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح.")
 
     @commands.command(name="invites_clear", aliases=["مسح_دعوات"])
     async def invites_clear(self, ctx, member: Optional[discord.Member] = None):
-        if not self._admin(ctx): return await ctx.send("⛔ للإدارة فقط.")
-        conn, cur = get_guild_db(ctx.guild.id); cur.execute("DELETE FROM invite_uses" + (" WHERE member_id=?" if member else ""), ((member.id,) if member else ())); conn.commit(); conn.close(); await ctx.send("✅ تم مسح سجل الدعوات." )
+        if not self._admin(ctx): return await ctx.send("⛔ هذا الأمر للإدارة فقط.")
+        conn, cur = get_guild_db(ctx.guild.id); cur.execute("DELETE FROM invite_uses" + (" WHERE inviter_id=?" if member else ""), ((member.id,) if member else ())); conn.commit(); conn.close(); await ctx.send("✅ تم مسح سجل الدعوات." )
 
 
 async def setup(bot):

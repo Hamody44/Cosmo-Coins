@@ -12,8 +12,8 @@ SCHEMA = """
 CREATE TABLE photo_contests (contest_id INTEGER PRIMARY KEY, guild_id INTEGER, participation_channel_id INTEGER, voting_channel_id INTEGER, results_channel_id INTEGER, status TEXT, prizes_json TEXT, conditions TEXT, update_interval INTEGER, results_message_id INTEGER, created_at INTEGER, ended_at INTEGER);
 CREATE TABLE contest_entries (contest_id INTEGER, entry_no INTEGER, author_id INTEGER, source_message_id INTEGER, voting_message_id INTEGER, image_url TEXT, created_at INTEGER, PRIMARY KEY(contest_id,entry_no));
 CREATE TABLE contest_votes (contest_id INTEGER, entry_no INTEGER, voter_id INTEGER, voted_at INTEGER, excluded INTEGER DEFAULT 0, PRIMARY KEY(contest_id,voter_id));
-CREATE TABLE contest_voter_reviews (contest_id INTEGER, voter_id INTEGER, username TEXT, avatar_url TEXT, banner_url TEXT, public_flags INTEGER, suspicion_score INTEGER DEFAULT 0, ai_review_status TEXT, excluded INTEGER DEFAULT 0, created_at INTEGER, PRIMARY KEY(contest_id,voter_id));
-CREATE TABLE invite_uses (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, invite_code TEXT, inviter_id INTEGER, member_id INTEGER, member_username TEXT, joined_at INTEGER);
+CREATE TABLE contest_voter_reviews (contest_id INTEGER, voter_id INTEGER, username TEXT, avatar_url TEXT, banner_url TEXT, public_flags INTEGER, suspicion_score INTEGER DEFAULT 0, ai_review_status TEXT, excluded INTEGER DEFAULT 0, created_at INTEGER, account_created_at INTEGER, account_age_days INTEGER, classification TEXT DEFAULT 'eligible', PRIMARY KEY(contest_id,voter_id));
+CREATE TABLE invite_uses (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, invite_code TEXT, inviter_id INTEGER, member_id INTEGER, member_username TEXT, joined_at INTEGER, status TEXT DEFAULT 'unknown', account_age_days INTEGER, left_at INTEGER);
 """
 
 
@@ -36,8 +36,8 @@ class PhotoContestTests(unittest.TestCase):
         self.addCleanup(self.patch.stop)
         self.addCleanup(self.tmp.cleanup)
 
-    def user(self, uid):
-        return SimpleNamespace(id=uid, name=f"user{uid}", bot=False, public_flags=SimpleNamespace(value=0), display_avatar=SimpleNamespace(url=""), banner=None, created_at=None)
+    def user(self, uid, created_at=None):
+        return SimpleNamespace(id=uid, name=f"user{uid}", bot=False, public_flags=SimpleNamespace(value=0), display_avatar=SimpleNamespace(url=""), banner=None, created_at=created_at)
 
     def test_vote_order_and_duplicate_rejection_is_one_vote_per_user(self):
         self.assertEqual(photo_contest.record_vote(1, 1, 1, self.user(90))[0], True)
@@ -49,6 +49,15 @@ class PhotoContestTests(unittest.TestCase):
 
     def test_self_vote_is_rejected(self):
         self.assertEqual(photo_contest.record_vote(1, 1, 1, self.user(11)), (False, "self_vote"))
+
+    def test_account_younger_than_90_days_is_not_counted(self):
+        from datetime import datetime, timezone
+        recent = datetime.fromtimestamp(1_999_999_000, tz=timezone.utc)
+        ok, reason = photo_contest.record_vote(1, 1, 1, self.user(91, recent), now=2_000_000_000)
+        self.assertEqual((ok, reason), (False, "account_too_new"))
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM contest_votes").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT classification FROM contest_voter_reviews WHERE voter_id=91").fetchone()[0], "fake")
 
     def test_exclusion_removes_vote_from_ranking(self):
         with sqlite3.connect(self.path) as db:
@@ -68,8 +77,9 @@ class PhotoContestTests(unittest.TestCase):
 
     def test_invite_history_can_be_counted_and_cleared(self):
         with sqlite3.connect(self.path) as db:
-            db.executemany("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at) VALUES (1,?,?,?,?,1)", [("abc", 7, 101, "a"), ("abc", 7, 102, "b")])
+            db.executemany("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at,status) VALUES (1,?,?,?,?,1,?)", [("abc", 7, 101, "a", "valid"), ("abc", 7, 102, "b", "fake")])
             self.assertEqual(db.execute("SELECT COUNT(*) FROM invite_uses WHERE inviter_id=7").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM invite_uses WHERE inviter_id=7 AND status='valid'").fetchone()[0], 1)
             db.execute("DELETE FROM invite_uses WHERE member_id=101")
             self.assertEqual(db.execute("SELECT COUNT(*) FROM invite_uses").fetchone()[0], 1)
 

@@ -396,13 +396,21 @@ def get_guild_db(guild_id: int):
         contest_id INTEGER NOT NULL, voter_id INTEGER NOT NULL, username TEXT,
         avatar_url TEXT, banner_url TEXT, public_flags INTEGER, suspicion_score INTEGER NOT NULL DEFAULT 0,
         ai_review_status TEXT, excluded INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+        account_created_at INTEGER, account_age_days INTEGER, classification TEXT NOT NULL DEFAULT 'eligible',
         PRIMARY KEY (contest_id, voter_id))''')
     cur.execute('''CREATE TABLE IF NOT EXISTS invite_snapshots (
         guild_id INTEGER NOT NULL, code TEXT NOT NULL, inviter_id INTEGER, uses INTEGER NOT NULL DEFAULT 0,
         captured_at INTEGER NOT NULL, PRIMARY KEY (guild_id, code))''')
     cur.execute('''CREATE TABLE IF NOT EXISTS invite_uses (
         id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, invite_code TEXT,
-        inviter_id INTEGER, member_id INTEGER NOT NULL, member_username TEXT, joined_at INTEGER NOT NULL)''')
+        inviter_id INTEGER, member_id INTEGER NOT NULL, member_username TEXT, joined_at INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'unknown', account_age_days INTEGER, left_at INTEGER)''')
+    _ensure_guild_db_column(cur, "contest_voter_reviews", "account_created_at", "INTEGER", schema_key)
+    _ensure_guild_db_column(cur, "contest_voter_reviews", "account_age_days", "INTEGER", schema_key)
+    _ensure_guild_db_column(cur, "contest_voter_reviews", "classification", "TEXT NOT NULL DEFAULT 'eligible'", schema_key)
+    _ensure_guild_db_column(cur, "invite_uses", "status", "TEXT NOT NULL DEFAULT 'unknown'", schema_key)
+    _ensure_guild_db_column(cur, "invite_uses", "account_age_days", "INTEGER", schema_key)
+    _ensure_guild_db_column(cur, "invite_uses", "left_at", "INTEGER", schema_key)
 
     if schema_key not in _guild_schema_initialized:
         cur.execute(
