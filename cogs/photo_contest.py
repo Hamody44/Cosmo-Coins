@@ -85,6 +85,135 @@ def record_vote(guild_id, contest_id, entry_no, voter, *, now=None):
         conn.close()
 
 
+def _channel_mention(guild, channel_id):
+    channel = guild.get_channel(channel_id) if channel_id else None
+    return channel.mention if channel else "غير محدد"
+
+
+class PhotoSetupConfigModal(discord.ui.Modal, title="إعدادات مسابقة الصور"):
+    conditions = discord.ui.TextInput(
+        label="شروط المشاركة",
+        placeholder="اكتب الشروط أو اتركها فارغة",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+    )
+    first_prize = discord.ui.TextInput(label="جائزة المركز الأول", required=False, max_length=200)
+    second_prize = discord.ui.TextInput(label="جائزة المركز الثاني", required=False, max_length=200)
+    third_prize = discord.ui.TextInput(label="جائزة المركز الثالث", required=False, max_length=200)
+    interval = discord.ui.TextInput(label="الفاصل بين تحديثات النتائج بالثواني", required=False, max_length=6, default="300")
+
+    def __init__(self, view):
+        super().__init__()
+        self.setup_view = view
+        self.conditions.default = view.conditions[:1000]
+        prizes = view.prizes
+        self.first_prize.default = prizes.get("1", "")[:200]
+        self.second_prize.default = prizes.get("2", "")[:200]
+        self.third_prize.default = prizes.get("3", "")[:200]
+        self.interval.default = str(view.interval)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            interval = max(60, min(int(str(self.interval.value or "300").strip()), 86400))
+        except ValueError:
+            return await interaction.response.send_message("❌ الفاصل الزمني يجب أن يكون رقمًا لا يقل عن 60 ثانية.", ephemeral=True)
+        self.setup_view.conditions = str(self.conditions.value or "").strip()
+        self.setup_view.prizes = {
+            key: value.strip() for key, value in {
+                "1": str(self.first_prize.value or ""),
+                "2": str(self.second_prize.value or ""),
+                "3": str(self.third_prize.value or ""),
+            }.items() if value.strip()
+        }
+        self.setup_view.interval = interval
+        await interaction.response.send_message("✅ تم حفظ الشروط والجوائز مؤقتًا. اضغط **حفظ الإعداد** لاعتمادها.", ephemeral=True)
+        try:
+            await interaction.message.edit(content=self.setup_view.summary(), view=self.setup_view)
+        except discord.HTTPException:
+            pass
+
+
+class PhotoSetupView(discord.ui.View):
+    def __init__(self, author, guild):
+        super().__init__(timeout=600)
+        self.author_id = author.id
+        self.guild = guild
+        self.participation_id = None
+        self.voting_id = None
+        self.results_id = None
+        self.conditions = ""
+        self.prizes = {}
+        self.interval = 300
+        self.add_item(PhotoChannelSelect(self, "participation", "1) اختر روم استقبال الصور", 0))
+        self.add_item(PhotoChannelSelect(self, "voting", "2) اختر روم التصويت", 1))
+        self.add_item(PhotoChannelSelect(self, "results", "3) اختر روم النتائج", 2))
+
+    def summary(self):
+        prizes = self.prizes or {}
+        prize_text = "، ".join(f"{key}: {value}" for key, value in sorted(prizes.items())) or "غير محددة"
+        return (
+            "**الإعداد الحالي:**\n"
+            f"• روم المشاركة: {_channel_mention(self.guild, self.participation_id)}\n"
+            f"• روم التصويت: {_channel_mention(self.guild, self.voting_id)}\n"
+            f"• روم النتائج: {_channel_mention(self.guild, self.results_id)}\n"
+            f"• الفاصل: `{self.interval}` ثانية\n"
+            f"• الشروط: {self.conditions or 'غير محددة'}\n"
+            f"• الجوائز: {prize_text}\n\n"
+            "بعد التأكد اضغط **حفظ الإعداد**. سيتم إنشاء المسابقة كمسودة ويمكن تشغيلها عبر `!photo_start`."
+        )
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("هذه لوحة الإعداد تخص الشخص الذي بدأ الأمر فقط.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="الشروط والجوائز", style=discord.ButtonStyle.primary, row=3)
+    async def configure_details(self, interaction, button):
+        await interaction.response.send_modal(PhotoSetupConfigModal(self))
+
+    @discord.ui.button(label="حفظ الإعداد", style=discord.ButtonStyle.success, row=4)
+    async def save_setup(self, interaction, button):
+        if not all((self.participation_id, self.voting_id, self.results_id)):
+            return await interaction.response.send_message("❌ اختر رومات المشاركة والتصويت والنتائج أولًا.", ephemeral=True)
+        conn, cur = get_guild_db(self.guild.id)
+        try:
+            cur.execute(
+                "INSERT INTO photo_contests(guild_id,participation_channel_id,voting_channel_id,results_channel_id,conditions,prizes_json,update_interval,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (self.guild.id, self.participation_id, self.voting_id, self.results_id, self.conditions, json.dumps(self.prizes, ensure_ascii=False), self.interval, int(time.time())),
+            )
+            conn.commit()
+            contest_id = cur.lastrowid
+        finally:
+            conn.close()
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"✅ تم حفظ إعداد مسابقة الصور رقم `{contest_id}` كمسودة.\n\n{self.summary()}\n\nشغّلها بالأمر `!photo_start`.",
+            view=None,
+        )
+
+    @discord.ui.button(label="تحديث", style=discord.ButtonStyle.secondary, row=4)
+    async def refresh_setup(self, interaction, button):
+        await interaction.response.edit_message(content=self.summary(), view=self)
+
+    @discord.ui.button(label="إغلاق", style=discord.ButtonStyle.danger, row=4)
+    async def close_setup(self, interaction, button):
+        self.stop()
+        await interaction.response.edit_message(content="تم إغلاق معالج إعداد مسابقة الصور.", view=None)
+
+
+class PhotoChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, setup_view, purpose, placeholder, row):
+        self.setup_view = setup_view
+        self.purpose = purpose
+        super().__init__(placeholder=placeholder, channel_types=[discord.ChannelType.text], row=row)
+
+    async def callback(self, interaction):
+        setattr(self.setup_view, f"{self.purpose}_id", self.values[0].id)
+        await interaction.response.edit_message(content=self.setup_view.summary(), view=self.setup_view)
+
+
 class PhotoContest(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -103,14 +232,17 @@ class PhotoContest(commands.Cog):
         conn.close()
         return row
 
-    @commands.command(name="photo_setup", aliases=["مسابقة_إعداد"])
-    async def photo_setup(self, ctx, participation: discord.TextChannel, voting: discord.TextChannel, results: discord.TextChannel, interval: int = 300):
-        if not self._admin(ctx): return await ctx.send("⛔ هذا الأمر للإدارة فقط.")
-        interval = max(60, min(int(interval), 86400))
-        conn, cur = get_guild_db(ctx.guild.id)
-        cur.execute("INSERT INTO photo_contests(guild_id,participation_channel_id,voting_channel_id,results_channel_id,update_interval,created_at) VALUES(?,?,?,?,?,?)", (ctx.guild.id, participation.id, voting.id, results.id, interval, int(time.time())))
-        conn.commit(); cid = cur.lastrowid; conn.close()
-        await ctx.send(f"✅ تم إعداد المسابقة رقم `{cid}`. التتبع التاريخي للدعوات قبل التفعيل غير متاح.")
+    @commands.hybrid_command(name="photo_setup", aliases=["مسابقة_إعداد"], description="معالج إعداد مسابقة الصور خطوة بخطوة")
+    async def photo_setup(self, ctx):
+        if not self._admin(ctx):
+            return await ctx.send("⛔ هذا المعالج للإدارة فقط.")
+        view = PhotoSetupView(ctx.author, ctx.guild)
+        await ctx.send(
+            "📸 **معالج إعداد مسابقة الصور**\n"
+            "اختر رومات المشاركة والتصويت والنتائج، ثم اضغط **الشروط والجوائز** لإدخال التفاصيل.\n\n"
+            f"{view.summary()}",
+            view=view,
+        )
 
     @commands.command(name="photo_prizes", aliases=["مسابقة_جوائز"])
     async def photo_prizes(self, ctx, *, prizes: str):
