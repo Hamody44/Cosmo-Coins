@@ -260,8 +260,10 @@
                 targetGuild.currencies.forEach(c => {
                     const opt = document.createElement('option');
                     opt.value = c.name;
-                    opt.textContent = `${c.name} (1 ${baseLabel} = ${c.rate} ${c.name})`;
+                    const displayRate = Number(c.display_rate || (c.rate * 10000000));
+                    opt.textContent = `${c.name} (10,000,000 ${baseLabel} = ${displayRate.toLocaleString('en-US')} ${c.name})`;
                     opt.dataset.rate = c.rate;
+                    opt.dataset.displayRate = displayRate;
                     opt.dataset.min = c.min;
                     currencySelect.appendChild(opt);
                 });
@@ -280,10 +282,11 @@
             }
 
             const rate = parseFloat(selectedOpt.dataset.rate);
+            const displayRate = parseFloat(selectedOpt.dataset.displayRate || (rate * 10000000));
             const min = parseFloat(selectedOpt.dataset.min);
             const targetGuild = guildsData.find(g => String(g.id) === String(guildSelect.value));
             const baseLabel = targetGuild ? (targetGuild.currency_label || 'Cosmo') : 'Cosmo';
-            rateInfo.textContent = `ℹ️ سعر الصرف: 1 ${baseLabel} = ${rate} ${this.value} | الحد الأدنى للاستلام: ${min} ${this.value}`;
+            rateInfo.textContent = `ℹ️ سعر الصرف: 10,000,000 ${baseLabel} = ${displayRate.toLocaleString('en-US')} ${this.value} | الحد الأدنى للاستلام: ${min.toLocaleString('en-US')} ${this.value}`;
             rateInfo.style.display = 'block';
             cosmoAmount.disabled = false;
             submitBtn.disabled = false;

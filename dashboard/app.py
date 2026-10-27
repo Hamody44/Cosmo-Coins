@@ -733,6 +733,8 @@ def manage(guild_id):
             channels=text_channels,
             is_premium=is_premium,
             premium_expiry=premium_expiry_str,
+            exchange_base_cosmo=database.EXCHANGE_BASE_COSMO,
+            format_exchange_amount=database.format_exchange_amount,
             currency_label=currency_label,
             bot_nick=bot_current_nick,
             banner_url=banner_url,
@@ -775,7 +777,7 @@ def profile():
     bot_guild_ids = get_bot_guild_ids()
     global_currencies = database.get_exchange_currencies(active_only=True)
     currencies_data = [
-        {"name": name, "rate": float(rate), "min": float(minimum)}
+        {"name": name, "rate": float(rate), "display_rate": float(rate) * database.EXCHANGE_BASE_COSMO, "min": float(minimum)}
         for name, rate, _active, minimum in global_currencies
         if math.isfinite(float(rate)) and float(rate) > 0
         and math.isfinite(float(minimum)) and float(minimum) >= 0

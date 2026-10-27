@@ -23,7 +23,8 @@ from database import (
     create_crypto_budget_payment_order, update_crypto_budget_payment_order,
     fail_crypto_budget_payment_order, transfer_balance_to_server_budget,
     set_auto_budget_payment_enabled, set_global_exchange_enabled,
-    PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID, guarded_server_budget_credit, record_audit
+    PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID, guarded_server_budget_credit, record_audit,
+    EXCHANGE_BASE_COSMO, format_exchange_amount
 )
 from ltcpay import (
     LTCPayError, INVOICE_TTL_SECONDS, MIN_CRYPTO_BUDGET, MIN_CRYPTO_USD,
@@ -1303,7 +1304,7 @@ class Admin(commands.Cog):
         msg = "متاحة للتبديل ✅" if status else "معطلة ومقفلة ⛔"
         await ctx.send(f"⚙️ العملة العامة **{existing_name}** أصبحت الآن: **{msg}** في جميع السيرفرات.")
 
-    @commands.hybrid_command(name="add_exchange_currency", aliases=["اضافة_عملة_تبديل"], description="إضافة أو تعديل عملة في كتالوج التبديل العام من سيرفر Cosmo")
+    @commands.hybrid_command(name="add_exchange_currency", aliases=["اضافة_عملة_تبديل"], description="إضافة أو تعديل عملة؛ السعر يكون مقابل 10 ملايين Cosmo")
     async def add_exchange_currency(self, ctx: commands.Context, currency_name: str, rate: float, min_received: float = 0.0):
         if not can_manage_global_exchange(ctx):
             return await ctx.send(f"⛔ إدارة العملات العامة متاحة لإدارة سيرفر Cosmo فقط (`{COSMO_GUILD_ID}`).")
@@ -1311,9 +1312,16 @@ class Admin(commands.Cog):
         if not currency_name or len(currency_name) > 32 or any(not char.isprintable() for char in currency_name) or any(char in currency_name for char in "@`<>"):
             return await ctx.send("❌ اسم العملة يجب أن يكون واضحاً وبحد أقصى 32 حرفاً ومن دون رموز الإشارات أو backticks.")
         if not math.isfinite(rate) or rate <= 0 or not math.isfinite(min_received) or min_received < 0:
-            return await ctx.send("❌ يجب أن يكون السعر أكبر من صفر والحد الأدنى صفراً أو أكثر، وبقيم رقمية صالحة.")
-        currency_name = upsert_exchange_currency(currency_name, rate, min_received)
-        await ctx.send(f"✅ تم تحديث العملة العامة **{currency_name}** لكل السيرفرات:\n• السعر: `1 Cosmo = {rate:g} {currency_name}`\n• الحد الأدنى: `{min_received:g} {currency_name}`.")
+            return await ctx.send("❌ السعر والحد الأدنى يجب أن يكونا أرقامًا صحيحة وموجبة.")
+        # Keep the database's per-Cosmo representation for existing currencies,
+        # while accepting/displaying the friendlier 10,000,000-Cosmo quote.
+        stored_rate = rate / EXCHANGE_BASE_COSMO
+        currency_name = upsert_exchange_currency(currency_name, stored_rate, min_received)
+        await ctx.send(
+            f"✅ تم تحديث العملة العامة **{currency_name}** لكل السيرفرات:\n"
+            f"• السعر: `{format_exchange_amount(EXCHANGE_BASE_COSMO)} Cosmo = {format_exchange_amount(rate)} {currency_name}`\n"
+            f"• الحد الأدنى: `{format_exchange_amount(min_received)} {currency_name}`."
+        )
 
     @commands.hybrid_command(name="delete_exchange_currency", aliases=["حذف_عملة_تبديل"], description="حذف عملة من كتالوج التبديل العام من سيرفر Cosmo")
     async def delete_exchange_currency(self, ctx: commands.Context, currency_name: str):

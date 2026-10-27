@@ -19,6 +19,9 @@ COSMO_GUILD_ID = 1540014549179039867
 PROBOT_PAYMENT_BOT_ID = 282859044593598464
 ADAMC_PAYMENT_BOT_ID = 1505622388975468684
 MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
+# أسعار كتالوج التبديل مخزنة داخليًا لكل Cosmo للحفاظ على التوافق،
+# لكن واجهة المستخدم تعرض السعر القياسي لكل 10 ملايين Cosmo.
+EXCHANGE_BASE_COSMO = 10_000_000
 
 if not os.path.exists("guilds_data"):
     os.makedirs("guilds_data")
@@ -401,6 +404,14 @@ def is_guild_premium(guild_id: int) -> bool:
     if row and row[0]:
         return int(time.time()) < row[0]
     return False
+
+def format_exchange_amount(value: float) -> str:
+    """Format a displayed exchange amount without scientific notation."""
+    number = float(value)
+    if math.isfinite(number) and abs(number - round(number)) < 1e-9:
+        return f"{int(round(number)):,}"
+    return f"{number:,.8f}".rstrip("0").rstrip(".")
+
 
 def get_currency_label(guild_id: int | None = None) -> str:
     """اسم العرض لرصيد Cosmo في سيرفر بعينه؛ لا ينشئ عملة أو رصيداً منفصلاً."""

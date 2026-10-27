@@ -9,7 +9,8 @@ from database import (
     send_global_action_log, transfer_balance, create_exchange_request,
     accept_exchange_request, deny_exchange_request, get_currency_label,
     get_exchange_currencies, get_exchange_currency, has_pending_exchange_request,
-    is_global_exchange_enabled, ExchangeSystemClosed, ExchangeCurrencyUnavailable
+    is_global_exchange_enabled, ExchangeSystemClosed, ExchangeCurrencyUnavailable,
+    EXCHANGE_BASE_COSMO, format_exchange_amount
 )
 
 def can_manage_exchange_request(ctx: commands.Context, origin_guild_id: int) -> bool:
@@ -185,7 +186,11 @@ class Economy(commands.Cog):
             for name, rate, _active, minimum in page:
                 embed.add_field(
                     name=f"🪙 {name}",
-                    value=f"`1 {label} = {float(rate):g} {name}`\nالحد الأدنى للاستلام: `{float(minimum):g} {name}`",
+                    value=(
+                        f"`{format_exchange_amount(EXCHANGE_BASE_COSMO)} {label} = "
+                        f"{format_exchange_amount(float(rate) * EXCHANGE_BASE_COSMO)} {name}`\n"
+                        f"الحد الأدنى للاستلام: `{format_exchange_amount(float(minimum))} {name}`"
+                    ),
                     inline=True,
                 )
             embed.set_footer(text=f"كتالوج Cosmo العام • صفحة {page_number}/{len(pages)}")

@@ -167,7 +167,7 @@
                         {% for curr in currencies %}
                         <tr>
                             <td class="fw-bold">{{ curr[0] }}</td>
-                            <td>1 {{ currency_label }} = {{ curr[1] }} {{ curr[0] }}</td>
+                            <td>{{ format_exchange_amount(exchange_base_cosmo) }} {{ currency_label }} = {{ format_exchange_amount(curr[1] * exchange_base_cosmo) }} {{ curr[0] }}</td>
                             <td>{{ curr[3] }} {{ curr[0] }}</td>
                             <td>
                                 {% if curr[2] == 1 %}
