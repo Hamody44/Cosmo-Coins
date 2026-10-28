@@ -152,7 +152,9 @@ class HelpView(discord.ui.View):
                     "• `!set_delivery_log` و`!set_success_log` — قنوات التسليم والنجاح.\n"
                     "• `!set_transfer_log` — قناة سجل التحويلات.\n"
                     "• `!set_invite_log #channel` — تحديد روم سجل الدخول والخروج وتصنيف الدعوات.\n"
-                    "• `!disable_invite_log` — إيقاف سجل الدعوات."
+                    "• `!disable_invite_log` — إيقاف سجل الدعوات.\n"
+                    "• `/invite_event_start <amount>` — بدء فعالية الدعوات في روم الأمر.\n"
+                    "• `/invite_event_end` — إنهاء فعالية الدعوات وإيقاف المكافآت."
                 )),
                 ("📈 النقاط واللفلات والرواتب", (
                     "• `/add_level_channel` و`/remove_level_channel` و`/list_level_channels` — تحديد رومات احتساب الرسائل.\n"

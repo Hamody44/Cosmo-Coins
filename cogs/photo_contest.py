@@ -1,7 +1,4 @@
-"""Reaction-based photo contests and durable Discord invite attribution.
-
-No prize money is moved by this cog: prizes are announcement-only in v1.
-"""
+"""Reaction-based photo contests, invite attribution, and invite-event rewards."""
 import asyncio
 import json
 import time
@@ -11,7 +8,7 @@ from typing import Optional
 import discord
 from discord.ext import commands, tasks
 
-from database import get_guild_db
+from database import get_guild_db, parse_amount, credit_invite_event_reward, record_audit
 
 VOTE_EMOJI = "👍"
 MIN_VOTER_ACCOUNT_AGE_DAYS = 90
@@ -30,6 +27,34 @@ def account_age_days(user, now=None):
         return None
     timestamp = created.timestamp()
     return max(0, int(((now or time.time()) - timestamp) // 86400))
+
+
+def invite_event_profile_risk(member):
+    """Return an explainable profile-only risk score for invite events.
+
+    Discord does not expose a member's private bio, IP, device, or gift inventory
+    to a bot, so unavailable signals are deliberately not guessed.
+    """
+    score = 0
+    reasons = []
+    username = str(getattr(member, "name", ""))
+    digit_count = sum(char.isdigit() for char in username)
+    if len(username) >= 12 and digit_count >= 2:
+        score += 18
+        reasons.append("اسم مستخدم طويل ويحتوي أرقامًا كثيرة")
+    elif len(username) <= 5:
+        score = max(0, score - 4)
+    flags = getattr(getattr(member, "public_flags", None), "value", 0) or 0
+    if int(flags).bit_count() < 4:
+        score += 12
+        reasons.append("عدد الشارات العامة أقل من 4")
+    if getattr(member, "avatar", None) is None:
+        score += 15
+        reasons.append("لا توجد صورة شخصية مخصصة")
+    if getattr(member, "banner", None) is None:
+        score += 8
+        reasons.append("لا يوجد بنر ظاهر")
+    return min(100, score), reasons
 
 
 def suspicion_score(user) -> int:
@@ -270,7 +295,12 @@ class PhotoContest(commands.Cog):
     @commands.command(name="photo_start", aliases=["مسابقة_بدء"])
     async def photo_start(self, ctx):
         if not self._admin(ctx): return await ctx.send("⛔ هذا الأمر للإدارة فقط.")
-        conn, cur = get_guild_db(ctx.guild.id); row = cur.execute("SELECT contest_id,participation_channel_id,conditions FROM photo_contests WHERE guild_id=? AND status='draft' ORDER BY contest_id DESC LIMIT 1", (ctx.guild.id,)).fetchone()
+        conn, cur = get_guild_db(ctx.guild.id)
+        invite_event = cur.execute("SELECT event_id FROM invite_events WHERE guild_id=? AND status='active' LIMIT 1", (ctx.guild.id,)).fetchone()
+        if invite_event:
+            conn.close()
+            return await ctx.send("❌ أنهِ فعالية الدعوات أولًا قبل بدء مسابقة الصور.")
+        row = cur.execute("SELECT contest_id,participation_channel_id,conditions FROM photo_contests WHERE guild_id=? AND status='draft' ORDER BY contest_id DESC LIMIT 1", (ctx.guild.id,)).fetchone()
         if not row: conn.close(); return await ctx.send("❌ أعد الإعداد أولًا.")
         cur.execute("UPDATE photo_contests SET status='active' WHERE contest_id=?", (row[0],)); conn.commit(); conn.close()
         await ctx.send(f"📸 بدأت المسابقة `{row[0]}`. أرسل الصور في <#{row[1]}>. الشرط: {row[2] or 'لا يوجد'}")
@@ -410,6 +440,65 @@ class PhotoContest(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             pass
 
+    @commands.hybrid_command(name="invite_event_start", aliases=["بدء_فعالية_الانفايت"], description="بدء فعالية دعوات بمكافأة تلقائية في روم الأمر")
+    async def invite_event_start(self, ctx, amount: str):
+        if not self._admin(ctx):
+            return await ctx.send("⛔ هذا الأمر للإدارة فقط.")
+        try:
+            reward = parse_amount(amount)
+        except (TypeError, ValueError):
+            return await ctx.send("❌ صيغة المكافأة غير صحيحة. مثال: `1000` أو `10k`.")
+        if reward <= 0:
+            return await ctx.send("❌ يجب أن تكون مكافأة الدعوة أكبر من صفر.")
+        conn, cur = get_guild_db(ctx.guild.id)
+        log_row = cur.execute("SELECT invite_log FROM settings WHERE guild_id=?", (ctx.guild.id,)).fetchone()
+        active = cur.execute("SELECT event_id, amount FROM invite_events WHERE guild_id=? AND status='active' LIMIT 1", (ctx.guild.id,)).fetchone()
+        photo_active = cur.execute("SELECT 1 FROM photo_contests WHERE guild_id=? AND status='active' LIMIT 1", (ctx.guild.id,)).fetchone()
+        if not log_row or not log_row[0]:
+            conn.close()
+            return await ctx.send("❌ حدد روم سجل الدعوات أولًا باستخدام `!set_invite_log #الروم`.")
+        if photo_active:
+            conn.close()
+            return await ctx.send("❌ لا يمكن بدء فعالية الدعوات أثناء مسابقة الصور. أنهِ مسابقة الصور أولًا.")
+        if active:
+            conn.close()
+            return await ctx.send(f"⚠️ توجد فعالية دعوات نشطة بالفعل برقم `{active[0]}` ومكافأة `{active[1]:,}` Cosmo.")
+        now = int(time.time())
+        cur.execute(
+            "INSERT INTO invite_events(guild_id,channel_id,amount,started_at,started_by,status) VALUES(?,?,?,?,?, 'active')",
+            (ctx.guild.id, ctx.channel.id, reward, now, ctx.author.id),
+        )
+        event_id = cur.lastrowid
+        conn.commit(); conn.close()
+        record_audit(
+            "invite_event_started", guild_id=ctx.guild.id, actor_id=ctx.author.id,
+            amount=reward, reason="invite event started", after={"event_id": event_id, "amount": reward}, source="discord",
+        )
+        await ctx.send(
+            f"✅ بدأت فعالية الدعوات رقم `{event_id}`.\n"
+            f"📍 روم الفعالية: {ctx.channel.mention}\n"
+            f"🎁 المكافأة: `{reward:,}` Cosmo لكل دعوة صالحة.\n"
+            "لن تُصرف المكافأة للحساب الوهمي أو العائد بعد المغادرة أو العضو الذي غادر.\n"
+            "لإنهائها استخدم `!invite_event_end`."
+        )
+
+    @commands.hybrid_command(name="invite_event_end", aliases=["انهاء_فعالية_الانفايت"], description="إنهاء فعالية الدعوات النشطة")
+    async def invite_event_end(self, ctx):
+        if not self._admin(ctx):
+            return await ctx.send("⛔ هذا الأمر للإدارة فقط.")
+        conn, cur = get_guild_db(ctx.guild.id)
+        row = cur.execute("SELECT event_id, amount, channel_id FROM invite_events WHERE guild_id=? AND status='active' ORDER BY event_id DESC LIMIT 1", (ctx.guild.id,)).fetchone()
+        if not row:
+            conn.close()
+            return await ctx.send("ℹ️ لا توجد فعالية دعوات نشطة حاليًا.")
+        cur.execute("UPDATE invite_events SET status='ended', ended_at=? WHERE event_id=?", (int(time.time()), row[0]))
+        conn.commit(); conn.close()
+        record_audit(
+            "invite_event_ended", guild_id=ctx.guild.id, actor_id=ctx.author.id,
+            reason="invite event ended", after={"event_id": row[0], "amount": row[1], "channel_id": row[2]}, source="discord",
+        )
+        await ctx.send(f"✅ تم إنهاء فعالية الدعوات رقم `{row[0]}`. لن تُصرف مكافآت للداخلين الجدد.")
+
     @commands.command(name="set_invite_log", aliases=["لوج_الانفايت"])
     async def set_invite_log(self, ctx, channel: discord.TextChannel):
         if not self._admin(ctx):
@@ -446,9 +535,33 @@ class PhotoContest(commands.Cog):
             (member.guild.id, member.id),
         ).fetchone()
         # A return is its own category and is never counted as a new valid invite.
-        status = 'returned' if returned_member else ('fake' if age_days is not None and age_days < MIN_VOTER_ACCOUNT_AGE_DAYS else 'valid')
-        cur.execute("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at,status,account_age_days) VALUES(?,?,?,?,?,?,?,?)", (member.guild.id, code, inviter, member.id, str(member), int(time.time()), status, age_days))
+        status = 'fake' if getattr(member, "bot", False) else ('returned' if returned_member else ('fake' if age_days is not None and age_days < MIN_VOTER_ACCOUNT_AGE_DAYS else 'valid'))
+        event = cur.execute(
+            "SELECT event_id, amount, channel_id FROM invite_events WHERE guild_id=? AND status='active' ORDER BY event_id DESC LIMIT 1",
+            (member.guild.id,),
+        ).fetchone()
+        risk_score, risk_reasons = invite_event_profile_risk(member) if event and status == 'valid' else (0, [])
+        if risk_score >= 51:
+            status = 'fake'
+        cur.execute("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at,status,account_age_days,risk_score,risk_reasons) VALUES(?,?,?,?,?,?,?,?,?,?)", (member.guild.id, code, inviter, member.id, str(member), int(time.time()), status, age_days, risk_score, json.dumps(risk_reasons, ensure_ascii=False)))
         conn.commit(); conn.close()
+        payout = None
+        if event and status == 'valid' and inviter:
+            try:
+                payout = await asyncio.to_thread(
+                    credit_invite_event_reward, member.guild.id, event[0], member.id, inviter, event[1]
+                )
+            except (ValueError, RuntimeError) as exc:
+                payout = {"status": "failed", "error": str(exc)}
+        if event and payout and payout.get("status") == "paid":
+            event_channel = member.guild.get_channel(event[2]) if event[2] else None
+            if event_channel:
+                try:
+                    await event_channel.send(
+                        f"🎉 <@{inviter}> استلم `{int(event[1]):,}` Cosmo مقابل دعوة صالحة للعضو {member.mention}."
+                    )
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
         await self._send_invite_log(
             member.guild,
             title="📥 دخول عضو عبر الدعوات",
@@ -459,8 +572,23 @@ class PhotoContest(commands.Cog):
                 ("الداعي", f"<@{inviter}>" if inviter else "غير محدد"),
                 ("عمر الحساب", f"{age_days} يوم" if age_days is not None else "غير متاح"),
                 ("كود الدعوة", code or "غير محدد"),
+                ("مكافأة الفعالية", self._invite_payout_label(payout, event)),
+                ("نسبة الاشتباه", f"{risk_score}%" if event else "غير مطبقة"),
+                ("أسباب الاشتباه", "، ".join(risk_reasons) if risk_reasons else "لا توجد أسباب مسجلة"),
             ],
         )
+
+    @staticmethod
+    def _invite_payout_label(payout, event):
+        if not event:
+            return "لا توجد فعالية نشطة"
+        if not payout:
+            return "لم تُصرف: الداعي غير محدد أو التصنيف غير صالح"
+        if payout.get("status") == "paid":
+            return f"تم صرف `{int(event[1]):,}` Cosmo للداعي"
+        if payout.get("status") == "already_paid":
+            return "تم صرفها مسبقًا"
+        return f"تعذر الصرف: {payout.get('error', 'خطأ غير معروف')}"
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):

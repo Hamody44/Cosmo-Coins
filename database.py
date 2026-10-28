@@ -403,16 +403,24 @@ def get_guild_db(guild_id: int):
     cur.execute('''CREATE TABLE IF NOT EXISTS invite_snapshots (
         guild_id INTEGER NOT NULL, code TEXT NOT NULL, inviter_id INTEGER, uses INTEGER NOT NULL DEFAULT 0,
         captured_at INTEGER NOT NULL, PRIMARY KEY (guild_id, code))''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS invite_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+        channel_id INTEGER, amount INTEGER NOT NULL CHECK(amount > 0), started_at INTEGER NOT NULL,
+        started_by INTEGER NOT NULL, ended_at INTEGER, status TEXT NOT NULL DEFAULT 'active')''')
+    _ensure_guild_db_column(cur, "invite_events", "channel_id", "INTEGER", schema_key)
     cur.execute('''CREATE TABLE IF NOT EXISTS invite_uses (
         id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, invite_code TEXT,
         inviter_id INTEGER, member_id INTEGER NOT NULL, member_username TEXT, joined_at INTEGER NOT NULL,
-        status TEXT NOT NULL DEFAULT 'unknown', account_age_days INTEGER, left_at INTEGER)''')
+        status TEXT NOT NULL DEFAULT 'unknown', account_age_days INTEGER, left_at INTEGER,
+        risk_score INTEGER NOT NULL DEFAULT 0, risk_reasons TEXT)''')
     _ensure_guild_db_column(cur, "contest_voter_reviews", "account_created_at", "INTEGER", schema_key)
     _ensure_guild_db_column(cur, "contest_voter_reviews", "account_age_days", "INTEGER", schema_key)
     _ensure_guild_db_column(cur, "contest_voter_reviews", "classification", "TEXT NOT NULL DEFAULT 'eligible'", schema_key)
     _ensure_guild_db_column(cur, "invite_uses", "status", "TEXT NOT NULL DEFAULT 'unknown'", schema_key)
     _ensure_guild_db_column(cur, "invite_uses", "account_age_days", "INTEGER", schema_key)
     _ensure_guild_db_column(cur, "invite_uses", "left_at", "INTEGER", schema_key)
+    _ensure_guild_db_column(cur, "invite_uses", "risk_score", "INTEGER NOT NULL DEFAULT 0", schema_key)
+    _ensure_guild_db_column(cur, "invite_uses", "risk_reasons", "TEXT", schema_key)
 
     if schema_key not in _guild_schema_initialized:
         cur.execute(
@@ -1454,6 +1462,48 @@ def update_balance(user_id, amount):
             raise ValueError("رصيد غير كافٍ لإتمام الخصم.")
         conn.commit()
         return conn.execute("SELECT balance FROM balances WHERE user_id = ?", (user_id,)).fetchone()[0]
+
+
+def credit_invite_event_reward(guild_id: int, event_id: int, member_id: int, inviter_id: int, amount: int) -> dict:
+    """Credit one invite-event reward exactly once for a member in an event."""
+    amount = int(amount)
+    if amount <= 0:
+        raise ValueError("يجب أن تكون مكافأة الدعوة أكبر من صفر.")
+    created_at = int(time.time())
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=15)) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS invite_event_payouts (
+            event_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, member_id INTEGER NOT NULL,
+            inviter_id INTEGER NOT NULL, amount INTEGER NOT NULL CHECK(amount > 0), paid_at INTEGER NOT NULL,
+            PRIMARY KEY (event_id, member_id))""")
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT inviter_id, amount FROM invite_event_payouts WHERE event_id=? AND member_id=?",
+            (int(event_id), int(member_id)),
+        ).fetchone()
+        if existing:
+            if int(existing[0]) != int(inviter_id) or int(existing[1]) != amount:
+                conn.rollback()
+                raise ValueError("مكافأة فعالية الدعوات مسجلة ببيانات مختلفة.")
+            conn.commit()
+            return {"status": "already_paid", "amount": amount}
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (int(inviter_id),))
+        credit = conn.execute(
+            "UPDATE balances SET balance=balance+? WHERE user_id=? AND balance<=?",
+            (amount, int(inviter_id), MAX_SQLITE_INTEGER - amount),
+        )
+        if credit.rowcount != 1:
+            conn.rollback()
+            raise ValueError("رصيد المستلم سيتجاوز الحد الصحيح المدعوم؛ لم تُصرف المكافأة.")
+        conn.execute(
+            "INSERT INTO invite_event_payouts(event_id,guild_id,member_id,inviter_id,amount,paid_at) VALUES(?,?,?,?,?,?)",
+            (int(event_id), int(guild_id), int(member_id), int(inviter_id), amount, created_at),
+        )
+        conn.commit()
+    record_audit(
+        "invite_event_reward_paid", guild_id=int(guild_id), target_user_id=int(inviter_id), amount=amount,
+        reason=f"invite event {int(event_id)}; member {int(member_id)}", source="worker",
+    )
+    return {"status": "paid", "amount": amount}
 
 
 def credit_giveaway_prize(
