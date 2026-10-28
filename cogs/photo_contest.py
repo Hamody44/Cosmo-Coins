@@ -57,6 +57,20 @@ def invite_event_profile_risk(member):
     return min(100, score), reasons
 
 
+def assess_invite_member(member, *, returned=False):
+    """Assess a member for the manual invite check without making hidden claims."""
+    age_days = account_age_days(member)
+    if getattr(member, "bot", False):
+        return {"status": "fake", "score": 100, "age_days": age_days, "reasons": ["الحساب Bot وليس حساب مستخدم"]}
+    if age_days is not None and age_days < MIN_VOTER_ACCOUNT_AGE_DAYS:
+        return {"status": "fake", "score": 100, "age_days": age_days, "reasons": [f"عمر الحساب أقل من {MIN_VOTER_ACCOUNT_AGE_DAYS} يومًا (قاعدة حاسمة)"]}
+    score, reasons = invite_event_profile_risk(member)
+    if returned:
+        reasons = ["العضو غادر ثم عاد؛ لا يُحتسب كدعوة صالحة", *reasons]
+        return {"status": "returned", "score": score, "age_days": age_days, "reasons": reasons}
+    return {"status": "fake" if score >= 51 else "likely_real", "score": score, "age_days": age_days, "reasons": reasons}
+
+
 def suspicion_score(user) -> int:
     """Small explainable signal only; short usernames are never a signal alone."""
     score = 0
@@ -263,6 +277,39 @@ class PhotoContest(commands.Cog):
         row = cur.execute("SELECT * FROM photo_contests WHERE guild_id=? AND status='active' ORDER BY contest_id DESC LIMIT 1", (guild_id,)).fetchone()
         conn.close()
         return row
+
+    @commands.hybrid_command(name="check_fake", aliases=["فحص_وهمي", "check_member_fake"], description="فحص عضو وعرض نسبة الاشتباه وأسبابها")
+    async def check_fake(self, ctx, member: discord.Member = None):
+        if not self._admin(ctx):
+            return await ctx.send("⛔ هذا الأمر للإدارة فقط.")
+        member = member or ctx.author
+        conn, cur = get_guild_db(ctx.guild.id)
+        returned = bool(cur.execute(
+            "SELECT 1 FROM invite_uses WHERE guild_id=? AND member_id=? AND status='left' LIMIT 1",
+            (ctx.guild.id, member.id),
+        ).fetchone())
+        last = cur.execute(
+            "SELECT status, risk_score, risk_reasons FROM invite_uses WHERE guild_id=? AND member_id=? ORDER BY id DESC LIMIT 1",
+            (ctx.guild.id, member.id),
+        ).fetchone()
+        event = cur.execute("SELECT 1 FROM invite_events WHERE guild_id=? AND status='active' LIMIT 1", (ctx.guild.id,)).fetchone()
+        conn.close()
+        result = assess_invite_member(member, returned=returned)
+        status_labels = {"fake": "وهمي", "returned": "عاد بعد مغادرة", "likely_real": "ليس وهميًا مبدئيًا"}
+        color = discord.Color.red() if result["status"] == "fake" else discord.Color.orange() if result["status"] == "returned" else discord.Color.green()
+        embed = discord.Embed(
+            title="🔎 فحص الحساب",
+            description=f"العضو: {member.mention}\nالنتيجة: **{status_labels[result['status']]}**\nنسبة الاشتباه: **{result['score']}%**",
+            color=color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="عمر الحساب", value=f"{result['age_days']} يوم" if result["age_days"] is not None else "غير متاح", inline=True)
+        embed.add_field(name="فعالية الدعوات", value="مفتوحة" if event else "مغلقة", inline=True)
+        embed.add_field(name="التصويت/المكافأة", value="غير مؤهل" if result["status"] in {"fake", "returned"} else "مؤهل مبدئيًا", inline=True)
+        embed.add_field(name="الأسباب", value="\n".join(f"• {reason}" for reason in result["reasons"])[:1024] or "لا توجد أسباب إضافية.", inline=False)
+        if last:
+            embed.set_footer(text=f"آخر سجل دعوة: {INVITE_STATUS_LABELS.get(last[0], last[0])}")
+        await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="photo_setup", aliases=["مسابقة_إعداد"], description="معالج إعداد مسابقة الصور خطوة بخطوة")
     async def photo_setup(self, ctx):

@@ -154,7 +154,8 @@ class HelpView(discord.ui.View):
                     "• `!set_invite_log #channel` — تحديد روم سجل الدخول والخروج وتصنيف الدعوات.\n"
                     "• `!disable_invite_log` — إيقاف سجل الدعوات.\n"
                     "• `/invite_event_start <amount>` — بدء فعالية الدعوات في روم الأمر.\n"
-                    "• `/invite_event_end` — إنهاء فعالية الدعوات وإيقاف المكافآت."
+                    "• `/invite_event_end` — إنهاء فعالية الدعوات وإيقاف المكافآت.\n"
+                    "• `/check_fake @member` — فحص العضو وعرض نسبة الاشتباه والأسباب."
                 )),
                 ("📈 النقاط واللفلات والرواتب", (
                     "• `/add_level_channel` و`/remove_level_channel` و`/list_level_channels` — تحديد رومات احتساب الرسائل.\n"
