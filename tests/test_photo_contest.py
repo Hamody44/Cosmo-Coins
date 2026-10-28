@@ -77,11 +77,12 @@ class PhotoContestTests(unittest.TestCase):
 
     def test_invite_history_can_be_counted_and_cleared(self):
         with sqlite3.connect(self.path) as db:
-            db.executemany("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at,status) VALUES (1,?,?,?,?,1,?)", [("abc", 7, 101, "a", "valid"), ("abc", 7, 102, "b", "fake")])
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM invite_uses WHERE inviter_id=7").fetchone()[0], 2)
+            db.executemany("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at,status) VALUES (1,?,?,?,?,1,?)", [("abc", 7, 101, "a", "valid"), ("abc", 7, 102, "b", "fake"), ("abc", 7, 103, "c", "returned")])
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM invite_uses WHERE inviter_id=7").fetchone()[0], 3)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM invite_uses WHERE inviter_id=7 AND status='valid'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM invite_uses WHERE inviter_id=7 AND status='returned'").fetchone()[0], 1)
             db.execute("DELETE FROM invite_uses WHERE member_id=101")
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM invite_uses").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM invite_uses").fetchone()[0], 2)
 
 
 if __name__ == "__main__":

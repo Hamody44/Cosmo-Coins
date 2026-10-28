@@ -120,6 +120,7 @@ def get_guild_db(guild_id: int):
         delivery_log INTEGER,
         balance_log INTEGER,
         ticket_log INTEGER,
+        invite_log INTEGER,
         admin_role_id INTEGER,
         owner_role_id INTEGER,
         blacklist_role_id INTEGER,
@@ -366,6 +367,7 @@ def get_guild_db(guild_id: int):
     # ترقية الجداول في حال وجود قواعد بيانات منشأة مسبقاً
     _ensure_guild_db_column(cur, "premium_info", "custom_banner_url", "TEXT", schema_key)
     _ensure_guild_db_column(cur, "settings", "ticket_log", "INTEGER", schema_key)
+    _ensure_guild_db_column(cur, "settings", "invite_log", "INTEGER", schema_key)
     with _guild_schema_migration_lock:
         if _ensure_guild_db_column(cur, "settings", "owner_role_id", "INTEGER", schema_key):
             cur.execute(

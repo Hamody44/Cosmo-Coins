@@ -15,6 +15,13 @@ from database import get_guild_db
 
 VOTE_EMOJI = "👍"
 MIN_VOTER_ACCOUNT_AGE_DAYS = 90
+INVITE_STATUS_LABELS = {
+    "valid": "صالح",
+    "fake": "وهمي",
+    "left": "غادر",
+    "returned": "عاد بعد مغادرة",
+    "unknown": "غير محدد",
+}
 
 
 def account_age_days(user, now=None):
@@ -388,6 +395,42 @@ class PhotoContest(commands.Cog):
         for inv in invites: cur.execute("INSERT INTO invite_snapshots VALUES(?,?,?,?,?) ON CONFLICT(guild_id,code) DO UPDATE SET inviter_id=excluded.inviter_id,uses=excluded.uses,captured_at=excluded.captured_at", (guild.id, inv.code, getattr(inv.inviter, 'id', None), inv.uses or 0, int(time.time())))
         conn.commit(); conn.close()
 
+    async def _send_invite_log(self, guild, *, title, color, description, fields):
+        conn, cur = get_guild_db(guild.id)
+        row = cur.execute("SELECT invite_log FROM settings WHERE guild_id=?", (guild.id,)).fetchone()
+        conn.close()
+        channel = guild.get_channel(row[0]) if row and row[0] else None
+        if not channel:
+            return
+        embed = discord.Embed(title=title, description=description, color=color, timestamp=discord.utils.utcnow())
+        for name, value in fields:
+            embed.add_field(name=name, value=str(value), inline=True)
+        try:
+            await channel.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    @commands.command(name="set_invite_log", aliases=["لوج_الانفايت"])
+    async def set_invite_log(self, ctx, channel: discord.TextChannel):
+        if not self._admin(ctx):
+            return await ctx.send("⛔ هذا الأمر للإدارة فقط.")
+        conn, cur = get_guild_db(ctx.guild.id)
+        cur.execute(
+            "INSERT INTO settings (guild_id, invite_log) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET invite_log=excluded.invite_log",
+            (ctx.guild.id, channel.id),
+        )
+        conn.commit(); conn.close()
+        await ctx.send(f"✅ تم تحديد {channel.mention} كروم سجل الدعوات. سيتم تسجيل الدخول والخروج والعودة وتصنيف الدعوة.")
+
+    @commands.command(name="disable_invite_log", aliases=["ايقاف_لوج_الانفايت"])
+    async def disable_invite_log(self, ctx):
+        if not self._admin(ctx):
+            return await ctx.send("⛔ هذا الأمر للإدارة فقط.")
+        conn, cur = get_guild_db(ctx.guild.id)
+        cur.execute("INSERT INTO settings (guild_id, invite_log) VALUES (?, NULL) ON CONFLICT(guild_id) DO UPDATE SET invite_log=NULL", (ctx.guild.id,))
+        conn.commit(); conn.close()
+        await ctx.send("✅ تم إيقاف إرسال سجل الدعوات.")
+
     @commands.Cog.listener()
     async def on_member_join(self, member):
         try:
@@ -398,19 +441,48 @@ class PhotoContest(commands.Cog):
         conn, cur = get_guild_db(member.guild.id); old = {r[0]: r[1:] for r in cur.execute("SELECT code,uses,inviter_id FROM invite_snapshots WHERE guild_id=?", (member.guild.id,))}; found = next((i for i in current if int(i.uses or 0) > int(old.get(i.code, (0, None))[0])), None)
         inviter = getattr(found.inviter, 'id', None) if found else None; code = found.code if found else None
         age_days = account_age_days(member)
-        status = 'fake' if age_days is not None and age_days < MIN_VOTER_ACCOUNT_AGE_DAYS else 'valid'
+        returned_member = cur.execute(
+            "SELECT 1 FROM invite_uses WHERE guild_id=? AND member_id=? AND status='left' LIMIT 1",
+            (member.guild.id, member.id),
+        ).fetchone()
+        # A return is its own category and is never counted as a new valid invite.
+        status = 'returned' if returned_member else ('fake' if age_days is not None and age_days < MIN_VOTER_ACCOUNT_AGE_DAYS else 'valid')
         cur.execute("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at,status,account_age_days) VALUES(?,?,?,?,?,?,?,?)", (member.guild.id, code, inviter, member.id, str(member), int(time.time()), status, age_days))
-        conn.commit(); conn.close(); await self._snapshot_invites(member.guild)
+        conn.commit(); conn.close()
+        await self._send_invite_log(
+            member.guild,
+            title="📥 دخول عضو عبر الدعوات",
+            color=discord.Color.green() if status == 'valid' else discord.Color.orange(),
+            description=f"دخل العضو {member.mention} إلى السيرفر.",
+            fields=[
+                ("التصنيف", INVITE_STATUS_LABELS.get(status, status)),
+                ("الداعي", f"<@{inviter}>" if inviter else "غير محدد"),
+                ("عمر الحساب", f"{age_days} يوم" if age_days is not None else "غير متاح"),
+                ("كود الدعوة", code or "غير محدد"),
+            ],
+        )
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
         """A departed member is never counted as a valid invite and loses contest votes."""
         conn, cur = get_guild_db(member.guild.id)
         now = int(time.time())
+        previous = cur.execute("SELECT status FROM invite_uses WHERE guild_id=? AND member_id=? ORDER BY id DESC LIMIT 1", (member.guild.id, member.id)).fetchone()
         cur.execute("UPDATE invite_uses SET status='left', left_at=? WHERE guild_id=? AND member_id=? AND status IN ('valid','fake','unknown')", (now, member.guild.id, member.id))
         cur.execute("UPDATE contest_votes SET excluded=1 WHERE voter_id=? AND contest_id IN (SELECT contest_id FROM photo_contests WHERE guild_id=?)", (member.id, member.guild.id))
         cur.execute("UPDATE contest_voter_reviews SET excluded=1, classification='left' WHERE voter_id=? AND contest_id IN (SELECT contest_id FROM photo_contests WHERE guild_id=?)", (member.id, member.guild.id))
         conn.commit(); conn.close()
+        await self._send_invite_log(
+            member.guild,
+            title="📤 خروج عضو من السيرفر",
+            color=discord.Color.red(),
+            description=f"غادر العضو **{member}** السيرفر.",
+            fields=[
+                ("تصنيف آخر دخول", INVITE_STATUS_LABELS.get(previous[0], "غير محدد") if previous else "غير محدد"),
+                ("الإجراء", "تم إلغاء أصواته في مسابقات الصور"),
+                ("معرّف العضو", member.id),
+            ],
+        )
 
     @commands.command(name="photo_voter", aliases=["مسابقة_مصوت"])
     async def photo_voter(self, ctx, voter_id: int):
@@ -443,12 +515,12 @@ class PhotoContest(commands.Cog):
         ).fetchall()
         counts = {
             status: cur.execute("SELECT COUNT(*) FROM invite_uses WHERE guild_id=? AND inviter_id=? AND status=?", (ctx.guild.id, member.id, status)).fetchone()[0]
-            for status in ("valid", "fake", "left")
+            for status in ("valid", "fake", "left", "returned")
         }
         total = cur.execute("SELECT COUNT(*) FROM invite_uses WHERE guild_id=? AND inviter_id=?", (ctx.guild.id, member.id)).fetchone()[0]
         conn.close()
-        text = f"دعوات {member.mention}: صالح `{counts['valid']}` • وهمي `{counts['fake']}` • غادر `{counts['left']}` • الإجمالي `{total}`\n" + "\n".join(
-            f"{index}. {username or member_id} — {code or 'غير محدد'} — {status}"
+        text = f"دعوات {member.mention}: صالح `{counts['valid']}` • وهمي `{counts['fake']}` • غادر `{counts['left']}` • عاد بعد مغادرة `{counts['returned']}` • الإجمالي `{total}`\n" + "\n".join(
+            f"{index}. {username or member_id} — {code or 'غير محدد'} — {INVITE_STATUS_LABELS.get(status, status)}"
             for index, (code, member_id, username, _joined_at, status) in enumerate(rows, 1)
         )
         await ctx.send(text or "لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح.")
@@ -457,9 +529,9 @@ class PhotoContest(commands.Cog):
     async def invites_all(self, ctx):
         if not self._admin(ctx): return await ctx.send("⛔ للإدارة فقط.")
         conn, cur = get_guild_db(ctx.guild.id)
-        rows = cur.execute("SELECT inviter_id, SUM(status='valid'), SUM(status='fake'), SUM(status='left'), COUNT(*) FROM invite_uses WHERE guild_id=? GROUP BY inviter_id ORDER BY COUNT(*) DESC", (ctx.guild.id,)).fetchall()
+        rows = cur.execute("SELECT inviter_id, SUM(status='valid'), SUM(status='fake'), SUM(status='left'), SUM(status='returned'), COUNT(*) FROM invite_uses WHERE guild_id=? GROUP BY inviter_id ORDER BY COUNT(*) DESC", (ctx.guild.id,)).fetchall()
         conn.close()
-        await ctx.send("\n".join(f"{r[0] or 'غير محدد'}: صالح `{r[1] or 0}` • وهمي `{r[2] or 0}` • غادر `{r[3] or 0}` • الإجمالي `{r[4]}`" for r in rows) or "لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح.")
+        await ctx.send("\n".join(f"{r[0] or 'غير محدد'}: صالح `{r[1] or 0}` • وهمي `{r[2] or 0}` • غادر `{r[3] or 0}` • عاد بعد مغادرة `{r[4] or 0}` • الإجمالي `{r[5]}`" for r in rows) or "لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح.")
 
     @commands.command(name="invites_clear", aliases=["مسح_دعوات"])
     async def invites_clear(self, ctx, member: Optional[discord.Member] = None):
