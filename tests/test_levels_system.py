@@ -290,8 +290,11 @@ class TopCommandTests(unittest.IsolatedAsyncioTestCase):
         }]) as get_voice:
             await Leveling.top.callback(cog, ctx, "weekly")
 
+        weekly_start, weekly_end = period_bounds("weekly")
+        voice_start = datetime.fromtimestamp(weekly_start, RIYADH).date().isoformat()
+        voice_end = datetime.fromtimestamp(weekly_end, RIYADH).date().isoformat()
         get_text.assert_called_once_with(551, *period_bounds("weekly"), 5)
-        get_voice.assert_called_once_with(551, "2026-10-19", "2026-10-26", 5)
+        get_voice.assert_called_once_with(551, voice_start, voice_end, 5)
         cog.refresh_voice_sessions.assert_awaited_once_with(guild)
         ctx.send.assert_awaited_once()
         self.assertNotIn("content", ctx.send.await_args.kwargs)

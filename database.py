@@ -118,6 +118,7 @@ def get_guild_db(guild_id: int):
         exchange_request_log INTEGER,
         exchange_success_log INTEGER,
         delivery_log INTEGER,
+        exchange_room INTEGER,
         balance_log INTEGER,
         ticket_log INTEGER,
         invite_log INTEGER,
@@ -366,6 +367,7 @@ def get_guild_db(guild_id: int):
 
     # ترقية الجداول في حال وجود قواعد بيانات منشأة مسبقاً
     _ensure_guild_db_column(cur, "premium_info", "custom_banner_url", "TEXT", schema_key)
+    _ensure_guild_db_column(cur, "settings", "exchange_room", "INTEGER", schema_key)
     _ensure_guild_db_column(cur, "settings", "ticket_log", "INTEGER", schema_key)
     _ensure_guild_db_column(cur, "settings", "invite_log", "INTEGER", schema_key)
     with _guild_schema_migration_lock:
@@ -523,6 +525,36 @@ def get_exchange_currency(currency_name: str):
         return g_cur.fetchone()
     finally:
         g_conn.close()
+
+def get_exchange_room_id(guild_id: int) -> int | None:
+    """Return the guild-local text channel configured for exchange requests."""
+    guild_id = int(guild_id)
+    conn, cur = get_guild_db(guild_id)
+    try:
+        row = cur.execute(
+            "SELECT exchange_room FROM settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        return int(row[0]) if row and row[0] else None
+    finally:
+        conn.close()
+
+def set_exchange_room_id(guild_id: int, channel_id: int) -> int:
+    """Persist the guild-local text channel where members may use exchange."""
+    guild_id, channel_id = int(guild_id), int(channel_id)
+    if guild_id <= 0 or channel_id <= 0:
+        raise ValueError("معرّف السيرفر أو القناة غير صالح.")
+    conn, cur = get_guild_db(guild_id)
+    try:
+        cur.execute(
+            "INSERT INTO settings (guild_id, exchange_room) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET exchange_room = excluded.exchange_room",
+            (guild_id, channel_id),
+        )
+        conn.commit()
+        return channel_id
+    finally:
+        conn.close()
 
 def set_exchange_currency_status(currency_name: str, active: bool):
     with _exchange_state_lock:
@@ -1758,6 +1790,8 @@ def create_exchange_request(guild_id: int, user_id: int, amount: int, currency: 
             expected_received = round(amount * rate, 4)
         except (TypeError, ValueError, OverflowError) as exc:
             raise ExchangeCurrencyUnavailable("تعذر التحقق من سعر العملة.") from exc
+        if expected_received <= 0:
+            raise ExchangeCurrencyUnavailable("المبلغ المستحق بعد التقريب يجب أن يكون أكبر من صفر.")
         if (not math.isfinite(rate) or rate <= 0 or not math.isfinite(minimum) or minimum < 0
                 or not math.isclose(received_amount, expected_received, rel_tol=0, abs_tol=1e-9)
                 or expected_received < minimum):

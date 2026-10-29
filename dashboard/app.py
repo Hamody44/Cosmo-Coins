@@ -905,6 +905,9 @@ def profile():
             return redirect(url_for("profile"))
 
         total_received = round(parsed_amount * rate, 4)
+        if total_received <= 0:
+            flash("❌ المبلغ المستحق بعد التقريب يجب أن يكون أكبر من صفر؛ لم يُخصم أي رصيد.", "danger")
+            return redirect(url_for("profile"))
         if total_received < min_recv:
             flash(f"❌ تم رفض طلبك تلقائياً: المبلغ المستحق (`{total_received} {currency_name}`) أقل من الحد الأدنى وهو `{min_recv} {currency_name}`.", "danger")
             return redirect(url_for("profile"))
@@ -933,9 +936,9 @@ def profile():
             g_conn.close()
             flash("⛔ أُغلق نظام التبديل عالميًا قبل حفظ الطلب؛ لم يُخصم أي رصيد.", "danger")
             return redirect(url_for("profile"))
-        except database.ExchangeCurrencyUnavailable:
+        except database.ExchangeCurrencyUnavailable as exc:
             g_conn.close()
-            flash("⚠️ تغيرت حالة العملة أو سعرها قبل حفظ الطلب؛ لم يُخصم أي رصيد. أعد تحميل الصفحة وحاول مجددًا.", "warning")
+            flash(f"⚠️ {exc} لم يُخصم أي رصيد. أعد تحميل الصفحة وحاول مجددًا.", "warning")
             return redirect(url_for("profile"))
         if req_id is None:
             g_conn.close()

@@ -80,6 +80,16 @@ class FinancialTransactionTests(unittest.TestCase):
         with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM exchange_logs").fetchone()[0], 1)
 
+    def test_exchange_rejects_zero_received_amount_without_debiting_balance(self):
+        database.update_balance(17, 500)
+        with database.sqlite3.connect(self.cosmo_db_path) as conn:
+            conn.execute("UPDATE exchange_currencies SET exchange_rate = 0.000001 WHERE currency_name = 'Gems'")
+        with self.assertRaises(database.ExchangeCurrencyUnavailable):
+            database.create_exchange_request(99, 17, 1, "Gems", 0.0, "zero quote", "now")
+        self.assertEqual(self.balance(17), 500)
+        with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM exchange_logs").fetchone()[0], 0)
+
     def test_exchange_rejects_stale_rate_or_inactive_currency_before_debit(self):
         database.update_balance(16, 500)
         with database.sqlite3.connect(self.cosmo_db_path) as conn:
