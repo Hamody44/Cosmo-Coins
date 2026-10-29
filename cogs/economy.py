@@ -10,7 +10,7 @@ from database import (
     accept_exchange_request, deny_exchange_request, get_currency_label,
     get_exchange_currencies, get_exchange_currency, has_pending_exchange_request,
     is_global_exchange_enabled, ExchangeSystemClosed, ExchangeCurrencyUnavailable,
-    EXCHANGE_BASE_COSMO, format_exchange_amount
+    get_exchange_room_id, EXCHANGE_BASE_COSMO, format_exchange_amount
 )
 
 def can_manage_exchange_request(ctx: commands.Context, origin_guild_id: int) -> bool:
@@ -25,6 +25,20 @@ def can_manage_exchange_request(ctx: commands.Context, origin_guild_id: int) -> 
     if permissions and (permissions.administrator or permissions.manage_guild):
         return True
     return is_bot_admin(ctx)
+
+def manual_probot_transfer_command(currency_name: str, recipient_id: int, amount: float) -> str | None:
+    """Build a copyable ProBot instruction only; never sends or automates it."""
+    normalized_name = (currency_name or "").strip().casefold()
+    if not any(token in normalized_name for token in ("probot", "credit", "كريديت")):
+        return None
+    try:
+        recipient_id = int(recipient_id)
+        amount = float(amount)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if recipient_id <= 0 or amount <= 0 or not amount.is_integer():
+        return None
+    return f"!transfer {recipient_id} {int(amount)}"
 
 class Economy(commands.Cog):
     def __init__(self, bot):
@@ -210,6 +224,13 @@ class Economy(commands.Cog):
 
     @commands.hybrid_command(name="exchange", aliases=["تبديل"], description="طلب تبديل عملات Cosmo إلى عملة أخرى")
     async def exchange(self, ctx: commands.Context, currency_name: str, amount: str, *, note: str = "لا يوجد"):
+        if not ctx.guild:
+            return await ctx.send("❌ أمر التبديل متاح داخل السيرفرات فقط.")
+        exchange_room_id = get_exchange_room_id(ctx.guild.id)
+        if exchange_room_id is None:
+            return await ctx.send("⚠️ لم يحدد مسؤول السيرفر روم التبديل بعد. استخدم `set_exchange_room #الروم`.")
+        if ctx.channel.id != exchange_room_id:
+            return await ctx.send(f"⛔ استخدم أمر `exchange` داخل <#{exchange_room_id}> فقط.")
         currency_label = get_currency_label(ctx.guild.id if ctx.guild else None)
         if not is_global_exchange_enabled():
             return await ctx.send("⛔ نظام التبديل مغلق عالميًا من سيرفر Cosmo حاليًا.")
@@ -241,6 +262,9 @@ class Economy(commands.Cog):
             return await ctx.send(f"⛔ تبديل عملة **{currency_name}** متوقف ومقفل حالياً.")
 
         total_received = round(parsed_amount * rate, 4)
+        if total_received <= 0:
+            g_conn.close()
+            return await ctx.send("❌ المبلغ المستحق بعد التقريب يجب أن يكون أكبر من صفر؛ لم يُخصم أي رصيد.")
         if total_received < min_recv:
             g_conn.close()
             return await ctx.send(f"❌ تم رفض طلبك تلقائياً: المبلغ المستحق (`{total_received} {currency_name}`) أقل من الحد الأدنى وهو `{min_recv} {currency_name}`.")
@@ -263,8 +287,8 @@ class Economy(commands.Cog):
             req_id = create_exchange_request(ctx.guild.id, ctx.author.id, parsed_amount, currency_name, total_received, note, now)
         except ExchangeSystemClosed:
             return await ctx.send("⛔ أُغلق نظام التبديل عالميًا قبل حفظ الطلب؛ لم يُخصم أي رصيد.")
-        except ExchangeCurrencyUnavailable:
-            return await ctx.send("⚠️ تغيرت حالة العملة أو سعرها قبل حفظ الطلب؛ لم يُخصم أي رصيد. أعد تحميل `/exchange_list` ثم حاول مجددًا.")
+        except ExchangeCurrencyUnavailable as exc:
+            return await ctx.send(f"⚠️ {exc} لم يُخصم أي رصيد. أعد تحميل `/exchange_list` ثم حاول مجددًا.")
         if req_id is None:
             if has_pending_exchange_request(ctx.author.id):
                 return await ctx.send("⏳ لديك طلب تبديل سابق قيد الانتظار؛ لم يُخصم أي مبلغ جديد. انتظر معالجته قبل إنشاء طلب آخر.")
@@ -299,6 +323,13 @@ class Economy(commands.Cog):
         embed.add_field(name="👤 العضو", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=False)
         embed.add_field(name=f"🪙 مبلغ {currency_label}", value=f"`{parsed_amount:,}`", inline=True)
         embed.add_field(name=f"💵 المستحق من ({currency_name})", value=f"`{total_received}`", inline=True)
+        manual_command = manual_probot_transfer_command(currency_name, ctx.author.id, total_received)
+        if manual_command:
+            embed.add_field(
+                name="📋 أمر ProBot للتسليم اليدوي",
+                value=f"`{manual_command}`\nانسخه وأرسله يدويًا بعد مراجعة الطلب؛ البوت لا ينفذ التحويل.",
+                inline=False,
+            )
         embed.add_field(name="📝 الوصف والملاحظات", value=f"```{note}```", inline=False)
         embed.set_footer(text=f"للقبول: /accept_exchange {req_id} | للرفض: /deny_exchange {req_id}")
 
