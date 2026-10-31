@@ -227,9 +227,7 @@ class Economy(commands.Cog):
         if not ctx.guild:
             return await ctx.send("❌ أمر التبديل متاح داخل السيرفرات فقط.")
         exchange_room_id = get_exchange_room_id(ctx.guild.id)
-        if exchange_room_id is None:
-            return await ctx.send("⚠️ لم يحدد مسؤول السيرفر روم التبديل بعد. استخدم `set_exchange_room #الروم`.")
-        if ctx.channel.id != exchange_room_id:
+        if exchange_room_id is not None and ctx.channel.id != exchange_room_id:
             return await ctx.send(f"⛔ استخدم أمر `exchange` داخل <#{exchange_room_id}> فقط.")
         currency_label = get_currency_label(ctx.guild.id if ctx.guild else None)
         if not is_global_exchange_enabled():

@@ -19,6 +19,25 @@ INVITE_STATUS_LABELS = {
     "returned": "عاد بعد مغادرة",
     "unknown": "غير محدد",
 }
+_invite_attribution_locks: dict[int, asyncio.Lock] = {}
+
+
+def select_used_invite(current_invites, previous_snapshots):
+    """Return the uniquely most-increased invite, or None when attribution is ambiguous."""
+    candidates = []
+    for invite in current_invites or ():
+        old_uses, _old_inviter = previous_snapshots.get(invite.code, (0, None))
+        delta = int(invite.uses or 0) - int(old_uses or 0)
+        if delta > 0:
+            candidates.append((delta, invite))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+        # Discord does not expose which member used an invite. Never assign a
+        # tied increase to a random inviter; keep the attribution unknown.
+        return None
+    return candidates[0][1]
 
 
 def account_age_days(user, now=None):

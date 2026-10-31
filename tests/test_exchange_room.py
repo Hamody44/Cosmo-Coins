@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import database
 from cogs.economy import Economy, manual_probot_transfer_command
+from cogs.photo_contest import select_used_invite
 
 
 class ExchangeRoomPersistenceTests(unittest.TestCase):
@@ -61,13 +62,6 @@ class ExchangeRoomCommandTests(unittest.IsolatedAsyncioTestCase):
             send=AsyncMock(),
         )
 
-    async def test_exchange_fails_closed_when_room_has_not_been_configured(self):
-        ctx = self.make_context(200)
-        with patch("cogs.economy.get_exchange_room_id", return_value=None):
-            await Economy.exchange.callback(Economy(None), ctx, "Gems", "100")
-        ctx.send.assert_awaited_once()
-        self.assertIn("set_exchange_room", ctx.send.await_args.args[0])
-
     async def test_exchange_is_rejected_outside_configured_room(self):
         ctx = self.make_context(200)
         with patch("cogs.economy.get_exchange_room_id", return_value=300), patch(
@@ -76,6 +70,29 @@ class ExchangeRoomCommandTests(unittest.IsolatedAsyncioTestCase):
             await Economy.exchange.callback(Economy(None), ctx, "Gems", "100")
         ctx.send.assert_awaited_once_with("⛔ استخدم أمر `exchange` داخل <#300> فقط.")
         global_switch.assert_not_called()
+
+    async def test_exchange_is_allowed_in_any_room_when_no_room_is_configured(self):
+        ctx = self.make_context(200)
+        with patch("cogs.economy.get_exchange_room_id", return_value=None), patch(
+            "cogs.economy.is_global_exchange_enabled", return_value=False
+        ):
+            await Economy.exchange.callback(Economy(None), ctx, "Gems", "100")
+        ctx.send.assert_awaited_once_with("⛔ نظام التبديل مغلق عالميًا من سيرفر Cosmo حاليًا.")
+
+
+class InviteAttributionTests(unittest.TestCase):
+    def invite(self, code, uses, inviter):
+        return SimpleNamespace(code=code, uses=uses, inviter=SimpleNamespace(id=inviter))
+
+    def test_selects_invite_with_largest_increase(self):
+        current = [self.invite("a", 4, 11), self.invite("b", 7, 22)]
+        previous = {"a": (3, 11), "b": (5, 22)}
+        self.assertEqual(select_used_invite(current, previous).code, "b")
+
+    def test_does_not_assign_random_inviter_when_increases_tie(self):
+        current = [self.invite("a", 4, 11), self.invite("b", 6, 22)]
+        previous = {"a": (3, 11), "b": (5, 22)}
+        self.assertIsNone(select_used_invite(current, previous))
 
 
 class ManualProBotInstructionTests(unittest.TestCase):

@@ -327,7 +327,7 @@ class AutoBudgetPaymentView(discord.ui.View):
 SETUP_CHANNELS = {
     "transfer_log": ("روم التحويلات", "إشعارات تحويلات الرصيد", "settings", "transfer_log"),
     "delivery_log": ("روم التسليمات", "طلبات التبديل وإثباتات التسليم", "settings", "delivery_log"),
-    "exchange_room": ("روم التبديل", "القناة الوحيدة التي يقبل فيها أمر exchange", "settings", "exchange_room"),
+    "exchange_room": ("روم التبديل (اختياري)", "إذا حُددت سيُسمح بأمر exchange فيها فقط؛ وإلا يُسمح به في أي قناة", "settings", "exchange_room"),
     "success_log": ("روم نجاح التبديل", "إعلانات عمليات التبديل الناجحة", "settings", "exchange_success_log"),
     "balance_log": ("روم الرصيد", "إشعارات إضافة وخصم أرصدة الأعضاء", "settings", "balance_log"),
     "boost_log": ("روم البوست", "إعلانات البوست والدفعات الأسبوعية", "boost_system_config", "boost_log_channel"),
@@ -362,7 +362,7 @@ def _setup_summary(guild: discord.Guild) -> str:
         channel_id = state.get(key)
         channel = guild.get_channel(channel_id) if channel_id else None
         status = channel.mention if channel else "غير محدد"
-        required = "مهم" if key in {"transfer_log", "delivery_log", "exchange_room"} else "اختياري"
+        required = "مهم" if key in {"transfer_log", "delivery_log"} else "اختياري"
         lines.append(f"• **{label}**: {status} — {required}\n  {description}")
     lines.append("\nاستخدم القائمتين أسفل الرسالة: اختر نوع السجل، ثم اختر الروم، ثم اضغط **حفظ**.")
     lines.append("روم استقبال طلبات التبديل العام يحدده مالك البوت فقط عبر `!set_global_request_log #الروم`.")
@@ -1265,7 +1265,23 @@ class Admin(commands.Cog):
         if not ctx.guild or channel.guild.id != ctx.guild.id:
             return await ctx.send("❌ يجب اختيار قناة نصية من السيرفر نفسه.")
         set_exchange_room_id(ctx.guild.id, channel.id)
-        await ctx.send(f"✅ تم ضبط روم التبديل لهذا السيرفر على: {channel.mention}. لن يعمل أمر `exchange` في القنوات الأخرى.")
+        await ctx.send(f"✅ تم ضبط روم التبديل لهذا السيرفر على: {channel.mention}. لن يعمل أمر `exchange` في القنوات الأخرى. استخدم `disable_exchange_room` للسماح بأي قناة.")
+
+    @commands.command(name="disable_exchange_room", aliases=["الغاء_روم_التبديل"])
+    async def disable_exchange_room(self, ctx: commands.Context):
+        if not can_manage_bot(ctx):
+            return await ctx.send("⛔ ليس لديك صلاحية.")
+        if not ctx.guild:
+            return await ctx.send("❌ استخدم الأمر داخل السيرفر.")
+        conn, cur = get_guild_db(ctx.guild.id)
+        cur.execute(
+            "INSERT INTO settings (guild_id, exchange_room) VALUES (?, NULL) "
+            "ON CONFLICT(guild_id) DO UPDATE SET exchange_room=NULL",
+            (ctx.guild.id,),
+        )
+        conn.commit()
+        conn.close()
+        await ctx.send("✅ تم إلغاء تقييد روم التبديل. أصبح أمر `exchange` متاحًا في أي روم.")
 
     @commands.command(name="set_transfer_log", aliases=["لوج_التحويل"], description="تحديد روم إشعارات التحويل")
     async def set_transfer_log(self, ctx: commands.Context, channel: discord.TextChannel):
