@@ -22,6 +22,7 @@ from advertising_store import (
     get_ad_giveaway,
     claim_expired_ad_giveaways,
     list_ad_settlement_messages,
+    list_live_ad_messages,
     list_ad_cleanup_orders,
     claim_next_queued_order,
     mark_ad_needs_review,
@@ -451,11 +452,23 @@ class Advertisements(commands.Cog):
                 conn.close()
             view = AdDurationView(self.bot, guild.id, channel.id, author.id, prices)
             self.bot.add_view(view)
-            await channel.send(
-                f"📣 **تذكرة إعلان جديدة**\nمرحبًا {author.mention}. اختر مدة الإعلان من الأزرار، ثم أدخل قيمة الجيف واختر المنشن وطريقة الدفع.",
-                view=view,
-                allowed_mentions=discord.AllowedMentions.none(),
+            embed = discord.Embed(
+                title="📣 إنشاء إعلان",
+                description="اختر مدة الإعلان، ثم أكمل بيانات الجيف واختر وسيلة الدفع.",
+                color=discord.Color.gold(),
             )
+            embed.add_field(
+                name="خطوات الطلب",
+                value="1. اختر المدة\n2. أدخل قيمة الجيف وعدد الفائزين\n3. اختر المنشن\n4. اختر وسيلة الدفع",
+                inline=False,
+            )
+            embed.add_field(
+                name="وسائل الدفع المتاحة",
+                value="💳 ProBot Credits\n🪙 AdamC\n✨ Cosmo — تحويل تلقائي إلى صاحب السيرفر",
+                inline=False,
+            )
+            embed.set_footer(text="ابدأ من الأزرار أدناه")
+            await channel.send(embed=embed, view=view)
         except Exception:
             try:
                 await channel.delete(reason="Advertising ticket setup failed")
@@ -613,6 +626,7 @@ class Advertisements(commands.Cog):
         """Finish expired ad giveaways after a crash or normal runtime tick."""
         for guild in tuple(self.bot.guilds):
             try:
+                await self._refresh_live_ad_participants(guild)
                 claimed = await asyncio.to_thread(claim_expired_ad_giveaways, guild.id)
             except Exception as exc:
                 print(f"Could not claim expired ad giveaways in guild {guild.id}: {exc}")
@@ -621,6 +635,29 @@ class Advertisements(commands.Cog):
                 await self._finish_expired_ad(guild, item)
             await self._publish_next_queued(guild)
             await self._cleanup_settled_ads(guild)
+
+    async def _refresh_live_ad_participants(self, guild: discord.Guild):
+        for order_id, message_id, channel_id in await asyncio.to_thread(list_live_ad_messages, guild.id):
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                continue
+            try:
+                message = await channel.fetch_message(message_id)
+                participants = 0
+                for reaction in message.reactions:
+                    if str(reaction.emoji) == "🎉":
+                        participants = max(0, int(reaction.count) - 1)
+                        break
+                if not message.embeds:
+                    continue
+                embed = message.embeds[0].copy()
+                for index, field in enumerate(embed.fields):
+                    if field.name == "👥 المشاركون":
+                        embed.set_field_at(index, name=field.name, value=f"{participants:,}", inline=field.inline)
+                        await message.edit(embed=embed)
+                        break
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                continue
 
     @ad_expiry_worker.before_loop
     async def before_ad_expiry_worker(self):
@@ -919,7 +956,13 @@ class Advertisements(commands.Cog):
             await channel.edit(name=f"giveaway-{int(order['giveaway_total'])}", reason=f"Publish ad order #{order_id}")
             mention = "@everyone" if order["mention_type"] == "everyone" else "@here"
             embed = discord.Embed(title=order["title"], description=order["content"], color=discord.Color.gold())
-            embed.set_footer(text=f"إعلان #{order_id} • الجائزة لكل فائز: {int(order['amount_per_winner']):,}")
+            duration_labels = {"1d": "يوم واحد", "2d": "يومان", "3d": "3 أيام", "5d": "5 أيام", "7d": "7 أيام"}
+            embed.add_field(name="🎁 قيمة الجيف", value=f"{int(order['giveaway_total']):,} Cosmo", inline=True)
+            embed.add_field(name="👥 المشاركون", value="0", inline=True)
+            embed.add_field(name="⏱️ مدة الجيف", value=duration_labels.get(order["duration_key"], order["duration_key"]), inline=True)
+            embed.add_field(name="✅ شرط الاستلام", value="دخول السيرفر", inline=False)
+            embed.add_field(name="⚠️ تنويه", value="هذا إعلان لسيرفر مستقل؛ يُرجى مراجعة محتواه والتأكد من ملاءمته لك قبل الانضمام.", inline=False)
+            embed.set_footer(text=f"إعلان #{order_id}")
             if order.get("media_url"):
                 embed.set_image(url=order["media_url"])
             message = await channel.send(content=mention, embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=False, roles=False, replied_user=False))

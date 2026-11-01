@@ -526,7 +526,16 @@ def list_ad_settlement_messages(guild_id: int):
     ensure_ad_schema(guild_id); conn, cur = get_guild_db(guild_id)
     try:
         return cur.execute("SELECT ad_order_id,message_id,channel_id FROM ad_giveaways WHERE guild_id=? AND status='awaiting_owner_decision' AND message_id IS NOT NULL", (guild_id,)).fetchall()
-    finally: conn.close()
+    finally:
+        conn.close()
+
+
+def list_live_ad_messages(guild_id: int):
+    ensure_ad_schema(guild_id); conn, cur = get_guild_db(guild_id)
+    try:
+        return cur.execute("SELECT ad_order_id,message_id,channel_id FROM ad_giveaways WHERE guild_id=? AND status='live' AND message_id IS NOT NULL", (guild_id,)).fetchall()
+    finally:
+        conn.close()
 
 
 def list_ad_cleanup_orders(guild_id: int):
