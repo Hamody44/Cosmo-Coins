@@ -168,7 +168,7 @@ class HelpView(discord.ui.View):
                 )),
                 ("🏦 شحن ميزانية السيرفر", (
                     "• `/buy_budget <amount>` — لمالك السيرفر أو مسؤوليه؛ اختر وسيلة دفع مفعلة.\n"
-                    "• تأكيد ProBot أو AdamC يُطابق آليًا خلال 5 دقائق؛ الخيار يتطلب مبلغًا من مضاعفات 5 Cosmo.\n"
+                    "• تأكيد ProBot أو AdamC يُطابق آليًا خلال 5 دقائق؛ ميزانية AdamC يجب أن تكون من مضاعفات القاسم المحدد في `!set_adamc_ratio`.\n"
                     "• خيار LTC ينشئ فاتورة دفع عبر LTCPay؛ تُضاف الميزانية بعد تحقق الفاتورة."
                 )),
             ],
@@ -198,7 +198,8 @@ class HelpView(discord.ui.View):
                     "• إيقاف وسيلة دفع يلغي طلباتها المعلقة؛ من حوّل بالفعل عليه التواصل مع مالك البوت للمراجعة اليدوية.\n"
                     "• `!set_server_budget <guild_id> <amount>` — تعيين ميزانية سيرفر.\n"
                     "• `/premium_code <duration>` — إنشاء كود Premium.\n"
-                    "• `!set_premium_price <duration> <credit> <adamc> <cosmo> <crypto_usd>` — تحديد أسعار Premium لكل مدة.\n"
+                    "• `!set_premium_price <duration> <credit> <adamc> <cosmo> <crypto_usd>` — تحديد أسعار Premium؛ سعر AdamC يُشتق مركزيًا من Credits.\n"
+                    "• `!set_adamc_ratio <divisor>` — ضبط النسبة العامة: AdamC = Credits ÷ divisor، وتُطبق على الميزانية والإعلانات وPremium.\n"
                     "• `!toggle_premium_purchase <true|false>` و`!toggle_premium_method <credit|adamc|cosmo|crypto> <true|false>` — فتح/إغلاق الشراء أو وسيلة دفع.\n"
                     "• `!set_global_log` و`!disable_global_log` — إعداد سجل العمليات العام.\n"
                     "• `!set_global_request_log` — تحديد قناة الطلبات العامة.\n"

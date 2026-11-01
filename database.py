@@ -634,6 +634,41 @@ def set_global_exchange_enabled(enabled: bool):
             g_conn.close()
 
 AUTO_BUDGET_PAYMENT_METHODS = {"credit", "adamc", "crypto"}
+DEFAULT_ADAMC_DIVISOR = 5
+
+
+def get_adamc_divisor() -> int:
+    """Return the global conversion divisor: AdamC = Credits / divisor."""
+    try:
+        with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+            row = conn.execute("SELECT value FROM global_settings WHERE key = 'adamc_divisor'").fetchone()
+    except sqlite3.Error:
+        return DEFAULT_ADAMC_DIVISOR
+    return int(row[0]) if row and int(row[0]) > 0 else DEFAULT_ADAMC_DIVISOR
+
+
+def set_adamc_divisor(divisor: int) -> int:
+    divisor = int(divisor)
+    if divisor <= 0 or divisor > 1_000_000:
+        raise ValueError("قاسم AdamC يجب أن يكون بين 1 و1,000,000.")
+    with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute(
+            "INSERT INTO global_settings (key, value) VALUES ('adamc_divisor', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (divisor,),
+        )
+        conn.commit()
+    return divisor
+
+
+def credits_to_adamc(credits: int) -> int:
+    credits = int(credits)
+    if credits <= 0:
+        raise ValueError("قيمة Credits يجب أن تكون موجبة.")
+    divisor = get_adamc_divisor()
+    if credits % divisor:
+        raise ValueError(f"قيمة Credits يجب أن تكون من مضاعفات {divisor} عند الدفع عبر AdamC.")
+    return credits // divisor
 
 def is_auto_budget_payment_enabled(method: str) -> bool:
     method = method.strip().lower()
@@ -712,12 +747,13 @@ def _create_budget_payment_order_locked(guild_id: int, user_id: int, payer_name:
                                          created_at: int, expires_at: int):
     method = method.strip().lower()
     budget_amount, expected_payment = int(budget_amount), int(expected_payment)
+    required_multiple = 5 if method == "credit" else get_adamc_divisor()
     if (method not in {"credit", "adamc"} or budget_amount <= 0
-            or budget_amount > 9_223_372_036_854_775_807 or budget_amount % 5 != 0):
+            or budget_amount > 9_223_372_036_854_775_807 or budget_amount % required_multiple != 0):
         return None
     if not is_auto_budget_payment_enabled(method):
         return None
-    expected_for_rate = budget_amount * 6 // 5 if method == "credit" else budget_amount // 5
+    expected_for_rate = budget_amount * 6 // 5 if method == "credit" else credits_to_adamc(budget_amount)
     if expected_payment != expected_for_rate or expected_payment <= 0 or expected_payment > 9_223_372_036_854_775_807:
         return None
     if not payer_name.strip() or guild_id <= 0 or user_id <= 0 or channel_id <= 0 or expires_at <= created_at:

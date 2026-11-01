@@ -25,6 +25,7 @@ from database import (
     fail_crypto_budget_payment_order, transfer_balance_to_server_budget,
     set_auto_budget_payment_enabled, set_global_exchange_enabled,
     PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID, guarded_server_budget_credit, record_audit,
+    credits_to_adamc, get_adamc_divisor,
     EXCHANGE_BASE_COSMO, format_exchange_amount
 )
 from ltcpay import (
@@ -242,9 +243,10 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
                 pass
             return
 
-        if self.budget_amount % 5 != 0:
+        required_multiple = 5 if method == "credit" else get_adamc_divisor()
+        if self.budget_amount % required_multiple != 0:
             return await interaction.response.send_message(
-                "للحفاظ على سعر صرف صحيح بلا كسور، يجب أن تكون ميزانية الشحن من مضاعفات 5. ابدأ الأمر بمبلغ مناسب.",
+                f"للحفاظ على سعر صرف صحيح بلا كسور، يجب أن تكون الميزانية من مضاعفات {required_multiple:,}. ابدأ الأمر بمبلغ مناسب.",
                 ephemeral=True,
             )
 
@@ -255,7 +257,7 @@ class AutoBudgetPaymentSelect(discord.ui.Select):
             command = f"#credit {PRIMARY_OWNER_ID} {expected_payment} with tax"
             method_name = "ProBot Credits"
         else:
-            expected_payment = self.budget_amount // 5
+            expected_payment = credits_to_adamc(self.budget_amount)
             command = f"!transfer {PRIMARY_OWNER_ID} {expected_payment}"
             method_name = "AdamC"
 

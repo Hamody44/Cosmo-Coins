@@ -49,7 +49,8 @@ def _set(key, value):
 
 def set_price(duration, duration_seconds, prices):
     if not re.fullmatch(r"\d+[smhdw]", duration.lower()) or duration_seconds <= 0: raise ValueError("invalid duration")
-    vals = [int(prices[m]) for m in ("credit", "adamc", "cosmo")]
+    credit_price = int(prices["credit"])
+    vals = [credit_price, database.credits_to_adamc(credit_price), int(prices["cosmo"])]
     usd = Decimal(str(prices["crypto_usd"])).quantize(Decimal("0.01"))
     if any(v <= 0 for v in vals) or usd < Decimal("0.10"): raise ValueError("prices must be positive and crypto must be at least $0.10")
     _global_schema()
@@ -61,7 +62,8 @@ def get_price(duration):
     with closing(sqlite3.connect(database.GLOBAL_DB_PATH, timeout=10)) as c:
         row = c.execute("SELECT duration,duration_seconds,credit,adamc,cosmo,crypto_usd FROM premium_prices WHERE duration=?", (duration.lower(),)).fetchone()
     if not row: return None
-    return {"duration":row[0], "duration_seconds":int(row[1]), "credit":int(row[2]), "adamc":int(row[3]), "cosmo":int(row[4]), "crypto_usd":Decimal(row[5])}
+    credit_price = int(row[2])
+    return {"duration":row[0], "duration_seconds":int(row[1]), "credit":credit_price, "adamc":database.credits_to_adamc(credit_price), "cosmo":int(row[4]), "crypto_usd":Decimal(row[5])}
 
 def _ensure_orders(conn):
     conn.execute("CREATE TABLE IF NOT EXISTS premium_payment_orders (id INTEGER PRIMARY KEY AUTOINCREMENT,guild_id INTEGER NOT NULL,user_id INTEGER NOT NULL,payer_name TEXT NOT NULL DEFAULT '',channel_id INTEGER NOT NULL,method TEXT NOT NULL,duration TEXT NOT NULL,duration_seconds INTEGER NOT NULL,expected_payment INTEGER,quote_usd TEXT,provider_order_id TEXT UNIQUE,provider_payment_id TEXT UNIQUE,status TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,payment_message_id INTEGER UNIQUE,payment_author_id INTEGER,paid_at INTEGER)")

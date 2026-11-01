@@ -39,7 +39,7 @@ from advertising_store import (
     submit_ad_content,
     update_ad_order,
 )
-from database import ADAMC_PAYMENT_BOT_ID, PROBOT_PAYMENT_BOT_ID, get_guild_db, get_guild_management_role_ids, is_guild_premium, parse_amount
+from database import ADAMC_PAYMENT_BOT_ID, PROBOT_PAYMENT_BOT_ID, credits_to_adamc, get_adamc_divisor, get_guild_db, get_guild_management_role_ids, is_guild_premium, parse_amount
 from cogs.admin import parse_budget_payment_confirmation
 from cogs.tickets import can_manage_ticket_member
 
@@ -222,7 +222,7 @@ class AdPaymentView(discord.ui.View):
         self.order_id = int(order_id)
         self.advertiser_id = int(advertiser_id)
         self.channel_id = int(channel_id)
-        for method, label, emoji in (("credit", "ProBot Credits", "💳"), ("adamc", "AdamC (÷5)", "🪙"), ("cosmo", "Cosmo تلقائي", "✨")):
+        for method, label, emoji in (("credit", "ProBot Credits", "💳"), ("adamc", f"AdamC (÷{get_adamc_divisor()})", "🪙"), ("cosmo", "Cosmo تلقائي", "✨")):
             button = discord.ui.Button(
                 label=label,
                 emoji=emoji,
@@ -532,7 +532,7 @@ class Advertisements(commands.Cog):
             return await interaction.response.send_message("✅ تم اعتماد الدفع بالفعل؛ استخدم زر إدخال الإعلان.", ephemeral=True)
         expected = int(order["total_payment"])
         if method == "adamc":
-            expected //= 5
+            expected = credits_to_adamc(expected)
         owner_id = int(order["server_owner_id"] or interaction.guild.owner_id)
         try:
             create_ad_payment(
@@ -844,7 +844,7 @@ class Advertisements(commands.Cog):
             return await ctx.send("✅ تم اعتماد الدفع بالفعل؛ استخدم زر إدخال الإعلان.")
         expected = int(order["total_payment"])
         if method == "adamc":
-            expected //= 5
+            expected = credits_to_adamc(expected)
         try:
             create_ad_payment(ctx.guild.id, order_id, method, expected, recipient_id=int(ctx.guild.owner_id), channel_id=int(ctx.channel.id))
         except ValueError:

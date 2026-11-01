@@ -61,6 +61,7 @@ class PremiumPaymentTests(unittest.TestCase):
     def test_price_and_global_method_settings(self):
         price = pp.get_price("30d")
         self.assertEqual(price["duration_seconds"], 30 * 86400)
+        self.assertEqual(price["adamc"], 20)
         self.assertEqual(price["crypto_usd"], pp.Decimal("2.50"))
         pp.set_method_enabled("adamc", False)
         self.assertFalse(pp.method_enabled("adamc"))

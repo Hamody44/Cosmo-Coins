@@ -113,6 +113,13 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         self.assertIsNone(database.create_budget_payment_order(101, 202, "payer", 303, "adamc", 10, 3, 1000, 1300))
         self.assertIsNone(database.create_budget_payment_order(101, 202, "payer", 303, "credit", 6, 7, 1000, 1300))
 
+    def test_adamc_ratio_is_central_and_changeable(self):
+        database.set_adamc_divisor(10)
+        self.assertEqual(database.credits_to_adamc(10_000_000), 1_000_000)
+        database.set_auto_budget_payment_enabled("adamc", True)
+        order_id = database.create_budget_payment_order(101, 202, "payer", 303, "adamc", 10_000_000, 1_000_000, 1000, 1300)
+        self.assertIsNotNone(order_id)
+
     def test_payment_is_bound_to_sender_guild_amount_channel_and_five_minute_window(self):
         database.set_auto_budget_payment_enabled("credit", True)
         order_id = database.create_budget_payment_order(

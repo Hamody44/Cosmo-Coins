@@ -97,6 +97,19 @@ class Premium(commands.Cog):
         except (ValueError, TypeError, Exception): return await ctx.send("❌ صيغة أو أسعار غير صالحة.")
         await ctx.send(f"✅ تم حفظ سعر Premium لمدة `{duration}`.")
 
+    @commands.command(name="set_adamc_ratio", aliases=["تعديل_نسبة_ادم_سي"])
+    async def set_adamc_ratio(self, ctx, divisor: int):
+        if not await check_is_owner(self.bot, ctx):
+            return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
+        try:
+            divisor = database.set_adamc_divisor(divisor)
+        except (ValueError, TypeError):
+            return await ctx.send("❌ القاسم يجب أن يكون رقمًا صحيحًا بين 1 و1,000,000.")
+        await ctx.send(
+            f"✅ تم تحديث نسبة AdamC: كل `{divisor:,}` Credits تساوي `1` AdamC "
+            "في شراء الميزانية والإعلانات وPremium."
+        )
+
     @commands.command(name="toggle_premium_purchase")
     async def toggle_premium_purchase(self, ctx, value: str):
         if not await check_is_owner(self.bot, ctx): return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
