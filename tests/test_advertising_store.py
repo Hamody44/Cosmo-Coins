@@ -43,12 +43,43 @@ class AdvertisingStoreTests(unittest.TestCase):
     def test_content_submission_creates_payment_and_settles_once(self):
         order_id = store.create_ad_order(1, 20, 30, "1d", 8_000_000, 5_000_000)
         self.assertTrue(store.submit_ad_content(1, order_id, 20, "عنوان", "شاهد https://discord.gg/example", None, 99))
+        self.assertFalse(store.submit_ad_content(1, order_id, 20, "عنوان آخر", "نص آخر https://discord.gg/other", None, 99))
         order = store.get_ad_order(1, order_id)
         self.assertEqual(order["status"], "awaiting_payment")
         store.create_ad_payment(1, order_id, "adamc", 13_000_000)
         self.assertEqual(store.settle_ad_payment(1, order_id, 700, 1234, 13_000_000)["status"], "paid")
         self.assertEqual(store.get_ad_order(1, order_id)["status"], "paid")
         self.assertEqual(store.settle_ad_payment(1, order_id, 700, 1234, 13_000_000)["status"], "already_paid")
+
+    def test_payment_can_be_confirmed_before_content_is_submitted(self):
+        order_id = store.create_ad_order(1, 20, 30, "1d", 8_000_000, 5_000_000)
+        store.create_ad_payment(1, order_id, "credit", 13_000_000, recipient_id=99, channel_id=30)
+        self.assertEqual(
+            store.settle_ad_payment(1, order_id, 701, 1234, 13_000_000, recipient_id=99, channel_id=30)["status"],
+            "paid",
+        )
+        self.assertEqual(store.get_ad_order(1, order_id)["status"], "paid")
+        self.assertTrue(store.submit_ad_content(1, order_id, 20, "عنوان", "شاهد https://discord.gg/example", None, 99))
+        self.assertEqual(store.get_ad_order(1, order_id)["status"], "paid")
+
+    def test_paid_queued_order_stays_queued_until_content_is_ready(self):
+        order_id = store.create_ad_order(1, 20, 30, "1d", 8_000_000, 5_000_000, queued=True)
+        store.create_ad_payment(1, order_id, "adamc", 13_000_000, recipient_id=99, channel_id=30)
+        self.assertEqual(
+            store.settle_ad_payment(1, order_id, 702, 1234, 13_000_000, recipient_id=99, channel_id=30)["status"],
+            "paid",
+        )
+        self.assertEqual(store.get_ad_order(1, order_id)["status"], "queued")
+        self.assertTrue(store.submit_ad_content(1, order_id, 20, "عنوان", "شاهد https://discord.gg/example", None, 99))
+        self.assertEqual(store.get_ad_order(1, order_id)["status"], "queued")
+
+    def test_settled_ad_payment_cannot_be_reopened_with_another_provider(self):
+        order_id = store.create_ad_order(1, 20, 30, "1d", 8_000_000, 5_000_000, queued=True)
+        store.create_ad_payment(1, order_id, "credit", 13_000_000, recipient_id=99, channel_id=30)
+        store.settle_ad_payment(1, order_id, 703, 1234, 13_000_000, recipient_id=99, channel_id=30)
+        with self.assertRaises(ValueError):
+            store.create_ad_payment(1, order_id, "adamc", 13_000_000, recipient_id=99, channel_id=30)
+        self.assertEqual(store.get_ad_payment(1, order_id)["status"], "paid")
 
     def test_total_payment_and_amount_per_winner_are_snapshotted(self):
         order_id = store.create_ad_order(1, 20, 30, "1d", 8_000_000, 100_000_000, 2, "everyone", everyone_fee=2_000_000)

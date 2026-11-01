@@ -255,10 +255,14 @@ def submit_ad_content(guild_id: int, order_id: int, advertiser_id: int, title: s
     ensure_ad_schema(guild_id)
     conn, cur = get_guild_db(guild_id)
     try:
-        row = cur.execute("SELECT advertiser_id,status FROM ad_orders WHERE id=? AND guild_id=?", (order_id, guild_id)).fetchone()
-        if not row or int(row[0]) != int(advertiser_id) or row[1] not in {"draft", "queued"}:
+        conn.execute("BEGIN IMMEDIATE")
+        row = cur.execute("SELECT advertiser_id,status,title,content FROM ad_orders WHERE id=? AND guild_id=?", (order_id, guild_id)).fetchone()
+        if (not row or int(row[0]) != int(advertiser_id)
+                or row[1] not in {"draft", "queued", "paid"}
+                or row[2] or row[3]):
+            conn.rollback()
             return False
-        next_status = "queued" if row[1] == "queued" else "awaiting_payment"
+        next_status = "queued" if row[1] == "queued" else ("paid" if row[1] == "paid" else "awaiting_payment")
         cur.execute("UPDATE ad_orders SET title=?,content=?,media_url=?,server_owner_id=?,status=?,updated_at=? WHERE id=? AND guild_id=?", (title, content, media_url, server_owner_id, next_status, int(time.time()), order_id, guild_id))
         conn.commit()
         return cur.rowcount == 1
@@ -272,6 +276,11 @@ def create_ad_payment(guild_id: int, order_id: int, method: str, expected_amount
     ensure_ad_schema(guild_id)
     conn, cur = get_guild_db(guild_id)
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = cur.execute("SELECT status FROM ad_payments WHERE ad_order_id=?", (order_id,)).fetchone()
+        if current and current[0] == "paid":
+            conn.rollback()
+            raise ValueError("advertisement payment is already settled")
         cur.execute("INSERT INTO ad_payments(ad_order_id,method,expected_amount,recipient_id,channel_id,status,created_at) VALUES(?,?,?,?,?,'pending',?) ON CONFLICT(ad_order_id) DO UPDATE SET method=excluded.method,expected_amount=excluded.expected_amount,recipient_id=excluded.recipient_id,channel_id=excluded.channel_id,status='pending'", (order_id, method, int(expected_amount), int(recipient_id), int(channel_id), int(time.time())))
         conn.commit()
     finally:
@@ -304,7 +313,13 @@ def settle_ad_payment(guild_id: int, order_id: int, payment_message_id: int, pay
         cur.execute("UPDATE ad_payments SET status='paid',payment_message_id=?,payment_author_id=?,paid_at=? WHERE ad_order_id=? AND status='pending'", (payment_message_id, payment_author_id, int(time.time()), order_id))
         if cur.rowcount != 1:
             conn.rollback(); return {"status": "already_paid"}
-        cur.execute("UPDATE ad_orders SET status='paid',updated_at=? WHERE id=? AND status IN ('awaiting_payment','queued')", (int(time.time()), order_id))
+        cur.execute(
+            "UPDATE ad_orders SET status=CASE WHEN status='queued' THEN 'queued' ELSE 'paid' END,updated_at=? "
+            "WHERE id=? AND guild_id=? AND status IN ('draft','awaiting_payment','queued')",
+            (int(time.time()), order_id, guild_id),
+        )
+        if cur.rowcount != 1:
+            conn.rollback(); return {"status": "needs_review"}
         conn.commit()
         return {"status": "paid"}
     finally:

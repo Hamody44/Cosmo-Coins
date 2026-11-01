@@ -10,6 +10,7 @@ from discord.ext import commands, tasks
 
 from advertising_store import (
     AD_DURATIONS,
+    MIN_GIVEAWAY,
     add_ad_channel,
     count_published_today,
     reserve_ad_giveaway,
@@ -53,6 +54,10 @@ def premium_required(ctx):
     return bool(ctx.guild and is_guild_premium(ctx.guild.id))
 
 
+def has_manual_mention(text: str) -> bool:
+    return bool(re.search(r"@(everyone|here)|<@!?\d+>|<@&\d+>|<#\d+>", text or "", re.IGNORECASE))
+
+
 def local_day_start() -> int:
     now = datetime.datetime.now()
     return int(datetime.datetime(now.year, now.month, now.day).timestamp())
@@ -62,7 +67,7 @@ def validate_ad_content(content: str):
     content = " ".join((content or "").split())
     if len(content) < 10 or len(content) > 2000:
         return False, "محتوى الإعلان يجب أن يكون بين 10 و2000 حرف."
-    if re.search(r"@(everyone|here)|<@!?\d+>|<@&\d+>", content, re.IGNORECASE):
+    if has_manual_mention(content):
         return False, "يمنع وضع منشن يدوي داخل الإعلان؛ سيضيف البوت المنشن المسموح تلقائيًا."
     if not re.search(r"https?://(?:discord\.gg|discord(?:app)?\.com/invite)/[A-Za-z0-9-]+", content, re.IGNORECASE):
         return False, "يجب أن يحتوي الإعلان على رابط دعوة Discord صالح."
@@ -77,7 +82,213 @@ class AdTicketView(discord.ui.View):
     async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.guild or not is_guild_premium(interaction.guild.id):
             return await interaction.response.send_message("⛔ نظام تذاكر الإعلانات متاح لسيرفرات Premium فقط.", ephemeral=True)
-        await interaction.response.send_message("استخدم أمر `ad_ticket` مع المدة وقيمة الجيف لفتح تذكرة إعلان.", ephemeral=True)
+        cog = interaction.client.get_cog("Advertisements")
+        if not cog:
+            return await interaction.response.send_message("⚠️ نظام الإعلانات غير متاح الآن.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        channel, error = await cog.create_ad_ticket(interaction.guild, interaction.user, interaction.channel.category)
+        if error:
+            return await interaction.followup.send(error, ephemeral=True)
+        await interaction.followup.send(f"✅ تم فتح تذكرة الإعلان: {channel.mention}", ephemeral=True)
+
+
+class AdDurationView(discord.ui.View):
+    """Persistent duration choices for an ad ticket."""
+    def __init__(self, bot, guild_id: int, channel_id: int, advertiser_id: int, prices):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.guild_id = int(guild_id)
+        self.channel_id = int(channel_id)
+        self.advertiser_id = int(advertiser_id)
+        for duration, price in prices:
+            button = discord.ui.Button(
+                label=f"{duration} — {int(price):,} Cosmo",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"ad-duration:{self.guild_id}:{self.channel_id}:{self.advertiser_id}:{duration}",
+            )
+            button.callback = self._choose_duration(duration, int(price))
+            self.add_item(button)
+
+    def _choose_duration(self, duration, ad_price: int):
+        async def callback(interaction: discord.Interaction):
+            if (not interaction.guild or interaction.guild.id != self.guild_id
+                    or interaction.channel_id != self.channel_id
+                    or interaction.user.id != self.advertiser_id):
+                return await interaction.response.send_message("⛔ هذا الاختيار مخصص لصاحب التذكرة.", ephemeral=True)
+            await interaction.response.send_modal(
+                AdGiveawayModal(self.bot, self.guild_id, self.channel_id, self.advertiser_id, duration, ad_price)
+            )
+        return callback
+
+
+class AdGiveawayModal(discord.ui.Modal):
+    def __init__(self, bot, guild_id: int, channel_id: int, advertiser_id: int, duration: str, ad_price: int):
+        super().__init__(title="قيمة جيف الإعلان", timeout=600)
+        self.bot = bot
+        self.guild_id = int(guild_id)
+        self.channel_id = int(channel_id)
+        self.advertiser_id = int(advertiser_id)
+        self.duration = duration
+        self.ad_price = int(ad_price)
+        self.giveaway_input = discord.ui.TextInput(
+            label="إجمالي قيمة الجيف",
+            placeholder="مثال: 5m أو 5000000",
+            required=True,
+            max_length=24,
+        )
+        self.winners_input = discord.ui.TextInput(
+            label="عدد الفائزين",
+            default="1",
+            required=True,
+            max_length=3,
+        )
+        self.add_item(self.giveaway_input)
+        self.add_item(self.winners_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if (not interaction.guild or interaction.guild.id != self.guild_id
+                or interaction.channel_id != self.channel_id
+                or interaction.user.id != self.advertiser_id):
+            return await interaction.response.send_message("⛔ هذا النموذج مخصص لصاحب التذكرة.", ephemeral=True)
+        try:
+            giveaway_total = parse_amount(str(self.giveaway_input.value))
+        except Exception:
+            return await interaction.response.send_message("❌ قيمة الجيف غير صحيحة.", ephemeral=True)
+        if giveaway_total < MIN_GIVEAWAY:
+            return await interaction.response.send_message(f"❌ أقل قيمة للجيف هي `{MIN_GIVEAWAY:,}`.", ephemeral=True)
+        try:
+            winners = int(str(self.winners_input.value).strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ عدد الفائزين يجب أن يكون رقمًا صحيحًا.", ephemeral=True)
+        if winners <= 0 or (winners > 1 and giveaway_total < 100_000_000):
+            return await interaction.response.send_message("❌ يسمح بأكثر من فائز فقط عندما تكون قيمة الجيف `100m` أو أكثر.", ephemeral=True)
+        if giveaway_total % winners or giveaway_total // winners < MIN_GIVEAWAY:
+            return await interaction.response.send_message("❌ يجب تقسيم الجيف بالتساوي وألا تقل جائزة كل فائز عن الحد الأدنى.", ephemeral=True)
+        config = get_ad_config(self.guild_id)
+        await interaction.response.send_message(
+            "اختر المنشن المطلوب. `here` مجاني، أما `everyone` فتضاف رسوم السيرفر.",
+            ephemeral=True,
+            view=AdMentionChoiceView(
+                self.bot, self.guild_id, self.channel_id, self.advertiser_id,
+                self.duration, self.ad_price, giveaway_total, winners, int(config["everyone_fee"]),
+            ),
+        )
+
+
+class AdMentionChoiceView(discord.ui.View):
+    def __init__(self, bot, guild_id: int, channel_id: int, advertiser_id: int,
+                 duration: str, ad_price: int, giveaway_total: int, winners: int, everyone_fee: int):
+        super().__init__(timeout=600)
+        self.bot = bot
+        self.guild_id = int(guild_id)
+        self.channel_id = int(channel_id)
+        self.advertiser_id = int(advertiser_id)
+        self.duration = duration
+        self.ad_price = int(ad_price)
+        self.giveaway_total = int(giveaway_total)
+        self.winners = int(winners)
+        self.everyone_fee = int(everyone_fee)
+        here = discord.ui.Button(label="here مجاني", style=discord.ButtonStyle.success)
+        everyone = discord.ui.Button(label=f"everyone (+{self.everyone_fee:,} Cosmo)", style=discord.ButtonStyle.secondary)
+        here.callback = self._choose_mention("here")
+        everyone.callback = self._choose_mention("everyone")
+        self.add_item(here)
+        self.add_item(everyone)
+
+    def _choose_mention(self, mention_type: str):
+        async def callback(interaction: discord.Interaction):
+            if (not interaction.guild or interaction.guild.id != self.guild_id
+                    or interaction.channel_id != self.channel_id
+                    or interaction.user.id != self.advertiser_id):
+                return await interaction.response.send_message("⛔ هذا الاختيار مخصص لصاحب التذكرة.", ephemeral=True)
+            cog = interaction.client.get_cog("Advertisements")
+            if not cog:
+                return await interaction.response.send_message("⚠️ نظام الإعلانات غير متاح الآن.", ephemeral=True)
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            await cog.create_ad_order_from_wizard(
+                interaction, self.duration, self.ad_price, self.giveaway_total, self.winners,
+                mention_type, self.everyone_fee,
+            )
+        return callback
+
+
+class AdPaymentView(discord.ui.View):
+    """Persistent provider buttons; the actual transfer remains user-initiated."""
+    def __init__(self, bot, guild_id: int, order_id: int, advertiser_id: int, channel_id: int):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.guild_id = int(guild_id)
+        self.order_id = int(order_id)
+        self.advertiser_id = int(advertiser_id)
+        self.channel_id = int(channel_id)
+        for method, label, emoji in (("credit", "ProBot Credits", "💳"), ("adamc", "AdamC", "🪙")):
+            button = discord.ui.Button(
+                label=label,
+                emoji=emoji,
+                style=discord.ButtonStyle.primary,
+                custom_id=f"ad-pay:{self.guild_id}:{self.order_id}:{method}",
+            )
+            button.callback = self._choose_method(method)
+            self.add_item(button)
+
+    def _choose_method(self, method: str):
+        async def callback(interaction: discord.Interaction):
+            if (not interaction.guild or interaction.guild.id != self.guild_id
+                    or interaction.channel_id != self.channel_id
+                    or interaction.user.id != self.advertiser_id):
+                return await interaction.response.send_message("⛔ أزرار الدفع مخصصة لصاحب التذكرة.", ephemeral=True)
+            cog = interaction.client.get_cog("Advertisements")
+            if not cog:
+                return await interaction.response.send_message("⚠️ نظام الإعلانات غير متاح الآن.", ephemeral=True)
+            await cog.handle_ad_payment_choice(interaction, self.order_id, method)
+        return callback
+
+
+class AdContentSubmitView(discord.ui.View):
+    """Persistent button shown after payment has been confirmed."""
+    def __init__(self, bot, guild_id: int, order_id: int):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.guild_id = int(guild_id)
+        self.order_id = int(order_id)
+        button = discord.ui.Button(
+            label="إدخال الإعلان",
+            emoji="📝",
+            style=discord.ButtonStyle.success,
+            custom_id=f"ad-content:{self.guild_id}:{self.order_id}",
+        )
+        button.callback = self.open_modal
+        self.add_item(button)
+
+    async def open_modal(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Advertisements")
+        if not cog:
+            return await interaction.response.send_message("⚠️ نظام الإعلانات غير متاح الآن.", ephemeral=True)
+        await cog.open_ad_content_modal(interaction, self.order_id)
+
+
+class AdContentModal(discord.ui.Modal):
+    def __init__(self, guild_id: int, order_id: int):
+        super().__init__(title="إدخال محتوى الإعلان", timeout=600)
+        self.guild_id = int(guild_id)
+        self.order_id = int(order_id)
+        self.ad_title = discord.ui.TextInput(label="عنوان الإعلان", max_length=120, required=True)
+        self.ad_content = discord.ui.TextInput(
+            label="نص الإعلان (مع رابط دعوة Discord)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=True,
+        )
+        self.add_item(self.ad_title)
+        self.add_item(self.ad_content)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Advertisements")
+        if not cog:
+            return await interaction.response.send_message("⚠️ نظام الإعلانات غير متاح الآن.", ephemeral=True)
+        await cog.save_ad_content_from_modal(
+            interaction, self.order_id, str(self.ad_title.value), str(self.ad_content.value),
+        )
 
 
 class AdSettlementView(discord.ui.View):
@@ -137,21 +348,250 @@ class AdSettlementView(discord.ui.View):
 class Advertisements(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._restored_guild_views = set()
 
     async def cog_load(self):
         self.bot.add_view(AdTicketView())
-        for guild in self.bot.guilds:
-            try:
-                pending = await asyncio.to_thread(list_ad_settlement_messages, guild.id)
-                for order_id, _message_id, _channel_id in pending:
-                    self.bot.add_view(AdSettlementView(self.bot, guild.id, order_id))
-            except Exception as exc:
-                print(f"Could not restore ad settlement buttons for guild {guild.id}: {exc}")
+        await self._restore_persistent_views()
         if not self.ad_expiry_worker.is_running():
             self.ad_expiry_worker.start()
 
+    @commands.Cog.listener()
+    async def on_ready(self):
+        await self._restore_persistent_views()
+
+    async def _restore_persistent_views(self):
+        for guild in self.bot.guilds:
+            if guild.id in self._restored_guild_views:
+                continue
+            try:
+                ensure_ad_schema(guild.id)
+                conn, cur = get_guild_db(guild.id)
+                try:
+                    tickets = cur.execute("SELECT channel_id,user_id FROM tickets WHERE is_closed=0").fetchall()
+                    orders = cur.execute(
+                        "SELECT o.id,o.advertiser_id,o.server_owner_id,o.ticket_channel_id,o.status,o.title,o.content,p.status "
+                        "FROM ad_orders o LEFT JOIN ad_payments p ON p.ad_order_id=o.id "
+                        "WHERE o.status IN ('draft','awaiting_payment','paid','queued')"
+                    ).fetchall()
+                finally:
+                    conn.close()
+                config = get_ad_config(guild.id)
+                prices = sorted(
+                    ((key, int(value)) for key, value in config["prices"].items() if int(value) > 0 and key in AD_DURATIONS),
+                    key=lambda item: AD_DURATIONS[item[0]],
+                )
+                order_channels = {int(row[3]) for row in orders}
+                for channel_id, advertiser_id in tickets:
+                    channel = guild.get_channel(int(channel_id))
+                    if channel and channel.name.startswith("ad-") and int(channel_id) not in order_channels and prices:
+                        self.bot.add_view(AdDurationView(self.bot, guild.id, channel.id, int(advertiser_id), prices))
+                for order_id, advertiser_id, owner_id, channel_id, status, title, content, payment_status in orders:
+                    if (status in {"draft", "awaiting_payment", "queued"}
+                            and int(advertiser_id) != int(owner_id or 0)
+                            and payment_status != "paid"):
+                        self.bot.add_view(AdPaymentView(self.bot, guild.id, order_id, advertiser_id, channel_id))
+                    if (status in {"paid", "queued"} and (not title or not content)
+                            and (int(advertiser_id) == int(owner_id or 0) or payment_status == "paid")):
+                        self.bot.add_view(AdContentSubmitView(self.bot, guild.id, order_id))
+                pending = await asyncio.to_thread(list_ad_settlement_messages, guild.id)
+                for order_id, _message_id, _channel_id in pending:
+                    self.bot.add_view(AdSettlementView(self.bot, guild.id, order_id))
+                self._restored_guild_views.add(guild.id)
+            except Exception as exc:
+                print(f"Could not restore ad settlement buttons for guild {guild.id}: {exc}")
+
     def cog_unload(self):
         self.ad_expiry_worker.cancel()
+
+    async def create_ad_ticket(self, guild: discord.Guild, author: discord.Member, category):
+        if not guild or not is_guild_premium(guild.id):
+            return None, "⛔ نظام تذاكر الإعلانات متاح لسيرفرات Premium فقط."
+        config = get_ad_config(guild.id)
+        prices = sorted(
+            ((key, int(value)) for key, value in config["prices"].items() if int(value) > 0 and key in AD_DURATIONS),
+            key=lambda item: AD_DURATIONS[item[0]],
+        )
+        if not prices:
+            return None, "⚠️ لم يحدد صاحب السيرفر أسعارًا للإعلانات بعد."
+        ensure_ad_schema(guild.id)
+        conn, cur = get_guild_db(guild.id)
+        try:
+            row = cur.execute("SELECT channel_id FROM tickets WHERE user_id=? AND is_closed=0", (author.id,)).fetchone()
+        finally:
+            conn.close()
+        if row and guild.get_channel(int(row[0])):
+            return None, f"⚠️ لديك تذكرة مفتوحة بالفعل: <#{int(row[0])}>"
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            author: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, embed_links=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+        }
+        owner_role, admin_role = get_guild_management_role_ids(guild.id)
+        for role_id in (owner_role, admin_role):
+            role = guild.get_role(role_id) if role_id else None
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        safe_name = re.sub(r"[^a-z0-9-]+", "-", author.name.lower()).strip("-")[:18] or "member"
+        channel = await guild.create_text_channel(
+            f"ad-{safe_name}-{int(author.id) % 10000:04d}",
+            category=category,
+            overwrites=overwrites,
+            reason="Premium advertising ticket",
+        )
+        try:
+            now_text = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn, cur = get_guild_db(guild.id)
+            try:
+                cur.execute("INSERT INTO tickets(channel_id,user_id,opened_at,is_closed) VALUES(?,?,?,0)", (channel.id, author.id, now_text))
+                conn.commit()
+            finally:
+                conn.close()
+            view = AdDurationView(self.bot, guild.id, channel.id, author.id, prices)
+            self.bot.add_view(view)
+            await channel.send(
+                f"📣 **تذكرة إعلان جديدة**\nمرحبًا {author.mention}. اختر مدة الإعلان من الأزرار، ثم أدخل قيمة الجيف واختر المنشن وطريقة الدفع.",
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            try:
+                await channel.delete(reason="Advertising ticket setup failed")
+            except Exception:
+                pass
+            raise
+        return channel, None
+
+    async def create_ad_order_from_wizard(self, interaction: discord.Interaction, duration: str,
+                                          ad_price: int, giveaway_total: int,
+                                          winners: int, mention_type: str, everyone_fee: int):
+        guild = interaction.guild
+        if not guild or not is_guild_premium(guild.id):
+            return await interaction.followup.send("⛔ نظام الإعلانات متاح لسيرفرات Premium فقط.", ephemeral=True)
+        config = get_ad_config(guild.id)
+        ad_price = int(ad_price)
+        if ad_price <= 0:
+            return await interaction.followup.send("⚠️ لم يعد سعر هذه الباقة متاحًا؛ أعد اختيار المدة.", ephemeral=True)
+        everyone_fee = int(everyone_fee)
+        queued = count_published_today(guild.id, local_day_start()) >= int(config["daily_limit"])
+        try:
+            order_id = create_ad_order(
+                guild.id, interaction.user.id, interaction.channel_id, duration, ad_price,
+                giveaway_total, winners, mention_type, queued=queued, everyone_fee=everyone_fee,
+                premium_snapshot=True, server_owner_id=guild.owner_id,
+            )
+        except ValueError as exc:
+            if "open advertisement" in str(exc):
+                return await interaction.followup.send("⚠️ لديك طلب إعلان مفتوح بالفعل.", ephemeral=True)
+            return await interaction.followup.send("❌ تعذر إنشاء الطلب؛ تحقق من قيمة الجيف والإعدادات.", ephemeral=True)
+
+        order = get_ad_order(guild.id, order_id)
+        mention_fee = everyone_fee if mention_type == "everyone" else 0
+        summary = (
+            f"📣 **طلب إعلان #{order_id}**\n"
+            f"• المدة: `{duration}` — `{ad_price:,}` Cosmo\n"
+            f"• الجيف: `{giveaway_total:,}` Cosmo (`{winners}` فائز)\n"
+            f"• المنشن: `{mention_type}` — الرسوم `{mention_fee:,}` Cosmo\n"
+            f"• الإجمالي: `{int(order['total_payment']):,}` Cosmo\n"
+            f"• الحالة: {'قائمة الانتظار' if queued else 'بانتظار الدفع'}"
+        )
+        if interaction.user.id == guild.owner_id:
+            if not queued:
+                update_ad_order(guild.id, order_id, status="paid")
+            content_view = AdContentSubmitView(self.bot, guild.id, order_id)
+            self.bot.add_view(content_view)
+            await interaction.channel.send(
+                summary + "\n✅ بصفتك صاحب السيرفر لا تحتاج إلى دفع. اضغط زر **إدخال الإعلان** لإرسال المحتوى.",
+                view=content_view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return await interaction.followup.send("✅ تم إنشاء الطلب؛ يمكنك إدخال محتوى الإعلان الآن.", ephemeral=True)
+
+        payment_view = AdPaymentView(self.bot, guild.id, order_id, interaction.user.id, interaction.channel_id)
+        self.bot.add_view(payment_view)
+        await interaction.channel.send(
+            summary + "\nاختر طريقة الدفع من الأزرار. بعد تأكيد التحويل سيظهر زر إدخال الإعلان.",
+            view=payment_view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await interaction.followup.send("✅ تم إنشاء الطلب؛ اختر طريقة الدفع في التذكرة.", ephemeral=True)
+
+    async def handle_ad_payment_choice(self, interaction: discord.Interaction, order_id: int, method: str):
+        order = get_ad_order(interaction.guild.id, order_id) if interaction.guild else None
+        if (not order or order["advertiser_id"] != interaction.user.id
+                or order["ticket_channel_id"] != interaction.channel_id):
+            return await interaction.response.send_message("❌ هذا الطلب لا يخصك أو لا ينتمي إلى هذه التذكرة.", ephemeral=True)
+        if order["advertiser_id"] == interaction.guild.owner_id:
+            return await interaction.response.send_message("✅ صاحب السيرفر لا يحتاج إلى دفع.", ephemeral=True)
+        if order["status"] not in {"draft", "awaiting_payment", "queued"}:
+            return await interaction.response.send_message("⚠️ حالة الطلب لا تسمح ببدء الدفع أو تم تأكيده بالفعل.", ephemeral=True)
+        existing_payment = get_ad_payment(interaction.guild.id, order_id)
+        if existing_payment and existing_payment["status"] == "paid":
+            return await interaction.response.send_message("✅ تم اعتماد الدفع بالفعل؛ استخدم زر إدخال الإعلان.", ephemeral=True)
+        expected = int(order["total_payment"])
+        owner_id = int(order["server_owner_id"] or interaction.guild.owner_id)
+        try:
+            create_ad_payment(
+                interaction.guild.id, order_id, method, expected,
+                recipient_id=owner_id, channel_id=int(interaction.channel_id),
+            )
+        except ValueError:
+            return await interaction.response.send_message("✅ تم اعتماد الدفع بالفعل؛ استخدم زر إدخال الإعلان.", ephemeral=True)
+        command = f"#credit {owner_id} {expected} with tax" if method == "credit" else f"!transfer {owner_id} {expected}"
+        await interaction.response.send_message(
+            f"💳 حوّل `{expected:,}` إلى صاحب السيرفر باستخدام الأمر التالي داخل هذه التذكرة، ثم انتظر إيصال البوت هنا:\n```{command}```",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def open_ad_content_modal(self, interaction: discord.Interaction, order_id: int):
+        order = get_ad_order(interaction.guild.id, order_id) if interaction.guild else None
+        if (not order or order["advertiser_id"] != interaction.user.id
+                or order["ticket_channel_id"] != interaction.channel_id):
+            return await interaction.response.send_message("❌ هذا الطلب لا يخصك أو لا ينتمي إلى هذه التذكرة.", ephemeral=True)
+        if order["status"] not in {"paid", "queued"}:
+            return await interaction.response.send_message("⏳ سيظهر نموذج الإعلان بعد تأكيد الدفع.", ephemeral=True)
+        if order["advertiser_id"] != order["server_owner_id"]:
+            payment = get_ad_payment(interaction.guild.id, order_id)
+            if not payment or payment["status"] != "paid":
+                return await interaction.response.send_message("⏳ لم يتم تأكيد الدفع بعد.", ephemeral=True)
+        if order["title"] or order["content"]:
+            return await interaction.response.send_message("✅ تم استلام محتوى هذا الإعلان بالفعل.", ephemeral=True)
+        await interaction.response.send_modal(AdContentModal(interaction.guild.id, order_id))
+
+    async def save_ad_content_from_modal(self, interaction: discord.Interaction, order_id: int,
+                                        title: str, content: str):
+        order = get_ad_order(interaction.guild.id, order_id) if interaction.guild else None
+        if (not order or order["advertiser_id"] != interaction.user.id
+                or order["ticket_channel_id"] != interaction.channel_id):
+            return await interaction.response.send_message("❌ هذا الطلب لا يخصك أو لا ينتمي إلى هذه التذكرة.", ephemeral=True)
+        if order["status"] not in {"paid", "queued"}:
+            return await interaction.response.send_message("⏳ يجب تأكيد الدفع قبل إرسال الإعلان.", ephemeral=True)
+        if not title.strip() or len(title.strip()) > 120:
+            return await interaction.response.send_message("❌ عنوان الإعلان يجب أن يكون بين 1 و120 حرفًا.", ephemeral=True)
+        if has_manual_mention(title):
+            return await interaction.response.send_message("❌ يمنع وضع منشن يدوي في عنوان الإعلان.", ephemeral=True)
+        valid, cleaned_content = validate_ad_content(content)
+        if not valid:
+            return await interaction.response.send_message(f"❌ {cleaned_content}", ephemeral=True)
+        if order["advertiser_id"] != order["server_owner_id"]:
+            payment = get_ad_payment(interaction.guild.id, order_id)
+            if not payment or payment["status"] != "paid":
+                return await interaction.response.send_message("⏳ لم يتم تأكيد الدفع بعد.", ephemeral=True)
+        saved = submit_ad_content(
+            interaction.guild.id, order_id, interaction.user.id,
+            title.strip(), cleaned_content, None, interaction.guild.owner_id,
+        )
+        if not saved:
+            return await interaction.response.send_message("❌ لا يمكن تعديل هذا الطلب في حالته الحالية.", ephemeral=True)
+        await interaction.response.send_message("✅ تم فحص محتوى الإعلان وحفظه للمراجعة.", ephemeral=True)
+        embed = discord.Embed(title=title.strip(), description=cleaned_content, color=discord.Color.gold())
+        await interaction.channel.send(
+            f"📨 تم استلام محتوى الإعلان #{order_id} للمراجعة. سيقوم طاقم الإدارة بمراجعته ونشره.",
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @tasks.loop(seconds=30)
     async def ad_expiry_worker(self):
@@ -236,9 +676,7 @@ class Advertisements(commands.Cog):
         embed = discord.Embed(
             title="📣 إعلانات السيرفر",
             description=("هذا النظام متاح لسيرفرات Premium فقط.\n\n"
-                         "افتح تذكرة عبر الأمر:\n"
-                         "`ad_ticket <1d|2d|3d|5d|7d> <قيمة_الجيف> [عدد_الفائزين] [here|everyone]`\n\n"
-                         "مثال: `ad_ticket 3d 5000000 1 here`"),
+                         "اضغط **فتح تذكرة إعلان**، ثم اختر مدة الإعلان وقيمة الجيف والمنشن وطريقة الدفع من الأزرار."),
             color=discord.Color.gold(),
         )
         await ctx.send(embed=embed, view=AdTicketView())
@@ -320,77 +758,17 @@ class Advertisements(commands.Cog):
                        f"• الرومات: {', '.join(channels) if channels else 'لم يتم تحديدها'}\n"
                        f"• الأسعار:\n{prices}")
 
-    @commands.hybrid_command(name="ad_ticket", aliases=["تذكرة_إعلان"], description="فتح تذكرة إعلان Premium")
-    async def ad_ticket(self, ctx: commands.Context, duration: str, giveaway: str, winners: int = 1, mention: str = "here"):
+    @commands.hybrid_command(name="ad_ticket", aliases=["تذكرة_إعلان"], description="فتح تذكرة لبدء طلب إعلان بالأزرار")
+    async def ad_ticket(self, ctx: commands.Context):
         if not premium_required(ctx):
             return await ctx.send("⛔ نظام تذاكر الإعلانات متاح لسيرفرات Premium فقط.")
         if not ctx.guild:
             return await ctx.send("❌ استخدم الأمر داخل السيرفر.")
-        duration = duration.strip().lower()
-        mention = mention.strip().lower()
-        if duration not in AD_DURATIONS or mention not in {"here", "everyone"}:
-            return await ctx.send("❌ استخدم مدة صحيحة (`1d`, `2d`, `3d`, `5d`, `7d`) ومنشن `here` أو `everyone`.")
-        try:
-            giveaway_total = parse_amount(giveaway)
-        except Exception:
-            return await ctx.send("❌ قيمة الجيف غير صحيحة.")
-        if giveaway_total < 5_000_000:
-            return await ctx.send("❌ الحد الأدنى لقيمة الجيف هو `5m`.")
-        if giveaway_total >= 100_000_000 and winners > 1 and giveaway_total // winners < 5_000_000:
-            return await ctx.send("❌ نصيب كل فائز يجب ألا يقل عن `5m`.")
-        if winners <= 0 or (winners > 1 and giveaway_total < 100_000_000):
-            return await ctx.send("❌ يسمح بأكثر من فائز فقط عندما تكون قيمة الجيف `100m` أو أكثر.")
-        config = get_ad_config(ctx.guild.id)
-        ad_price = int(config["prices"].get(duration, 0))
-        if ad_price <= 0:
-            return await ctx.send(f"❌ لم يحدد صاحب السيرفر سعر إعلان مدة `{duration}` بعد.")
-        everyone_fee = int(config["everyone_fee"])
-        existing = get_guild_db(ctx.guild.id)
-        conn, cur = existing
-        try:
-            row = cur.execute("SELECT channel_id FROM tickets WHERE user_id=? AND is_closed=0", (ctx.author.id,)).fetchone()
-            if row and ctx.guild.get_channel(row[0]):
-                return await ctx.send(f"⚠️ لديك تذكرة مفتوحة بالفعل: <#{row[0]}>")
-        finally:
-            conn.close()
-        category = ctx.channel.category
-        overwrites = {
-            ctx.guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            ctx.author: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, embed_links=True),
-            ctx.guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
-        }
-        owner_role, admin_role = get_guild_management_role_ids(ctx.guild.id)
-        for role_id in (owner_role, admin_role):
-            role = ctx.guild.get_role(role_id) if role_id else None
-            if role:
-                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         await ctx.defer()
-        channel = await ctx.guild.create_text_channel(f"ad-{ctx.author.name[:12]}", category=category, overwrites=overwrites, reason="Premium advertising ticket")
-        now_text = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            ensure_ad_schema(ctx.guild.id)
-            conn, cur = get_guild_db(ctx.guild.id)
-            cur.execute("INSERT INTO tickets(channel_id,user_id,opened_at,is_closed) VALUES(?,?,?,0)", (channel.id, ctx.author.id, now_text))
-            conn.commit()
-            conn.close()
-            day_limit = config["daily_limit"]
-            queued = count_published_today(ctx.guild.id, local_day_start()) >= day_limit
-            order_id = create_ad_order(ctx.guild.id, ctx.author.id, channel.id, duration, ad_price, giveaway_total, winners, mention, queued=queued, everyone_fee=everyone_fee, premium_snapshot=True, server_owner_id=ctx.guild.owner_id)
-        except Exception:
-            try:
-                await channel.delete(reason="Advertising order registration failed")
-            except Exception:
-                pass
-            raise
-        state = "قائمة الانتظار" if queued else "مسودة بانتظار إدخال محتوى الإعلان والدفع"
-        await channel.send(f"📣 **تذكرة إعلان #{order_id}**\n"
-                           f"• المدة: `{duration}`\n• سعر الإعلان: `{ad_price:,}` Cosmo\n"
-                           f"• رسوم everyone: `{everyone_fee if mention == 'everyone' else 0:,}` Cosmo\n"
-                           f"• إجمالي الدفع: `{ad_price + (everyone_fee if mention == 'everyone' else 0) + giveaway_total:,}` Cosmo\n"
-                           f"• إجمالي الجيف: `{giveaway_total:,}` Cosmo\n• عدد الفائزين: `{winners}`\n"
-                           f"• المنشن: `{mention}`\n• الحالة: **{state}**\n\n"
-                           "أرسل محتوى الإعلان ورابط سيرفر Discord داخل التذكرة. يمنع إدخال أي منشن يدويًا؛ سيضيفه البوت بعد المراجعة.")
-        await ctx.followup.send(f"✅ تم إنشاء تذكرة الإعلان: {channel.mention}" + ("\n📋 تم وضع الطلب في قائمة الانتظار." if queued else ""))
+        channel, error = await self.create_ad_ticket(ctx.guild, ctx.author, ctx.channel.category)
+        if error:
+            return await ctx.send(error)
+        await ctx.send(f"✅ تم فتح تذكرة الإعلان: {channel.mention}")
 
     @commands.hybrid_command(name="ad_submit", aliases=["إرسال_الإعلان"], description="إرسال محتوى إعلانك للمراجعة")
     async def ad_submit(self, ctx: commands.Context, order_id: int, title: str, *, content: str):
@@ -404,6 +782,8 @@ class Advertisements(commands.Cog):
             return await ctx.send(f"❌ {result}")
         if not title.strip() or len(title.strip()) > 120:
             return await ctx.send("❌ عنوان الإعلان يجب أن يكون بين 1 و120 حرفًا.")
+        if has_manual_mention(title):
+            return await ctx.send("❌ يمنع وضع منشن يدوي في عنوان الإعلان.")
         owner_id = int(ctx.guild.owner_id)
         attachment_url = None
         if getattr(ctx, "message", None) and getattr(ctx.message, "attachments", None):
@@ -417,8 +797,10 @@ class Advertisements(commands.Cog):
         # صاحب السيرفر يستطيع الإعلان دون دفع رسم الإعلان أو قيمة الجيف؛ سيتم
         # حجز الجيف من ميزانية السيرفر عند النشر فقط.
         if ctx.author.id == owner_id:
-            update_ad_order(ctx.guild.id, order_id, status="paid")
-            return await ctx.send("✅ تم حفظ الإعلان. أنت صاحب السيرفر، لذلك لا يوجد دفع؛ ستُحجز قيمة الجيف من ميزانية السيرفر عند النشر.")
+            if order["status"] != "queued":
+                update_ad_order(ctx.guild.id, order_id, status="paid")
+            state = " وتم وضعه في قائمة الانتظار" if order["status"] == "queued" else ""
+            return await ctx.send(f"✅ تم حفظ الإعلان{state}. أنت صاحب السيرفر، لذلك لا يوجد دفع؛ ستُحجز قيمة الجيف من ميزانية السيرفر عند النشر.")
         expected = int(order["total_payment"])
         await ctx.send(f"✅ تم حفظ الإعلان. إجمالي الدفع المطلوب هو `{expected:,}` Cosmo.\n"
                        "استخدم `ad_pay credit` أو `ad_pay adamc` لاختيار طريقة الدفع.")
@@ -440,10 +822,16 @@ class Advertisements(commands.Cog):
             return await ctx.send("✅ صاحب السيرفر لا يحتاج إلى دفع؛ سيتم الحجز من ميزانية السيرفر عند النشر.")
         if method not in {"credit", "adamc"}:
             return await ctx.send("❌ طريقة الدفع يجب أن تكون `credit` أو `adamc`.")
-        if order["status"] not in {"awaiting_payment", "queued"}:
-            return await ctx.send("❌ يجب إرسال محتوى الإعلان أولًا، أو أن حالة الطلب لا تسمح بالدفع الآن.")
+        if order["status"] not in {"draft", "awaiting_payment", "queued"}:
+            return await ctx.send("❌ حالة الطلب لا تسمح ببدء الدفع الآن.")
+        existing_payment = get_ad_payment(ctx.guild.id, order_id)
+        if existing_payment and existing_payment["status"] == "paid":
+            return await ctx.send("✅ تم اعتماد الدفع بالفعل؛ استخدم زر إدخال الإعلان.")
         expected = int(order["total_payment"])
-        create_ad_payment(ctx.guild.id, order_id, method, expected, recipient_id=int(ctx.guild.owner_id), channel_id=int(ctx.channel.id))
+        try:
+            create_ad_payment(ctx.guild.id, order_id, method, expected, recipient_id=int(ctx.guild.owner_id), channel_id=int(ctx.channel.id))
+        except ValueError:
+            return await ctx.send("✅ تم اعتماد الدفع بالفعل؛ استخدم زر إدخال الإعلان.")
         owner_id = int(ctx.guild.owner_id)
         command = f"#credit {owner_id} {expected} with tax" if method == "credit" else f"!transfer {owner_id} {expected}"
         await ctx.send(f"💳 حوّل `{expected:,}` إلى صاحب السيرفر <@{owner_id}> باستخدام:\n```{command}```\nثم انتظر إيصال البوت داخل هذه التذكرة.")
@@ -454,11 +842,11 @@ class Advertisements(commands.Cog):
             return
         ensure_ad_schema(message.guild.id)
         conn, cur = get_guild_db(message.guild.id)
-        row = cur.execute("SELECT id,advertiser_id,server_owner_id,status FROM ad_orders WHERE ticket_channel_id=? ORDER BY id DESC LIMIT 1", (message.channel.id,)).fetchone()
+        row = cur.execute("SELECT id,advertiser_id,server_owner_id,status,title,content FROM ad_orders WHERE ticket_channel_id=? ORDER BY id DESC LIMIT 1", (message.channel.id,)).fetchone()
         conn.close()
-        if not row or row[3] not in {"awaiting_payment", "queued"}:
+        if not row or row[3] not in {"draft", "awaiting_payment", "queued"}:
             return
-        order_id, advertiser_id, owner_id, status = row
+        order_id, advertiser_id, owner_id, status, title, content = row
         payment = get_ad_payment(message.guild.id, order_id)
         if not payment or payment["status"] != "pending":
             return
@@ -477,7 +865,15 @@ class Advertisements(commands.Cog):
             recipient_id=receipt["recipient_id"], channel_id=message.channel.id,
         )
         if result["status"] == "paid":
-            await message.channel.send(f"✅ تم تأكيد دفع الإعلان #{order_id}. سيتم نقله للمراجعة والنشر تلقائيًا.")
+            if not title or not content:
+                view = AdContentSubmitView(self.bot, message.guild.id, order_id)
+                self.bot.add_view(view)
+                await message.channel.send(
+                    f"✅ تم تأكيد دفع الإعلان #{order_id}. اضغط الزر لإدخال محتوى الإعلان؛ يجب أن يتضمن رابط دعوة Discord ومن دون أي منشن.",
+                    view=view,
+                )
+            else:
+                await message.channel.send(f"✅ تم تأكيد دفع الإعلان #{order_id}. أصبح الطلب جاهزًا لمراجعة الإدارة.")
 
     async def _publish_order(self, guild: discord.Guild, order_id: int, channel: discord.TextChannel):
         order = get_ad_order(guild.id, order_id)
@@ -500,7 +896,7 @@ class Advertisements(commands.Cog):
             embed.set_footer(text=f"إعلان #{order_id} • الجائزة لكل فائز: {int(order['amount_per_winner']):,}")
             if order.get("media_url"):
                 embed.set_image(url=order["media_url"])
-            message = await channel.send(content=mention, embed=embed, allowed_mentions=discord.AllowedMentions(everyone=order["mention_type"] == "everyone", users=False, roles=False, replied_user=False))
+            message = await channel.send(content=mention, embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=False, roles=False, replied_user=False))
             await message.add_reaction("🎉")
             result = record_ad_published(guild.id, order_id, channel.id, message.id, 0, old_name)
             if result["status"] not in {"live", "already_live"}:
