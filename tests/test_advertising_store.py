@@ -26,6 +26,29 @@ class AdvertisingStoreTests(unittest.TestCase):
         self.assertEqual(config["everyone_fee"], 2_000_000)
         self.assertEqual(config["channels"], [55])
 
+    def test_existing_ad_config_table_gets_buyer_role_column_migrated(self):
+        from database import get_guild_db
+
+        conn, cur = get_guild_db(1)
+        cur.execute("DROP TABLE IF EXISTS ad_config")
+        cur.execute(
+            "CREATE TABLE ad_config ("
+            "guild_id INTEGER PRIMARY KEY, "
+            "daily_limit INTEGER NOT NULL DEFAULT 1, "
+            "everyone_fee INTEGER NOT NULL DEFAULT 0, "
+            "updated_at INTEGER NOT NULL DEFAULT 0"
+            ")"
+        )
+        cur.execute("INSERT INTO ad_config(guild_id, daily_limit, everyone_fee) VALUES(1, 2, 100)")
+        conn.commit()
+        conn.close()
+
+        store.set_ad_buyer_role(1, 987654321)
+        config = store.get_ad_config(1)
+        self.assertEqual(config["daily_limit"], 2)
+        self.assertEqual(config["everyone_fee"], 100)
+        self.assertEqual(config["buyer_role_id"], 987654321)
+
     def test_queued_order_gets_rank_and_keeps_giveaway_separate(self):
         order_id = store.create_ad_order(
             1, 20, 30, "5d", 12_000_000, 100_000_000, 2, "here", queued=True

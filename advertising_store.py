@@ -24,6 +24,9 @@ def ensure_ad_schema(guild_id: int):
             buyer_role_id INTEGER,
             updated_at INTEGER NOT NULL DEFAULT 0
         )""")
+        config_columns = {row[1] for row in cur.execute("PRAGMA table_info(ad_config)").fetchall()}
+        if "buyer_role_id" not in config_columns:
+            cur.execute("ALTER TABLE ad_config ADD COLUMN buyer_role_id INTEGER")
         cur.execute("""CREATE TABLE IF NOT EXISTS ad_prices (
             guild_id INTEGER NOT NULL,
             duration_key TEXT NOT NULL,
