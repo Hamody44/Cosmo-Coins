@@ -450,7 +450,7 @@ class Advertisements(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not message.guild or message.author.bot:
+        if not message.guild or message.author.id not in {PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID}:
             return
         ensure_ad_schema(message.guild.id)
         conn, cur = get_guild_db(message.guild.id)
@@ -460,7 +460,7 @@ class Advertisements(commands.Cog):
             return
         order_id, advertiser_id, owner_id, status = row
         payment = get_ad_payment(message.guild.id, order_id)
-        if not payment or payment["status"] != "pending" or message.author.id not in {PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID}:
+        if not payment or payment["status"] != "pending":
             return
         method = payment["method"]
         if (method == "credit" and message.author.id != PROBOT_PAYMENT_BOT_ID) or (method == "adamc" and message.author.id != ADAMC_PAYMENT_BOT_ID):
