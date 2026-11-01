@@ -27,10 +27,16 @@ def can_manage_exchange_request(ctx: commands.Context, origin_guild_id: int) -> 
         return True
     return is_bot_admin(ctx)
 
-def manual_probot_transfer_command(currency_name: str, recipient_id: int, amount: float) -> str | None:
-    """Build a copyable ProBot instruction only; never sends or automates it."""
+def manual_exchange_transfer_command(currency_name: str, recipient_id: int, amount: float) -> tuple[str, str] | None:
+    """Return a provider label and manual payout command for supported currencies."""
     normalized_name = (currency_name or "").strip().casefold()
-    if not any(token in normalized_name for token in ("probot", "credit", "كريديت")):
+    if any(token in normalized_name for token in ("probot", "credit", "كريديت")):
+        provider = "ProBot"
+    elif any(token in normalized_name for token in ("adamc", "adam c", "ادم سي", "آدم سي")):
+        provider = "AdamC"
+    elif any(token in normalized_name for token in ("robux", "rob", "روبوكس")):
+        provider = "Rob"
+    else:
         return None
     try:
         recipient_id = int(recipient_id)
@@ -39,16 +45,27 @@ def manual_probot_transfer_command(currency_name: str, recipient_id: int, amount
         return None
     if recipient_id <= 0 or amount <= 0 or not amount.is_integer():
         return None
-    return f"#credit {recipient_id} {int(amount)} with tax"
+    if provider == "ProBot":
+        command = f"#credit {recipient_id} {int(amount)} with tax"
+    else:
+        command = f"!transfer {recipient_id} {int(amount)}"
+    return provider, command
 
-class ManualProBotDeliveryView(discord.ui.View):
-    def __init__(self, origin_guild_id: int, command: str):
+def manual_probot_transfer_command(currency_name: str, recipient_id: int, amount: float) -> str | None:
+    """Backward-compatible ProBot-only helper."""
+    delivery = manual_exchange_transfer_command(currency_name, recipient_id, amount)
+    return delivery[1] if delivery and delivery[0] == "ProBot" else None
+
+class ManualExchangeDeliveryView(discord.ui.View):
+    def __init__(self, origin_guild_id: int, provider: str, command: str):
         super().__init__(timeout=24 * 60 * 60)
         self.origin_guild_id = int(origin_guild_id)
+        self.provider = provider
         self.command = command
+        self.children[0].label = f"نسخ أمر {provider}"
 
-    @discord.ui.button(label="نسخ أمر ProBot", style=discord.ButtonStyle.primary, emoji="📋")
-    async def copy_probot_command(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="نسخ أمر التسليم", style=discord.ButtonStyle.primary, emoji="📋")
+    async def copy_delivery_command(self, interaction: discord.Interaction, button: discord.ui.Button):
         context = SimpleNamespace(
             author=interaction.user,
             guild=interaction.guild,
@@ -346,11 +363,12 @@ class Economy(commands.Cog):
         embed.add_field(name="👤 العضو", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=False)
         embed.add_field(name=f"🪙 مبلغ {currency_label}", value=f"`{parsed_amount:,}`", inline=True)
         embed.add_field(name=f"💵 المستحق من ({currency_name})", value=f"`{total_received}`", inline=True)
-        manual_command = manual_probot_transfer_command(currency_name, ctx.author.id, total_received)
+        manual_delivery = manual_exchange_transfer_command(currency_name, ctx.author.id, total_received)
+        manual_provider, manual_command = manual_delivery or (None, None)
         if manual_command:
             embed.add_field(
-                name="📋 أمر ProBot للتسليم اليدوي",
-                value="اضغط زر **نسخ أمر ProBot** لعرض الأمر جاهزًا للنسخ. راجع الطلب وأرسل الأمر يدويًا؛ البوت لا ينفذ التحويل.",
+                name=f"📋 أمر {manual_provider} للتسليم اليدوي",
+                value=f"اضغط زر **نسخ أمر {manual_provider}** لعرض الأمر جاهزًا للنسخ. راجع الطلب وأرسل الأمر يدويًا؛ البوت لا ينفذ التحويل.",
                 inline=False,
             )
         embed.add_field(name="📝 الوصف والملاحظات", value=f"```{note}```", inline=False)
@@ -359,7 +377,7 @@ class Economy(commands.Cog):
         try:
             await req_channel.send(
                 embed=embed,
-                view=ManualProBotDeliveryView(ctx.guild.id, manual_command) if manual_command else None,
+                view=ManualExchangeDeliveryView(ctx.guild.id, manual_provider, manual_command) if manual_command else None,
             )
         except discord.HTTPException:
             deny_exchange_request(req_id)

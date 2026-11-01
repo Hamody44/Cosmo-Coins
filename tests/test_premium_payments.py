@@ -7,6 +7,27 @@ from unittest.mock import patch
 
 import database
 import premium_payments as pp
+from cogs.premium import METHOD_LABELS, _premium_payment_command
+
+
+class PremiumCommandFormatTests(unittest.TestCase):
+    def test_probot_premium_command_uses_credit_with_tax(self):
+        self.assertEqual(
+            _premium_payment_command("credit", 100),
+            f"#credit {database.PRIMARY_OWNER_ID} 100 with tax",
+        )
+
+    def test_adamc_premium_command_remains_transfer(self):
+        self.assertEqual(
+            _premium_payment_command("adamc", 90),
+            f"!transfer {database.PRIMARY_OWNER_ID} 90",
+        )
+
+    def test_rob_is_not_a_premium_payment_method(self):
+        self.assertNotIn("rob", pp.PREMIUM_METHODS)
+        self.assertNotIn("rob", METHOD_LABELS)
+        with self.assertRaises(ValueError):
+            _premium_payment_command("rob", 90)
 
 
 class PremiumPaymentTests(unittest.TestCase):

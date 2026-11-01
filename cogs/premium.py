@@ -21,6 +21,14 @@ def _bool(value):
     if value in {"false", "0", "off", "no", "قفل", "تعطيل"}: return False
     raise ValueError("boolean")
 
+def _premium_payment_command(method, amount):
+    amount = int(amount)
+    if method == "credit":
+        return f"#credit {PRIMARY_OWNER_ID} {amount} with tax"
+    if method == "adamc":
+        return f"!transfer {PRIMARY_OWNER_ID} {amount}"
+    raise ValueError("Unsupported manual Premium payment method")
+
 class PremiumSelect(discord.ui.Select):
     def __init__(self, cog, ctx, duration, price):
         self.cog, self.ctx, self.duration, self.price = cog, ctx, duration, price
@@ -54,7 +62,7 @@ class PremiumSelect(discord.ui.Select):
             except Exception:
                 await asyncio.to_thread(pp.fail_order, interaction.guild_id, result["order_id"])
                 return await interaction.response.send_message("⚠️ تعذر إنشاء فاتورة LTC؛ لم يتم التفعيل.", ephemeral=True)
-        command = f"!transfer {PRIMARY_OWNER_ID} {expected}"
+        command = _premium_payment_command(method, expected)
         return await interaction.response.edit_message(content=f"💳 حوّل `{expected:,}` إلى مالك البوت عبر {METHOD_LABELS[method]} خلال 10 دقائق. يجب أن يطابق اسم الحساب والمبلغ والمستلم والوقت.", view=PremiumCommandView(interaction.user.id, command))
 
 class PremiumCommandView(discord.ui.View):

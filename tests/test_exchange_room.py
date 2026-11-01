@@ -6,7 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import database
-from cogs.economy import Economy, ManualProBotDeliveryView, manual_probot_transfer_command
+from cogs.economy import (
+    Economy,
+    ManualExchangeDeliveryView,
+    manual_exchange_transfer_command,
+    manual_probot_transfer_command,
+)
 from cogs.photo_contest import select_used_invite
 
 
@@ -95,20 +100,35 @@ class InviteAttributionTests(unittest.TestCase):
         self.assertIsNone(select_used_invite(current, previous))
 
 
-class ManualProBotInstructionTests(unittest.TestCase):
-    def test_instruction_uses_exchange_recipient_id_without_affecting_other_currencies(self):
+class ManualExchangeInstructionTests(unittest.TestCase):
+    def test_instruction_uses_provider_specific_commands_for_supported_currencies(self):
+        self.assertEqual(
+            manual_exchange_transfer_command("ProBot Credits", 987654, 250.0),
+            ("ProBot", "#credit 987654 250 with tax"),
+        )
+        self.assertEqual(
+            manual_exchange_transfer_command("AdamC", 987654, 250.0),
+            ("AdamC", "!transfer 987654 250"),
+        )
+        self.assertEqual(
+            manual_exchange_transfer_command("Rob", 987654, 250.0),
+            ("Rob", "!transfer 987654 250"),
+        )
+        self.assertEqual(
+            manual_exchange_transfer_command("Robux", 987654, 250.0),
+            ("Rob", "!transfer 987654 250"),
+        )
+        self.assertIsNone(manual_exchange_transfer_command("Gems", 987654, 250.0))
+        self.assertIsNone(manual_exchange_transfer_command("ProBot Credits", 987654, 250.5))
         self.assertEqual(
             manual_probot_transfer_command("ProBot Credits", 987654, 250.0),
             "#credit 987654 250 with tax",
         )
-        self.assertIsNone(manual_probot_transfer_command("AdamC", 987654, 250.0))
-        self.assertIsNone(manual_probot_transfer_command("Robux", 987654, 250.0))
-        self.assertIsNone(manual_probot_transfer_command("ProBot Credits", 987654, 250.5))
 
-    def test_probot_delivery_view_exposes_a_copy_button_for_the_command(self):
-        view = ManualProBotDeliveryView(123, "#credit 987654 250 with tax")
+    def test_delivery_view_shows_the_button_for_the_selected_provider(self):
+        view = ManualExchangeDeliveryView(123, "AdamC", "!transfer 987654 250")
         self.assertEqual(len(view.children), 1)
-        self.assertEqual(view.children[0].label, "نسخ أمر ProBot")
+        self.assertEqual(view.children[0].label, "نسخ أمر AdamC")
 
 
 if __name__ == "__main__":
