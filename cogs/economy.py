@@ -3,6 +3,7 @@ from discord.ext import commands
 import random
 import asyncio
 from datetime import datetime
+from types import SimpleNamespace
 from database import (
     get_balance, parse_amount, generate_captcha_image,
     is_blacklisted, is_bot_admin, global_cursor, get_guild_db, PRIMARY_OWNER_ID,
@@ -38,7 +39,31 @@ def manual_probot_transfer_command(currency_name: str, recipient_id: int, amount
         return None
     if recipient_id <= 0 or amount <= 0 or not amount.is_integer():
         return None
-    return f"!transfer {recipient_id} {int(amount)}"
+    return f"#credit {recipient_id} {int(amount)} with tax"
+
+class ManualProBotDeliveryView(discord.ui.View):
+    def __init__(self, origin_guild_id: int, command: str):
+        super().__init__(timeout=24 * 60 * 60)
+        self.origin_guild_id = int(origin_guild_id)
+        self.command = command
+
+    @discord.ui.button(label="نسخ أمر ProBot", style=discord.ButtonStyle.primary, emoji="📋")
+    async def copy_probot_command(self, interaction: discord.Interaction, button: discord.ui.Button):
+        context = SimpleNamespace(
+            author=interaction.user,
+            guild=interaction.guild,
+            channel=interaction.channel,
+        )
+        if not can_manage_exchange_request(context, self.origin_guild_id):
+            return await interaction.response.send_message(
+                "⛔ هذا الأمر متاح لمالك البوت أو إدارة السيرفر صاحب الطلب فقط.",
+                ephemeral=True,
+            )
+        await interaction.response.send_message(
+            self.command,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 class Economy(commands.Cog):
     def __init__(self, bot):
@@ -325,14 +350,17 @@ class Economy(commands.Cog):
         if manual_command:
             embed.add_field(
                 name="📋 أمر ProBot للتسليم اليدوي",
-                value=f"`{manual_command}`\nانسخه وأرسله يدويًا بعد مراجعة الطلب؛ البوت لا ينفذ التحويل.",
+                value="اضغط زر **نسخ أمر ProBot** لعرض الأمر جاهزًا للنسخ. راجع الطلب وأرسل الأمر يدويًا؛ البوت لا ينفذ التحويل.",
                 inline=False,
             )
         embed.add_field(name="📝 الوصف والملاحظات", value=f"```{note}```", inline=False)
         embed.set_footer(text=f"للقبول: /accept_exchange {req_id} | للرفض: /deny_exchange {req_id}")
 
         try:
-            await req_channel.send(embed=embed)
+            await req_channel.send(
+                embed=embed,
+                view=ManualProBotDeliveryView(ctx.guild.id, manual_command) if manual_command else None,
+            )
         except discord.HTTPException:
             deny_exchange_request(req_id)
             return await ctx.send("❌ تعذر إرسال الطلب للإدارة؛ أُعيد رصيدك تلقائياً.")

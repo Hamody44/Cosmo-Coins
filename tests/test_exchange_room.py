@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import database
-from cogs.economy import Economy, manual_probot_transfer_command
+from cogs.economy import Economy, ManualProBotDeliveryView, manual_probot_transfer_command
 from cogs.photo_contest import select_used_invite
 
 
@@ -99,11 +99,16 @@ class ManualProBotInstructionTests(unittest.TestCase):
     def test_instruction_uses_exchange_recipient_id_without_affecting_other_currencies(self):
         self.assertEqual(
             manual_probot_transfer_command("ProBot Credits", 987654, 250.0),
-            "!transfer 987654 250",
+            "#credit 987654 250 with tax",
         )
         self.assertIsNone(manual_probot_transfer_command("AdamC", 987654, 250.0))
         self.assertIsNone(manual_probot_transfer_command("Robux", 987654, 250.0))
         self.assertIsNone(manual_probot_transfer_command("ProBot Credits", 987654, 250.5))
+
+    def test_probot_delivery_view_exposes_a_copy_button_for_the_command(self):
+        view = ManualProBotDeliveryView(123, "#credit 987654 250 with tax")
+        self.assertEqual(len(view.children), 1)
+        self.assertEqual(view.children[0].label, "نسخ أمر ProBot")
 
 
 if __name__ == "__main__":
