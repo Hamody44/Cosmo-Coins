@@ -31,9 +31,11 @@ from advertising_store import (
     ensure_ad_schema,
     get_ad_payment,
     get_ad_config,
+    get_ad_statistics,
     get_ad_order,
     remove_ad_channel,
     set_ad_config,
+    set_ad_buyer_role,
     set_ad_price,
     settle_ad_payment,
     settle_ad_cosmo_payment,
@@ -358,6 +360,20 @@ class Advertisements(commands.Cog):
         if not self.ad_expiry_worker.is_running():
             self.ad_expiry_worker.start()
 
+    async def _grant_buyer_role(self, guild: discord.Guild, user_id: int):
+        role_id = get_ad_config(guild.id).get("buyer_role_id")
+        if not role_id:
+            return
+        role = guild.get_role(int(role_id))
+        if role is None:
+            return
+        try:
+            member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
+            if role not in member.roles:
+                await member.add_roles(role, reason="Confirmed advertising purchase")
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
     @commands.Cog.listener()
     async def on_ready(self):
         await self._restore_persistent_views()
@@ -561,6 +577,7 @@ class Advertisements(commands.Cog):
                 return await interaction.response.send_message("❌ رصيد Cosmo الشخصي غير كافٍ؛ لم تُخصم أي عملة.", ephemeral=True)
             if result["status"] not in {"paid", "already_paid"}:
                 return await interaction.response.send_message("⚠️ تعذر إتمام دفع Cosmo؛ تم تحويل الطلب للمراجعة.", ephemeral=True)
+            await self._grant_buyer_role(interaction.guild, interaction.user.id)
             view = AdContentSubmitView(self.bot, interaction.guild.id, order_id)
             self.bot.add_view(view)
             await interaction.response.send_message("✅ تم تحويل Cosmo تلقائيًا إلى صاحب السيرفر. اضغط زر إدخال الإعلان.", ephemeral=True)
@@ -777,6 +794,33 @@ class Advertisements(commands.Cog):
         set_ad_config(ctx.guild.id, everyone_fee=value)
         await ctx.send(f"✅ رسوم `everyone` أصبحت `{value:,}` Cosmo فوق سعر الإعلان.")
 
+    @commands.hybrid_command(name="set_ad_buyer_role", aliases=["رتبة_مشتري_الإعلان"], description="تفعيل أو تعطيل رتبة مشتري الإعلان تلقائيًا")
+    async def set_ad_buyer_role_command(self, ctx: commands.Context, role: discord.Role = None):
+        if not premium_required(ctx) or not can_manage_ads(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك أو إدارة سيرفر Premium فقط.")
+        if role is not None and role.guild.id != ctx.guild.id:
+            return await ctx.send("❌ يجب اختيار رتبة من نفس السيرفر.")
+        set_ad_buyer_role(ctx.guild.id, role.id if role else None)
+        if role:
+            await ctx.send(f"✅ سيحصل مشتري الإعلان على رتبة {role.mention} تلقائيًا بعد تأكيد الدفع.")
+        else:
+            await ctx.send("✅ تم تعطيل رتبة مشتري الإعلان التلقائية.")
+
+    @commands.hybrid_command(name="ad_stats", aliases=["إحصائيات_الإعلانات"], description="عرض إحصائيات الإعلانات وأرباحها")
+    async def ad_stats(self, ctx: commands.Context):
+        if not premium_required(ctx) or not can_manage_ads(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك أو إدارة سيرفر Premium فقط.")
+        stats = get_ad_statistics(ctx.guild.id)
+        labels = {"credit": "ProBot Credits", "adamc": "AdamC", "cosmo": "Cosmo"}
+        lines = [f"📣 الإعلانات المنشورة: `{stats['published_count']:,}`"]
+        if stats["revenue"]:
+            lines.append("\n💰 الأرباح حسب العملة:")
+            for method, item in stats["revenue"].items():
+                lines.append(f"• {labels.get(method, method)}: `{item['amount']:,}` — `{item['orders']:,}` طلب")
+        else:
+            lines.append("\n💰 لا توجد أرباح مسجلة حتى الآن.")
+        await ctx.send(embed=discord.Embed(title="📊 إحصائيات الإعلانات", description="\n".join(lines), color=discord.Color.gold()))
+
     @commands.hybrid_command(name="set_ad_channel", aliases=["روم_إعلان"], description="إضافة روم مسموح للإعلانات")
     async def set_ad_channel(self, ctx: commands.Context, channel: discord.TextChannel):
         if not premium_required(ctx):
@@ -891,6 +935,8 @@ class Advertisements(commands.Cog):
             result = await asyncio.to_thread(settle_ad_cosmo_payment, ctx.guild.id, order_id, ctx.author.id)
             if result["status"] == "insufficient_balance":
                 return await ctx.send("❌ رصيد Cosmo الشخصي غير كافٍ؛ لم تُخصم أي عملة.")
+            if result["status"] in {"paid", "already_paid"}:
+                await self._grant_buyer_role(ctx.guild, ctx.author.id)
             return await ctx.send("✅ تم تحويل Cosmo تلقائيًا إلى صاحب السيرفر." if result["status"] in {"paid", "already_paid"} else "⚠️ تعذر إتمام دفع Cosmo؛ تم تحويل الطلب للمراجعة.")
         command = f"#credit {owner_id} {expected} with tax" if method == "credit" else f"!transfer {owner_id} {expected}"
         await ctx.send(f"💳 حوّل `{expected:,}` إلى صاحب السيرفر <@{owner_id}> باستخدام:\n```{command}```\nثم انتظر إيصال البوت داخل هذه التذكرة.")
@@ -924,6 +970,7 @@ class Advertisements(commands.Cog):
             recipient_id=receipt["recipient_id"], channel_id=message.channel.id,
         )
         if result["status"] == "paid":
+            await self._grant_buyer_role(message.guild, advertiser_id)
             if not title or not content:
                 view = AdContentSubmitView(self.bot, message.guild.id, order_id)
                 self.bot.add_view(view)

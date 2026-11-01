@@ -21,6 +21,7 @@ def ensure_ad_schema(guild_id: int):
             guild_id INTEGER PRIMARY KEY,
             daily_limit INTEGER NOT NULL DEFAULT 1 CHECK(daily_limit > 0),
             everyone_fee INTEGER NOT NULL DEFAULT 0 CHECK(everyone_fee >= 0),
+            buyer_role_id INTEGER,
             updated_at INTEGER NOT NULL DEFAULT 0
         )""")
         cur.execute("""CREATE TABLE IF NOT EXISTS ad_prices (
@@ -69,6 +70,7 @@ def ensure_ad_schema(guild_id: int):
             ("everyone_fee", "INTEGER NOT NULL DEFAULT 0"),
             ("total_payment", "INTEGER NOT NULL DEFAULT 1"),
             ("amount_per_winner", "INTEGER NOT NULL DEFAULT 5000000"),
+            ("buyer_role_id", "INTEGER"),
         ):
             columns = {row[1] for row in cur.execute("PRAGMA table_info(ad_orders)").fetchall()}
             if column not in columns:
@@ -88,7 +90,7 @@ def ensure_ad_schema(guild_id: int):
             FOREIGN KEY(ad_order_id) REFERENCES ad_orders(id)
         )""")
         payment_columns = {row[1] for row in cur.execute("PRAGMA table_info(ad_payments)").fetchall()}
-        for column, definition in (("recipient_id", "INTEGER NOT NULL DEFAULT 0"), ("channel_id", "INTEGER NOT NULL DEFAULT 0")):
+        for column, definition in (("recipient_id", "INTEGER NOT NULL DEFAULT 0"), ("channel_id", "INTEGER NOT NULL DEFAULT 0"), ("paid_amount", "INTEGER")):
             if column not in payment_columns:
                 cur.execute(f"ALTER TABLE ad_payments ADD COLUMN {column} {definition}")
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ad_open_advertiser ON ad_orders(guild_id, advertiser_id) WHERE status NOT IN ('completed','cancelled','needs_review')")
@@ -119,10 +121,10 @@ def get_ad_config(guild_id: int):
     ensure_ad_schema(guild_id)
     conn, cur = get_guild_db(guild_id)
     try:
-        config = cur.execute("SELECT daily_limit, everyone_fee FROM ad_config WHERE guild_id=?", (guild_id,)).fetchone()
+        config = cur.execute("SELECT daily_limit, everyone_fee, buyer_role_id FROM ad_config WHERE guild_id=?", (guild_id,)).fetchone()
         prices = dict(cur.execute("SELECT duration_key, price FROM ad_prices WHERE guild_id=?", (guild_id,)).fetchall())
         channels = [int(row[0]) for row in cur.execute("SELECT channel_id FROM ad_channels WHERE guild_id=? ORDER BY channel_id", (guild_id,))]
-        return {"daily_limit": int(config[0]) if config else 1, "everyone_fee": int(config[1]) if config else 0, "prices": prices, "channels": channels}
+        return {"daily_limit": int(config[0]) if config else 1, "everyone_fee": int(config[1]) if config else 0, "buyer_role_id": int(config[2]) if config and config[2] else None, "prices": prices, "channels": channels}
     finally:
         conn.close()
 
@@ -139,16 +141,31 @@ def set_ad_price(guild_id: int, duration_key: str, price: int):
         conn.close()
 
 
-def set_ad_config(guild_id: int, *, daily_limit=None, everyone_fee=None):
+def set_ad_config(guild_id: int, *, daily_limit=None, everyone_fee=None, buyer_role_id=None):
     ensure_ad_schema(guild_id)
     conn, cur = get_guild_db(guild_id)
     try:
-        current = cur.execute("SELECT daily_limit,everyone_fee FROM ad_config WHERE guild_id=?", (guild_id,)).fetchone()
+        current = cur.execute("SELECT daily_limit,everyone_fee,buyer_role_id FROM ad_config WHERE guild_id=?", (guild_id,)).fetchone()
         limit = int(daily_limit if daily_limit is not None else (current[0] if current else 1))
         fee = int(everyone_fee if everyone_fee is not None else (current[1] if current else 0))
+        role_id = buyer_role_id if buyer_role_id is not None else (current[2] if current else None)
         if limit <= 0 or fee < 0:
             raise ValueError("invalid advertisement config")
-        cur.execute("INSERT INTO ad_config(guild_id,daily_limit,everyone_fee,updated_at) VALUES(?,?,?,?) ON CONFLICT(guild_id) DO UPDATE SET daily_limit=excluded.daily_limit,everyone_fee=excluded.everyone_fee,updated_at=excluded.updated_at", (guild_id, limit, fee, int(time.time())))
+        cur.execute("INSERT INTO ad_config(guild_id,daily_limit,everyone_fee,buyer_role_id,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(guild_id) DO UPDATE SET daily_limit=excluded.daily_limit,everyone_fee=excluded.everyone_fee,buyer_role_id=excluded.buyer_role_id,updated_at=excluded.updated_at", (guild_id, limit, fee, role_id, int(time.time())))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_ad_buyer_role(guild_id: int, role_id: int | None):
+    ensure_ad_schema(guild_id)
+    conn, cur = get_guild_db(guild_id)
+    try:
+        cur.execute(
+            "INSERT INTO ad_config(guild_id,daily_limit,everyone_fee,buyer_role_id,updated_at) VALUES(?,1,0,?,?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET buyer_role_id=excluded.buyer_role_id,updated_at=excluded.updated_at",
+            (guild_id, int(role_id) if role_id else None, int(time.time())),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -310,7 +327,7 @@ def settle_ad_payment(guild_id: int, order_id: int, payment_message_id: int, pay
             conn.rollback(); return {"status": "needs_review"}
         if row[1] == "paid":
             conn.commit(); return {"status": "already_paid"}
-        cur.execute("UPDATE ad_payments SET status='paid',payment_message_id=?,payment_author_id=?,paid_at=? WHERE ad_order_id=? AND status='pending'", (payment_message_id, payment_author_id, int(time.time()), order_id))
+        cur.execute("UPDATE ad_payments SET status='paid',paid_amount=?,payment_message_id=?,payment_author_id=?,paid_at=? WHERE ad_order_id=? AND status='pending'", (int(paid_amount), payment_message_id, payment_author_id, int(time.time()), order_id))
         if cur.rowcount != 1:
             conn.rollback(); return {"status": "already_paid"}
         cur.execute(
@@ -534,6 +551,22 @@ def list_live_ad_messages(guild_id: int):
     ensure_ad_schema(guild_id); conn, cur = get_guild_db(guild_id)
     try:
         return cur.execute("SELECT ad_order_id,message_id,channel_id FROM ad_giveaways WHERE guild_id=? AND status='live' AND message_id IS NOT NULL", (guild_id,)).fetchall()
+    finally:
+        conn.close()
+
+
+def get_ad_statistics(guild_id: int):
+    ensure_ad_schema(guild_id); conn, cur = get_guild_db(guild_id)
+    try:
+        published = cur.execute("SELECT COUNT(*) FROM ad_orders o WHERE o.guild_id=? AND o.published_at IS NOT NULL AND EXISTS (SELECT 1 FROM ad_giveaways g WHERE g.ad_order_id=o.id AND g.message_id IS NOT NULL)", (guild_id,)).fetchone()[0]
+        rows = cur.execute(
+            "SELECT p.method, SUM(COALESCE(p.paid_amount, p.expected_amount)), COUNT(*) "
+            "FROM ad_orders o JOIN ad_payments p ON p.ad_order_id=o.id JOIN ad_giveaways g ON g.ad_order_id=o.id "
+            "WHERE o.guild_id=? AND o.published_at IS NOT NULL AND g.message_id IS NOT NULL AND p.status='paid' "
+            "GROUP BY p.method ORDER BY p.method",
+            (guild_id,),
+        ).fetchall()
+        return {"published_count": int(published or 0), "revenue": {str(method): {"amount": int(amount or 0), "orders": int(orders)} for method, amount, orders in rows}}
     finally:
         conn.close()
 

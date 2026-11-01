@@ -200,6 +200,8 @@ class HelpView(discord.ui.View):
                     "• `/premium_code <duration>` — إنشاء كود Premium.\n"
                     "• `!set_premium_price <duration> <credit> <adamc> <cosmo> <crypto_usd>` — تحديد أسعار Premium؛ سعر AdamC يُشتق مركزيًا من Credits.\n"
                     "• `!set_adamc_ratio <divisor>` — ضبط النسبة العامة: AdamC = Credits ÷ divisor، وتُطبق على الميزانية والإعلانات وPremium.\n"
+                    "• `/ad_stats` — إحصائيات الإعلانات المنشورة والأرباح حسب طريقة الدفع.\n"
+                    "• `/set_ad_buyer_role @role` — منح رتبة تلقائيًا لمشتري الإعلان، واستخدام الأمر بدون رتبة لتعطيلها.\n"
                     "• `!toggle_premium_purchase <true|false>` و`!toggle_premium_method <credit|adamc|cosmo|crypto> <true|false>` — فتح/إغلاق الشراء أو وسيلة دفع.\n"
                     "• `!set_global_log` و`!disable_global_log` — إعداد سجل العمليات العام.\n"
                     "• `!set_global_request_log` — تحديد قناة الطلبات العامة.\n"
