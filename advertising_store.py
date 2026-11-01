@@ -271,7 +271,7 @@ def submit_ad_content(guild_id: int, order_id: int, advertiser_id: int, title: s
 
 
 def create_ad_payment(guild_id: int, order_id: int, method: str, expected_amount: int, recipient_id: int = 0, channel_id: int = 0):
-    if method not in {"credit", "adamc"} or int(expected_amount) <= 0:
+    if method not in {"credit", "adamc", "cosmo"} or int(expected_amount) <= 0:
         raise ValueError("invalid advertisement payment")
     ensure_ad_schema(guild_id)
     conn, cur = get_guild_db(guild_id)
@@ -326,6 +326,29 @@ def settle_ad_payment(guild_id: int, order_id: int, payment_message_id: int, pay
         conn.close()
 
 
+def settle_ad_cosmo_payment(guild_id: int, order_id: int, payer_id: int):
+    """Transfer Cosmo from the advertiser to the server owner and settle once."""
+    payment = get_ad_payment(guild_id, order_id)
+    order = get_ad_order(guild_id, order_id)
+    if not payment or not order or payment["method"] != "cosmo":
+        return {"status": "needs_review"}
+    if payment["status"] == "paid":
+        return {"status": "already_paid"}
+    if int(order["advertiser_id"]) != int(payer_id) or int(payment["recipient_id"] or 0) <= 0:
+        return {"status": "needs_review"}
+    from database import transfer_balance
+    transferred = transfer_balance(
+        int(payer_id), int(payment["recipient_id"]), int(payment["expected_amount"]),
+        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+    )
+    if not transferred:
+        return {"status": "insufficient_balance"}
+    return settle_ad_payment(
+        guild_id, order_id, -int(order_id), int(payer_id), int(payment["expected_amount"]),
+        recipient_id=int(payment["recipient_id"]), channel_id=int(payment["channel_id"] or 0),
+    )
+
+
 def claim_next_queued_order(guild_id: int, start_timestamp: int, daily_limit: int):
     """Claim one queued order atomically; ordering is created_at then id."""
     ensure_ad_schema(guild_id)
@@ -365,7 +388,7 @@ def reserve_ad_giveaway(guild_id: int, order_id: int, funding_source: str = "ser
             conn.commit()
             return {"status": "already_reserved", "amount": int(existing[1])}
         order = cur.execute("SELECT giveaway_total,status FROM ad_orders WHERE guild_id=? AND id=?", (guild_id, order_id)).fetchone()
-        if not order or order[1] not in {"paid", "publishing"}:
+        if not order or order[1] not in {"paid", "publishing", "needs_review"}:
             conn.rollback(); return {"status": "needs_review"}
         amount = int(order[0])
         if funding_source == "server_budget":
@@ -396,7 +419,7 @@ def record_ad_published(guild_id: int, order_id: int, channel_id: int, message_i
             conn.rollback(); return {"status": "needs_review"}
         now = int(time.time())
         cur.execute("UPDATE ad_giveaways SET status='live',channel_id=?,message_id=?,generation=?,original_channel_name=?,end_timestamp=?,updated_at=? WHERE ad_order_id=? AND status='reserved'", (channel_id,message_id,generation,original_channel_name,now + AD_DURATIONS[duration[0]],now,order_id))
-        cur.execute("UPDATE ad_orders SET status='live',target_channel_id=?,published_at=COALESCE(published_at,?),updated_at=? WHERE guild_id=? AND id=? AND status IN ('paid','publishing')", (channel_id,int(time.time()),int(time.time()),guild_id,order_id))
+        cur.execute("UPDATE ad_orders SET status='live',target_channel_id=?,published_at=COALESCE(published_at,?),updated_at=? WHERE guild_id=? AND id=? AND status IN ('paid','publishing','needs_review')", (channel_id,int(time.time()),int(time.time()),guild_id,order_id))
         if cur.rowcount != 1: conn.rollback(); return {"status":"needs_review"}
         conn.commit(); return {"status":"live", "message_id": int(message_id)}
     except Exception: conn.rollback(); raise

@@ -35,6 +35,7 @@ from advertising_store import (
     set_ad_config,
     set_ad_price,
     settle_ad_payment,
+    settle_ad_cosmo_payment,
     submit_ad_content,
     update_ad_order,
 )
@@ -221,7 +222,7 @@ class AdPaymentView(discord.ui.View):
         self.order_id = int(order_id)
         self.advertiser_id = int(advertiser_id)
         self.channel_id = int(channel_id)
-        for method, label, emoji in (("credit", "ProBot Credits", "💳"), ("adamc", "AdamC", "🪙")):
+        for method, label, emoji in (("credit", "ProBot Credits", "💳"), ("adamc", "AdamC (÷5)", "🪙"), ("cosmo", "Cosmo تلقائي", "✨")):
             button = discord.ui.Button(
                 label=label,
                 emoji=emoji,
@@ -530,6 +531,8 @@ class Advertisements(commands.Cog):
         if existing_payment and existing_payment["status"] == "paid":
             return await interaction.response.send_message("✅ تم اعتماد الدفع بالفعل؛ استخدم زر إدخال الإعلان.", ephemeral=True)
         expected = int(order["total_payment"])
+        if method == "adamc":
+            expected //= 5
         owner_id = int(order["server_owner_id"] or interaction.guild.owner_id)
         try:
             create_ad_payment(
@@ -539,6 +542,16 @@ class Advertisements(commands.Cog):
         except ValueError:
             return await interaction.response.send_message("✅ تم اعتماد الدفع بالفعل؛ استخدم زر إدخال الإعلان.", ephemeral=True)
         command = f"#credit {owner_id} {expected} with tax" if method == "credit" else f"!transfer {owner_id} {expected}"
+        if method == "cosmo":
+            result = await asyncio.to_thread(settle_ad_cosmo_payment, interaction.guild.id, order_id, interaction.user.id)
+            if result["status"] == "insufficient_balance":
+                return await interaction.response.send_message("❌ رصيد Cosmo الشخصي غير كافٍ؛ لم تُخصم أي عملة.", ephemeral=True)
+            if result["status"] not in {"paid", "already_paid"}:
+                return await interaction.response.send_message("⚠️ تعذر إتمام دفع Cosmo؛ تم تحويل الطلب للمراجعة.", ephemeral=True)
+            view = AdContentSubmitView(self.bot, interaction.guild.id, order_id)
+            self.bot.add_view(view)
+            await interaction.response.send_message("✅ تم تحويل Cosmo تلقائيًا إلى صاحب السيرفر. اضغط زر إدخال الإعلان.", ephemeral=True)
+            return await interaction.channel.send(f"✅ تم تأكيد دفع الإعلان #{order_id}. اضغط الزر لإدخال محتوى الإعلان.", view=view)
         await interaction.response.send_message(
             f"💳 حوّل `{expected:,}` إلى صاحب السيرفر باستخدام الأمر التالي داخل هذه التذكرة، ثم انتظر إيصال البوت هنا:\n```{command}```",
             ephemeral=True,
@@ -585,13 +598,15 @@ class Advertisements(commands.Cog):
         )
         if not saved:
             return await interaction.response.send_message("❌ لا يمكن تعديل هذا الطلب في حالته الحالية.", ephemeral=True)
-        await interaction.response.send_message("✅ تم فحص محتوى الإعلان وحفظه للمراجعة.", ephemeral=True)
+        update_ad_order(interaction.guild.id, order_id, status="queued")
+        await interaction.response.send_message("✅ تم فحص محتوى الإعلان وإدخاله في النشر التلقائي.", ephemeral=True)
         embed = discord.Embed(title=title.strip(), description=cleaned_content, color=discord.Color.gold())
         await interaction.channel.send(
-            f"📨 تم استلام محتوى الإعلان #{order_id} للمراجعة. سيقوم طاقم الإدارة بمراجعته ونشره.",
+            f"📨 تم استلام محتوى الإعلان #{order_id} وسيتم نشره تلقائيًا عند توفر القناة والحد اليومي.",
             embed=embed,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        await self._publish_next_queued(interaction.guild)
 
     @tasks.loop(seconds=30)
     async def ad_expiry_worker(self):
@@ -820,19 +835,26 @@ class Advertisements(commands.Cog):
             return await ctx.send("❌ لم أجد طلب إعلان صالحًا داخل هذه التذكرة.")
         if order["advertiser_id"] == ctx.guild.owner_id:
             return await ctx.send("✅ صاحب السيرفر لا يحتاج إلى دفع؛ سيتم الحجز من ميزانية السيرفر عند النشر.")
-        if method not in {"credit", "adamc"}:
-            return await ctx.send("❌ طريقة الدفع يجب أن تكون `credit` أو `adamc`.")
+        if method not in {"credit", "adamc", "cosmo"}:
+            return await ctx.send("❌ طريقة الدفع يجب أن تكون `credit` أو `adamc` أو `cosmo`.")
         if order["status"] not in {"draft", "awaiting_payment", "queued"}:
             return await ctx.send("❌ حالة الطلب لا تسمح ببدء الدفع الآن.")
         existing_payment = get_ad_payment(ctx.guild.id, order_id)
         if existing_payment and existing_payment["status"] == "paid":
             return await ctx.send("✅ تم اعتماد الدفع بالفعل؛ استخدم زر إدخال الإعلان.")
         expected = int(order["total_payment"])
+        if method == "adamc":
+            expected //= 5
         try:
             create_ad_payment(ctx.guild.id, order_id, method, expected, recipient_id=int(ctx.guild.owner_id), channel_id=int(ctx.channel.id))
         except ValueError:
             return await ctx.send("✅ تم اعتماد الدفع بالفعل؛ استخدم زر إدخال الإعلان.")
         owner_id = int(ctx.guild.owner_id)
+        if method == "cosmo":
+            result = await asyncio.to_thread(settle_ad_cosmo_payment, ctx.guild.id, order_id, ctx.author.id)
+            if result["status"] == "insufficient_balance":
+                return await ctx.send("❌ رصيد Cosmo الشخصي غير كافٍ؛ لم تُخصم أي عملة.")
+            return await ctx.send("✅ تم تحويل Cosmo تلقائيًا إلى صاحب السيرفر." if result["status"] in {"paid", "already_paid"} else "⚠️ تعذر إتمام دفع Cosmo؛ تم تحويل الطلب للمراجعة.")
         command = f"#credit {owner_id} {expected} with tax" if method == "credit" else f"!transfer {owner_id} {expected}"
         await ctx.send(f"💳 حوّل `{expected:,}` إلى صاحب السيرفر <@{owner_id}> باستخدام:\n```{command}```\nثم انتظر إيصال البوت داخل هذه التذكرة.")
 
@@ -873,11 +895,15 @@ class Advertisements(commands.Cog):
                     view=view,
                 )
             else:
-                await message.channel.send(f"✅ تم تأكيد دفع الإعلان #{order_id}. أصبح الطلب جاهزًا لمراجعة الإدارة.")
+                await message.channel.send(f"✅ تم تأكيد دفع الإعلان #{order_id}. سيدخل النشر التلقائي الآن.")
+                paid_order = get_ad_order(message.guild.id, order_id)
+                if paid_order and paid_order["status"] == "paid":
+                    update_ad_order(message.guild.id, order_id, status="queued")
+                await self._publish_next_queued(message.guild)
 
     async def _publish_order(self, guild: discord.Guild, order_id: int, channel: discord.TextChannel):
         order = get_ad_order(guild.id, order_id)
-        if not order or order["status"] not in {"paid", "publishing"} or not order["title"] or not order["content"]:
+        if not order or order["status"] not in {"paid", "publishing", "needs_review"} or not order["title"] or not order["content"]:
             return {"status": "needs_review", "error": "order is not publishable"}
         config = get_ad_config(guild.id)
         if not channel or channel.guild.id != guild.id or channel.id not in config["channels"]:
@@ -921,6 +947,16 @@ class Advertisements(commands.Cog):
         if result["status"] != "live":
             return await ctx.send("⚠️ تعذر النشر؛ تم نقل الطلب إلى `needs_review` دون خصم إضافي.")
         await ctx.send(f"✅ تم نشر الإعلان #{order_id} في {channel.mention}.", allowed_mentions=discord.AllowedMentions.none())
+
+    @commands.hybrid_command(name="ad_rejection", aliases=["رفض_الإعلان"], description="رفض طلب إعلان متوقف للمراجعة اليدوية")
+    async def ad_rejection(self, ctx: commands.Context, order_id: int, reason: str = "رفض من الإدارة"):
+        if not premium_required(ctx) or not can_manage_ads(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لإدارة سيرفر Premium فقط.")
+        order = get_ad_order(ctx.guild.id, order_id)
+        if not order or order["status"] != "needs_review":
+            return await ctx.send("⚠️ لا يوجد طلب إعلان يحتاج رفضًا يدويًا بهذه الحالة.")
+        update_ad_order(ctx.guild.id, order_id, status="cancelled", cancel_reason=reason[:1000])
+        await ctx.send(f"✅ تم رفض الإعلان #{order_id} وتسجيل السبب: {reason[:500]}")
 
     @commands.hybrid_command(name="ad_finish", aliases=["إنهاء_جيف_الإعلان"], description="إنهاء جيف الإعلان وتسجيل الفائزين للمراجعة")
     async def ad_finish(self, ctx: commands.Context, order_id: int, winners: str):

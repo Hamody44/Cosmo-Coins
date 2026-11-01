@@ -44,7 +44,7 @@ class AdvertisementWizardValidationTests(unittest.TestCase):
         self.assertEqual(len(durations.children), 2)
         self.assertTrue(durations.is_persistent())
         self.assertEqual(len(mention.children), 2)
-        self.assertEqual(len(payment.children), 2)
+        self.assertEqual(len(payment.children), 3)
         self.assertTrue(payment.is_persistent())
         self.assertEqual(len(content.children), 1)
         self.assertTrue(content.is_persistent())
