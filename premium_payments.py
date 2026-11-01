@@ -8,12 +8,15 @@ from contextlib import closing
 from decimal import Decimal, InvalidOperation, ROUND_UP
 import database
 
-PREMIUM_METHODS = {"credit", "adamc", "cosmo", "crypto"}
+PREMIUM_METHODS = {"credit", "adamc", "rob", "cosmo", "crypto"}
 PREMIUM_PROVIDER_ORDER_RE = re.compile(r"premium:(\d{1,20}):([0-9a-f]{32})")
 
 def _global_schema():
     with closing(sqlite3.connect(database.GLOBAL_DB_PATH, timeout=10)) as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS premium_prices (duration TEXT PRIMARY KEY, duration_seconds INTEGER NOT NULL, credit INTEGER NOT NULL, adamc INTEGER NOT NULL, cosmo INTEGER NOT NULL, crypto_usd TEXT NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS premium_prices (duration TEXT PRIMARY KEY, duration_seconds INTEGER NOT NULL, credit INTEGER NOT NULL, adamc INTEGER NOT NULL, cosmo INTEGER NOT NULL, crypto_usd TEXT NOT NULL, rob INTEGER)")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(premium_prices)").fetchall()}
+        if "rob" not in columns:
+            conn.execute("ALTER TABLE premium_prices ADD COLUMN rob INTEGER")
         conn.execute("CREATE TABLE IF NOT EXISTS global_settings (key TEXT PRIMARY KEY, value INTEGER)")
         conn.commit()
 
@@ -50,18 +53,19 @@ def _set(key, value):
 def set_price(duration, duration_seconds, prices):
     if not re.fullmatch(r"\d+[smhdw]", duration.lower()) or duration_seconds <= 0: raise ValueError("invalid duration")
     vals = [int(prices[m]) for m in ("credit", "adamc", "cosmo")]
+    rob = int(prices["rob"]) if prices.get("rob") is not None else None
     usd = Decimal(str(prices["crypto_usd"])).quantize(Decimal("0.01"))
-    if any(v <= 0 for v in vals) or usd < Decimal("0.10"): raise ValueError("prices must be positive and crypto must be at least $0.10")
+    if any(v <= 0 for v in vals) or (rob is not None and rob <= 0) or usd < Decimal("0.10"): raise ValueError("prices must be positive and crypto must be at least $0.10")
     _global_schema()
     with closing(sqlite3.connect(database.GLOBAL_DB_PATH, timeout=10)) as c:
-        c.execute("INSERT INTO premium_prices VALUES(?,?,?,?,?,?) ON CONFLICT(duration) DO UPDATE SET duration_seconds=excluded.duration_seconds,credit=excluded.credit,adamc=excluded.adamc,cosmo=excluded.cosmo,crypto_usd=excluded.crypto_usd", (duration.lower(), int(duration_seconds), *vals, format(usd, 'f'))); c.commit()
+        c.execute("INSERT INTO premium_prices(duration,duration_seconds,credit,adamc,cosmo,crypto_usd,rob) VALUES(?,?,?,?,?,?,?) ON CONFLICT(duration) DO UPDATE SET duration_seconds=excluded.duration_seconds,credit=excluded.credit,adamc=excluded.adamc,cosmo=excluded.cosmo,crypto_usd=excluded.crypto_usd,rob=COALESCE(excluded.rob,premium_prices.rob)", (duration.lower(), int(duration_seconds), *vals, format(usd, 'f'), rob)); c.commit()
 
 def get_price(duration):
     _global_schema()
     with closing(sqlite3.connect(database.GLOBAL_DB_PATH, timeout=10)) as c:
-        row = c.execute("SELECT duration,duration_seconds,credit,adamc,cosmo,crypto_usd FROM premium_prices WHERE duration=?", (duration.lower(),)).fetchone()
+        row = c.execute("SELECT duration,duration_seconds,credit,adamc,cosmo,crypto_usd,rob FROM premium_prices WHERE duration=?", (duration.lower(),)).fetchone()
     if not row: return None
-    return {"duration":row[0], "duration_seconds":int(row[1]), "credit":int(row[2]), "adamc":int(row[3]), "cosmo":int(row[4]), "crypto_usd":Decimal(row[5])}
+    return {"duration":row[0], "duration_seconds":int(row[1]), "credit":int(row[2]), "adamc":int(row[3]), "cosmo":int(row[4]), "crypto_usd":Decimal(row[5]), "rob":int(row[6]) if row[6] is not None else None}
 
 def _ensure_orders(conn):
     conn.execute("CREATE TABLE IF NOT EXISTS premium_payment_orders (id INTEGER PRIMARY KEY AUTOINCREMENT,guild_id INTEGER NOT NULL,user_id INTEGER NOT NULL,payer_name TEXT NOT NULL DEFAULT '',channel_id INTEGER NOT NULL,method TEXT NOT NULL,duration TEXT NOT NULL,duration_seconds INTEGER NOT NULL,expected_payment INTEGER,quote_usd TEXT,provider_order_id TEXT UNIQUE,provider_payment_id TEXT UNIQUE,status TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,payment_message_id INTEGER UNIQUE,payment_author_id INTEGER,paid_at INTEGER)")
@@ -96,14 +100,19 @@ def fail_order(guild_id, order_id):
     finally: conn.close()
 
 def settle_receipt(guild_id, method, channel_id, payer_name, amount, message_id, author_id, timestamp, recipient_id):
-    expected_bot={"credit":database.PROBOT_PAYMENT_BOT_ID,"adamc":database.ADAMC_PAYMENT_BOT_ID}.get(method)
+    expected_bot={"credit":database.PROBOT_PAYMENT_BOT_ID,"adamc":database.ADAMC_PAYMENT_BOT_ID,"rob":database.ROB_PAYMENT_BOT_ID}.get(method)
     if not expected_bot or int(author_id)!=expected_bot or int(recipient_id)!=database.PRIMARY_OWNER_ID: return None
     payer_name = str(payer_name).strip().casefold()
-    if not payer_name: return None
+    if not payer_name and method != "rob": return None
     conn,_=database.get_guild_db(guild_id)
     try:
         _ensure_orders(conn); conn.execute("BEGIN IMMEDIATE")
-        row=conn.execute("SELECT id,user_id,duration_seconds,status FROM premium_payment_orders WHERE guild_id=? AND method=? AND channel_id=? AND payer_name=? AND expected_payment=? AND status='pending' AND created_at<=? AND expires_at>=? ORDER BY id LIMIT 1",(guild_id,method,channel_id,payer_name,int(amount),int(timestamp),int(timestamp))).fetchone()
+        if method == "rob":
+            rows=conn.execute("SELECT id,user_id,duration_seconds,status FROM premium_payment_orders WHERE guild_id=? AND method=? AND channel_id=? AND expected_payment=? AND status='pending' AND created_at<=? AND expires_at>=? ORDER BY id",(guild_id,method,channel_id,int(amount),int(timestamp),int(timestamp))).fetchall()
+            if len(rows) != 1: conn.rollback(); return None
+            row=rows[0]
+        else:
+            row=conn.execute("SELECT id,user_id,duration_seconds,status FROM premium_payment_orders WHERE guild_id=? AND method=? AND channel_id=? AND payer_name=? AND expected_payment=? AND status='pending' AND created_at<=? AND expires_at>=? ORDER BY id LIMIT 1",(guild_id,method,channel_id,payer_name,int(amount),int(timestamp),int(timestamp))).fetchone()
         if not row: conn.rollback(); return None
         order_id,user_id,duration,status=row
         cur=conn.execute("UPDATE premium_payment_orders SET status='paid',payment_message_id=?,payment_author_id=?,paid_at=? WHERE id=? AND status='pending'",(message_id,author_id,timestamp,order_id))

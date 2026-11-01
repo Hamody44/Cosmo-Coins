@@ -32,7 +32,7 @@ class PremiumPaymentTests(unittest.TestCase):
         pp.set_purchase_enabled(True)
         for method in pp.PREMIUM_METHODS:
             pp.set_method_enabled(method, True)
-        pp.set_price("30d", 30 * 86400, {"credit": 100, "adamc": 90, "cosmo": 1000, "crypto_usd": "2.50"})
+        pp.set_price("30d", 30 * 86400, {"credit": 100, "adamc": 90, "cosmo": 1000, "crypto_usd": "2.50", "rob": 26})
 
     def cleanup(self):
         database.GLOBAL_DB_PATH = self.old_path
@@ -42,6 +42,7 @@ class PremiumPaymentTests(unittest.TestCase):
         price = pp.get_price("30d")
         self.assertEqual(price["duration_seconds"], 30 * 86400)
         self.assertEqual(price["crypto_usd"], pp.Decimal("2.50"))
+        self.assertEqual(price["rob"], 26)
         pp.set_method_enabled("adamc", False)
         self.assertFalse(pp.method_enabled("adamc"))
         self.assertIsNone(pp.create_order(1, 2, 3, "adamc", "30d", 30 * 86400, 90, created_at=100, expires_at=200))
@@ -98,6 +99,55 @@ class PremiumPaymentCommandTests(unittest.TestCase):
             _payment_command("adamc", 90),
             f"!transfer {database.PRIMARY_OWNER_ID} 90",
         )
+
+    def test_rob_uses_transfer_command(self):
+        self.assertEqual(
+            _payment_command("rob", 26),
+            f"!transfer {database.PRIMARY_OWNER_ID} 26",
+        )
+
+
+class RobPaymentSettlementTests(unittest.TestCase):
+    def setUp(self):
+        PremiumPaymentTests.setUp(self)
+
+    def cleanup(self):
+        PremiumPaymentTests.cleanup(self)
+
+    def test_unique_rob_receipt_settles_matching_order_without_sender_name(self):
+        order = pp.create_order(1, 2, 3, "rob", "30d", 30 * 86400, 26, created_at=100, expires_at=200)
+        result = pp.settle_receipt(
+            1, "rob", 3, "", 26, 501, database.ROB_PAYMENT_BOT_ID, 150, database.PRIMARY_OWNER_ID,
+        )
+        self.assertEqual(result["order_id"], order["order_id"])
+        self.assertEqual(result["status"], "paid")
+
+    def test_rob_receipt_for_another_recipient_is_ignored(self):
+        order = pp.create_order(1, 2, 3, "rob", "30d", 30 * 86400, 26, created_at=100, expires_at=200)
+        result = pp.settle_receipt(
+            1, "rob", 3, "", 26, 503, database.ROB_PAYMENT_BOT_ID, 150, 1525636354732593285,
+        )
+        self.assertIsNone(result)
+        with sqlite3.connect(self.guild_db) as conn:
+            status = conn.execute(
+                "SELECT status FROM premium_payment_orders WHERE id=?",
+                (order["order_id"],),
+            ).fetchone()[0]
+        self.assertEqual(status, "pending")
+
+    def test_ambiguous_rob_receipt_does_not_settle_either_order(self):
+        first = pp.create_order(1, 2, 3, "rob", "30d", 30 * 86400, 26, created_at=100, expires_at=200)
+        second = pp.create_order(1, 4, 3, "rob", "30d", 30 * 86400, 26, created_at=101, expires_at=201)
+        result = pp.settle_receipt(
+            1, "rob", 3, "", 26, 502, database.ROB_PAYMENT_BOT_ID, 150, database.PRIMARY_OWNER_ID,
+        )
+        self.assertIsNone(result)
+        with sqlite3.connect(self.guild_db) as conn:
+            statuses = conn.execute(
+                "SELECT status FROM premium_payment_orders WHERE id IN (?, ?) ORDER BY id",
+                (first["order_id"], second["order_id"]),
+            ).fetchall()
+        self.assertEqual(statuses, [("pending",), ("pending",)])
 
 
 if __name__ == "__main__":

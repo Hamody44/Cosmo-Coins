@@ -10,6 +10,7 @@ import database
 from cogs.admin import (
     Admin,
     ADAMC_ID,
+    ROB_ID,
     AutoBudgetCommandButton,
     PRIMARY_OWNER_ID,
     PROBOT_ID,
@@ -86,17 +87,21 @@ class AutoBudgetPaymentTests(unittest.TestCase):
         probot_text = "**ـ new.3mk, قام بتحويل `$100000000` لـ <@!988840428591808584> ** |:moneybag:"
         probot_english_text = "**:moneybag: | .o4rv, has transferred `$24000000` to <@!988840428591808584> **"
         adamc_text = "💰 | **x_x_x.1**, has transferred **$1,000,000** to <@988840428591808584>."
+        rob_text = "تم تحويل **26** روبوكس لـ <@988840428591808584>!\nملاحظة هذا التحويل لم يكن موجها لي"
 
         probot = parse_budget_payment_confirmation("credit", PROBOT_ID, probot_text)
         probot_english = parse_budget_payment_confirmation("credit", PROBOT_ID, probot_english_text)
         adamc = parse_budget_payment_confirmation("adamc", ADAMC_ID, adamc_text)
+        rob = parse_budget_payment_confirmation("rob", ROB_ID, rob_text)
 
         self.assertEqual(probot, {"sender": "new.3mk", "amount": 100_000_000, "recipient_id": PRIMARY_OWNER_ID})
         self.assertEqual(probot_english, {"sender": ".o4rv", "amount": 24_000_000, "recipient_id": PRIMARY_OWNER_ID})
         self.assertEqual(adamc, {"sender": "x_x_x.1", "amount": 1_000_000, "recipient_id": PRIMARY_OWNER_ID})
+        self.assertEqual(rob, {"sender": "", "amount": 26, "recipient_id": PRIMARY_OWNER_ID})
         self.assertIsNone(parse_budget_payment_confirmation("credit", 123, probot_text))
         self.assertIsNone(parse_budget_payment_confirmation("credit", ADAMC_ID, probot_english_text))
         self.assertIsNone(parse_budget_payment_confirmation("adamc", PROBOT_ID, adamc_text))
+        self.assertIsNone(parse_budget_payment_confirmation("rob", ADAMC_ID, rob_text))
 
     def test_payment_methods_default_closed_and_owner_can_toggle_each(self):
         for method in ("credit", "adamc", "crypto"):

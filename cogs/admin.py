@@ -23,7 +23,7 @@ from database import (
     create_crypto_budget_payment_order, update_crypto_budget_payment_order,
     fail_crypto_budget_payment_order, transfer_balance_to_server_budget,
     set_auto_budget_payment_enabled, set_global_exchange_enabled,
-    PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID, guarded_server_budget_credit, record_audit,
+    PROBOT_PAYMENT_BOT_ID, ADAMC_PAYMENT_BOT_ID, ROB_PAYMENT_BOT_ID, guarded_server_budget_credit, record_audit,
     EXCHANGE_BASE_COSMO, format_exchange_amount
 )
 from ltcpay import (
@@ -34,6 +34,7 @@ from cogs.tickets import sync_ticket_staff_roles
 
 PROBOT_ID = PROBOT_PAYMENT_BOT_ID
 ADAMC_ID = ADAMC_PAYMENT_BOT_ID
+ROB_ID = ROB_PAYMENT_BOT_ID
 AUTO_BUDGET_PAYMENT_TTL = 5 * 60
 MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
@@ -57,7 +58,7 @@ def available_budget_payment_methods(is_manager: bool, personal_balance: int, bu
 def parse_budget_payment_confirmation(method: str, author_id: int, text: str):
     """Parse only the user-provided receipt shape; caller must also validate message guild/channel/time."""
     method = method.strip().lower()
-    expected_author = {"credit": PROBOT_ID, "adamc": ADAMC_ID}.get(method)
+    expected_author = {"credit": PROBOT_ID, "adamc": ADAMC_ID, "rob": ROB_ID}.get(method)
     if not expected_author or int(author_id) != expected_author:
         return None
     if method == "credit":
@@ -70,6 +71,10 @@ def parse_budget_payment_confirmation(method: str, author_id: int, text: str):
                 re.IGNORECASE,
             ),
         ]
+    elif method == "rob":
+        patterns = [re.compile(
+            r"تم\s+تحويل\s+\*\*(?P<amount>[\d,]+)\*\*\s+روبوكس\s+لـ\s*<@!?(?P<recipient>\d+)>"
+        )]
     else:
         patterns = [re.compile(
             r"💰\s*\|\s*\*\*(?P<sender>[^*\n]+?)\*\*,\s*has transferred\s+\*\*\$?(?P<amount>[\d,]+)\*\*\s+to\s+<@!?(?P<recipient>\d+)>",
@@ -87,8 +92,9 @@ def parse_budget_payment_confirmation(method: str, author_id: int, text: str):
         recipient_id = int(match.group("recipient"))
     except (TypeError, ValueError):
         return None
-    sender = unicodedata.normalize("NFKC", match.group("sender")).strip().casefold()
-    if not sender or amount <= 0:
+    sender_value = match.groupdict().get("sender") or ""
+    sender = unicodedata.normalize("NFKC", sender_value).strip().casefold()
+    if (not sender and method != "rob") or amount <= 0:
         return None
     return {"sender": sender, "amount": amount, "recipient_id": recipient_id}
 

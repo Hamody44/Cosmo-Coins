@@ -9,7 +9,7 @@ from cogs.admin import parse_budget_payment_confirmation
 from ltcpay import create_ltc_invoice, format_usd, LTCPayError
 import premium_payments as pp
 
-METHOD_LABELS = {"credit":"ProBot", "adamc":"AdamC", "cosmo":"رصيد Cosmo", "crypto":"LTC"}
+METHOD_LABELS = {"credit":"ProBot", "adamc":"AdamC", "rob":"Rob", "cosmo":"رصيد Cosmo", "crypto":"LTC"}
 
 def _manager(ctx):
     p = getattr(ctx.author, "guild_permissions", None)
@@ -26,12 +26,14 @@ def _payment_command(method, amount):
         return f"#credit {PRIMARY_OWNER_ID} {int(amount)} with tax"
     if method == "adamc":
         return f"!transfer {PRIMARY_OWNER_ID} {int(amount)}"
+    if method == "rob":
+        return f"!transfer {PRIMARY_OWNER_ID} {int(amount)}"
     raise ValueError("unsupported manual payment method")
 
 class PremiumSelect(discord.ui.Select):
     def __init__(self, cog, ctx, duration, price):
         self.cog, self.ctx, self.duration, self.price = cog, ctx, duration, price
-        methods = [m for m in ("credit", "adamc", "cosmo", "crypto") if pp.method_enabled(m)]
+        methods = [m for m in ("credit", "adamc", "rob", "cosmo", "crypto") if pp.method_enabled(m) and (m != "rob" or price.get("rob") is not None)]
         options = [discord.SelectOption(label=f"{METHOD_LABELS[m]} — {price[m] if m != 'crypto' else '$'+format(price[m], 'f')}", value=m) for m in methods]
         super().__init__(placeholder="اختر طريقة الدفع", options=options, min_values=1, max_values=1)
     async def callback(self, interaction):
@@ -62,7 +64,11 @@ class PremiumSelect(discord.ui.Select):
                 await asyncio.to_thread(pp.fail_order, interaction.guild_id, result["order_id"])
                 return await interaction.response.send_message("⚠️ تعذر إنشاء فاتورة LTC؛ لم يتم التفعيل.", ephemeral=True)
         command = _payment_command(method, expected)
-        return await interaction.response.edit_message(content=f"💳 حوّل `{expected:,}` إلى مالك البوت عبر {METHOD_LABELS[method]} خلال 10 دقائق. يجب أن يطابق اسم الحساب والمبلغ والمستلم والوقت.", view=PremiumCommandView(interaction.user.id, command))
+        receipt_requirements = (
+            "يجب أن يطابق المبلغ والمستلم والقناة والوقت، وألا يوجد طلب Rob آخر مطابق في القناة."
+            if method == "rob" else "يجب أن يطابق اسم الحساب والمبلغ والمستلم والوقت."
+        )
+        return await interaction.response.edit_message(content=f"💳 حوّل `{expected:,}` إلى مالك البوت عبر {METHOD_LABELS[method]} خلال 10 دقائق. {receipt_requirements}", view=PremiumCommandView(interaction.user.id, command))
 
 class PremiumCommandView(discord.ui.View):
     def __init__(self, user_id, command):
@@ -85,14 +91,14 @@ class Premium(commands.Cog):
         if not pp.purchase_enabled(): return await ctx.send("⛔ شراء Premium مغلق حاليًا.")
         price = pp.get_price(duration)
         if not price: return await ctx.send("❌ هذه المدة غير مسعرة. استخدم مدة مثل `30d`.")
-        methods = [m for m in ("credit", "adamc", "cosmo", "crypto") if pp.method_enabled(m)]
+        methods = [m for m in ("credit", "adamc", "rob", "cosmo", "crypto") if pp.method_enabled(m) and (m != "rob" or price.get("rob") is not None)]
         if not methods: return await ctx.send("⛔ لا توجد طريقة دفع مفعلة.")
         await ctx.send(f"💎 اختر طريقة دفع Premium لمدة `{duration}` للسيرفر الحالي:", view=PremiumView(self, ctx, duration, price))
 
     @commands.command(name="set_premium_price")
-    async def set_premium_price(self, ctx, duration: str, credit: int, adamc: int, cosmo: int, crypto_usd: str):
+    async def set_premium_price(self, ctx, duration: str, credit: int, adamc: int, cosmo: int, crypto_usd: str, rob: int | None = None):
         if not await check_is_owner(self.bot, ctx): return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
-        try: seconds = parse_duration(duration); pp.set_price(duration, seconds, {"credit":credit,"adamc":adamc,"cosmo":cosmo,"crypto_usd":crypto_usd})
+        try: seconds = parse_duration(duration); pp.set_price(duration, seconds, {"credit":credit,"adamc":adamc,"cosmo":cosmo,"crypto_usd":crypto_usd,"rob":rob})
         except (ValueError, TypeError, Exception): return await ctx.send("❌ صيغة أو أسعار غير صالحة.")
         await ctx.send(f"✅ تم حفظ سعر Premium لمدة `{duration}`.")
 
@@ -114,7 +120,7 @@ class Premium(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message):
         if not message.guild or not message.author.bot: return
-        method = "credit" if message.author.id == database.PROBOT_PAYMENT_BOT_ID else "adamc" if message.author.id == database.ADAMC_PAYMENT_BOT_ID else None
+        method = "credit" if message.author.id == database.PROBOT_PAYMENT_BOT_ID else "adamc" if message.author.id == database.ADAMC_PAYMENT_BOT_ID else "rob" if message.author.id == database.ROB_PAYMENT_BOT_ID else None
         if not method: return
         parts = [message.content or ""] + [e.description or "" for e in message.embeds]
         receipt = parse_budget_payment_confirmation(method, message.author.id, "\n".join(parts))
