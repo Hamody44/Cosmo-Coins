@@ -961,7 +961,7 @@ class Advertisements(commands.Cog):
             embed.add_field(name="👥 المشاركون", value="0", inline=True)
             embed.add_field(name="⏱️ مدة الجيف", value=duration_labels.get(order["duration_key"], order["duration_key"]), inline=True)
             embed.add_field(name="✅ شرط الاستلام", value="دخول السيرفر", inline=False)
-            embed.add_field(name="⚠️ تنويه", value="هذا إعلان لسيرفر مستقل؛ يُرجى مراجعة محتواه والتأكد من ملاءمته لك قبل الانضمام.", inline=False)
+            embed.add_field(name="⚠️ تنويه", value="هذا إعلان لسيرفر مستقل؛ لا نتحمل أي شيء يحدث بالداخل.", inline=False)
             embed.set_footer(text=f"إعلان #{order_id}")
             if order.get("media_url"):
                 embed.set_image(url=order["media_url"])
