@@ -3,6 +3,8 @@ from discord.ext import commands
 import random
 import asyncio
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from database import (
     get_balance, parse_amount, generate_captcha_image,
     is_blacklisted, is_bot_admin, global_cursor, get_guild_db, PRIMARY_OWNER_ID,
@@ -25,6 +27,51 @@ def can_manage_exchange_request(ctx: commands.Context, origin_guild_id: int) -> 
     if permissions and (permissions.administrator or permissions.manage_guild):
         return True
     return is_bot_admin(ctx)
+
+def exchange_delivery_commands(user_id: int, amount) -> dict[str, str]:
+    """Build compact payout commands without thousands separators."""
+    try:
+        value = Decimal(str(amount))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("مبلغ التسليم غير صالح.") from exc
+    if not value.is_finite() or value <= 0 or int(user_id) <= 0:
+        raise ValueError("مبلغ أو مستلم التسليم غير صالح.")
+    amount_text = format(value.normalize(), "f")
+    return {
+        "credit": f"#credit {int(user_id)} {amount_text} with tax",
+        "transfer": f"!transfer {int(user_id)} {amount_text}",
+    }
+
+class ExchangeDeliveryView(discord.ui.View):
+    def __init__(self, origin_guild_id: int, user_id: int, amount):
+        super().__init__(timeout=24 * 60 * 60)
+        self.origin_guild_id = int(origin_guild_id)
+        self.commands = exchange_delivery_commands(user_id, amount)
+
+    async def _copy_command(self, interaction: discord.Interaction, command: str):
+        context = SimpleNamespace(
+            author=interaction.user,
+            guild=interaction.guild,
+            channel=interaction.channel,
+        )
+        if not can_manage_exchange_request(context, self.origin_guild_id):
+            return await interaction.response.send_message(
+                "⛔ هذا الأمر متاح لمالك البوت أو إدارة السيرفر صاحب الطلب فقط.",
+                ephemeral=True,
+            )
+        await interaction.response.send_message(
+            command,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @discord.ui.button(label="نسخ #credit (ProBot)", style=discord.ButtonStyle.primary, emoji="📋")
+    async def copy_credit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._copy_command(interaction, self.commands["credit"])
+
+    @discord.ui.button(label="نسخ !transfer", style=discord.ButtonStyle.secondary, emoji="📋")
+    async def copy_transfer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._copy_command(interaction, self.commands["transfer"])
 
 class Economy(commands.Cog):
     def __init__(self, bot):
@@ -303,7 +350,10 @@ class Economy(commands.Cog):
         embed.set_footer(text=f"للقبول: /accept_exchange {req_id} | للرفض: /deny_exchange {req_id}")
 
         try:
-            await req_channel.send(embed=embed)
+            await req_channel.send(
+                embed=embed,
+                view=ExchangeDeliveryView(ctx.guild.id, ctx.author.id, total_received),
+            )
         except discord.HTTPException:
             deny_exchange_request(req_id)
             return await ctx.send("❌ تعذر إرسال الطلب للإدارة؛ أُعيد رصيدك تلقائياً.")
