@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import database
 import premium_payments as pp
+from cogs.premium import _payment_command
 
 
 class PremiumPaymentTests(unittest.TestCase):
@@ -83,6 +84,20 @@ class PremiumPaymentTests(unittest.TestCase):
         result = pp.process_webhook(event, invoice)
         self.assertEqual(result["status"], "paid")
         self.assertEqual(pp.process_webhook(event, invoice)["status"], "duplicate")
+
+
+class PremiumPaymentCommandTests(unittest.TestCase):
+    def test_probot_uses_credit_command_with_tax(self):
+        self.assertEqual(
+            _payment_command("credit", 100),
+            f"#credit {database.PRIMARY_OWNER_ID} 100 with tax",
+        )
+
+    def test_adamc_uses_transfer_command(self):
+        self.assertEqual(
+            _payment_command("adamc", 90),
+            f"!transfer {database.PRIMARY_OWNER_ID} 90",
+        )
 
 
 if __name__ == "__main__":
