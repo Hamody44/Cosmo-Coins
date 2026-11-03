@@ -369,7 +369,8 @@ class Advertisements(commands.Cog):
             return
         try:
             member = guild.get_member(int(user_id)) or await guild.fetch_member(int(user_id))
-            if role not in member.roles:
+            member_role_ids = {int(getattr(member_role, "id", 0)) for member_role in member.roles}
+            if int(role.id) not in member_role_ids:
                 await member.add_roles(role, reason="Confirmed advertising purchase")
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass

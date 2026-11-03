@@ -7,6 +7,30 @@ from database import ADAMC_PAYMENT_BOT_ID, PROBOT_PAYMENT_BOT_ID
 
 
 class AdvertisementPaymentListenerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_buyer_role_is_not_added_when_member_already_has_it(self):
+        role = SimpleNamespace(id=777)
+        member = SimpleNamespace(roles=[role], add_roles=AsyncMock())
+        guild = SimpleNamespace(
+            id=101,
+            get_role=MagicMock(return_value=role),
+            get_member=MagicMock(return_value=member),
+        )
+        with patch("cogs.advertisements.get_ad_config", return_value={"buyer_role_id": role.id}):
+            await Advertisements(SimpleNamespace())._grant_buyer_role(guild, 404)
+        member.add_roles.assert_not_awaited()
+
+    async def test_buyer_role_is_added_when_member_does_not_have_it(self):
+        role = SimpleNamespace(id=777)
+        member = SimpleNamespace(roles=[], add_roles=AsyncMock())
+        guild = SimpleNamespace(
+            id=101,
+            get_role=MagicMock(return_value=role),
+            get_member=MagicMock(return_value=member),
+        )
+        with patch("cogs.advertisements.get_ad_config", return_value={"buyer_role_id": role.id}):
+            await Advertisements(SimpleNamespace())._grant_buyer_role(guild, 404)
+        member.add_roles.assert_awaited_once_with(role, reason="Confirmed advertising purchase")
+
     async def assert_provider_receipt_is_settled(self, method, bot_id):
         guild_id = 101
         order_id = 303

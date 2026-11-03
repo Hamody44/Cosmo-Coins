@@ -82,9 +82,133 @@ class ManualExchangeDeliveryView(discord.ui.View):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+
+class _ExchangeInteractionContext:
+    """محول بسيط لإعادة استخدام أمر التبديل مع إبقاء الرد خاصًا."""
+
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.author = interaction.user
+        self.guild = interaction.guild
+        self.channel = interaction.channel
+
+    async def send(self, *args, **kwargs):
+        kwargs["ephemeral"] = True
+        if not self.interaction.response.is_done():
+            return await self.interaction.response.send_message(*args, **kwargs)
+        return await self.interaction.followup.send(*args, **kwargs)
+
+
+class ExchangeAmountModal(discord.ui.Modal, title="إرسال طلب تبديل"):
+    amount = discord.ui.TextInput(
+        label="المبلغ من رصيدك الأساسي",
+        placeholder="مثال: 10000000 أو 10m",
+        min_length=1,
+        max_length=32,
+        required=True,
+    )
+    note = discord.ui.TextInput(
+        label="ملاحظة (اختياري)",
+        placeholder="اكتب ملاحظة للإدارة أو اتركها فارغة",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+        required=False,
+    )
+
+    def __init__(self, cog, currency_name: str):
+        super().__init__()
+        self.cog = cog
+        self.currency_name = currency_name
+
+    async def on_submit(self, interaction: discord.Interaction):
+        context = _ExchangeInteractionContext(interaction)
+        await self.cog.exchange.callback(
+            self.cog,
+            context,
+            self.currency_name,
+            self.amount.value,
+            note=self.note.value.strip() or "لا يوجد",
+        )
+
+
+class ExchangeCurrencySelectView(discord.ui.View):
+    def __init__(self, cog, currencies):
+        super().__init__(timeout=300)
+        self.cog = cog
+        options = []
+        for name, rate, _active, minimum in currencies[:25]:
+            minimum_text = (
+                f" | حد أدنى {format_exchange_amount(float(minimum))}"
+                if minimum else ""
+            )
+            options.append(
+                discord.SelectOption(
+                    label=str(name)[:100],
+                    value=str(name)[:100],
+                    description=(
+                        f"1 Cosmo = {format_exchange_amount(float(rate))} {name}"
+                        f"{minimum_text}"
+                    )[:100],
+                )
+            )
+        select = discord.ui.Select(
+            placeholder="اختر العملة التي تريد استلامها...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+        async def on_select(interaction: discord.Interaction):
+            await interaction.response.send_modal(
+                ExchangeAmountModal(self.cog, select.values[0])
+            )
+
+        select.callback = on_select
+        self.add_item(select)
+
+
+class ExchangePanelView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="تبديل العملات",
+        style=discord.ButtonStyle.primary,
+        emoji="💱",
+        custom_id="exchange_panel_open",
+    )
+    async def open_exchange_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "❌ واجهة التبديل متاحة داخل السيرفرات فقط.", ephemeral=True
+            )
+        exchange_room_id = get_exchange_room_id(interaction.guild.id)
+        if exchange_room_id is not None and interaction.channel_id != exchange_room_id:
+            return await interaction.response.send_message(
+                f"⛔ استخدم زر التبديل داخل <#{exchange_room_id}> فقط.", ephemeral=True
+            )
+        if not is_global_exchange_enabled():
+            return await interaction.response.send_message(
+                "⛔ نظام التبديل مغلق عالميًا من سيرفر Cosmo حاليًا.", ephemeral=True
+            )
+        currencies = get_exchange_currencies(active_only=True)
+        if not currencies:
+            return await interaction.response.send_message(
+                "⚠️ لا توجد عملات مفعّلة للتبديل حاليًا.", ephemeral=True
+            )
+        await interaction.response.send_message(
+            "اختر العملة التي تريد استلامها، ثم اكتب المبلغ في النموذج التالي:",
+            view=ExchangeCurrencySelectView(self.cog, currencies),
+            ephemeral=True,
+        )
+
 class Economy(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    async def cog_load(self):
+        self.bot.add_view(ExchangePanelView(self))
 
     @commands.hybrid_command(name="balance", aliases=["رصيد", "bal"], description="معرفة رصيد العملات")
     async def balance(self, ctx: commands.Context, member: discord.Member = None):
@@ -263,6 +387,30 @@ class Economy(commands.Cog):
         embed.add_field(name="إجمالي الطلبات المقبولة", value=f"`{total_count:,}` عملية", inline=False)
         embed.add_field(name=f"إجمالي {get_currency_label(ctx.guild.id if ctx.guild else None)} المستبدلة", value=f"`{total_cosmo:,}` {get_currency_label(ctx.guild.id if ctx.guild else None)}", inline=False)
         await ctx.send(embed=embed)
+
+    @commands.hybrid_command(
+        name="exchange_panel",
+        aliases=["واجهة_التبديل", "تبديل_بالزر"],
+        description="إرسال واجهة Embed لطلبات تبديل العملات عبر زر",
+    )
+    async def exchange_panel(self, ctx: commands.Context):
+        if not ctx.guild:
+            return await ctx.send("❌ واجهة التبديل متاحة داخل السيرفرات فقط.")
+        exchange_room_id = get_exchange_room_id(ctx.guild.id)
+        if exchange_room_id is not None and ctx.channel.id != exchange_room_id:
+            return await ctx.send(f"⛔ استخدم أمر `exchange_panel` داخل <#{exchange_room_id}> فقط.")
+        label = get_currency_label(ctx.guild.id)
+        embed = discord.Embed(
+            title="💱 تبديل العملات",
+            description=(
+                f"اضغط الزر أدناه لاختيار العملة التي تريد استلامها.\n"
+                f"سيتم خصم المبلغ من رصيدك **{label}** بعد التحقق، ثم يُرسل الطلب إلى الإدارة.\n\n"
+                "سيظهر تأكيد الطلب لك بشكل خاص ولن يراه باقي الأعضاء."
+            ),
+            color=discord.Color.teal(),
+        )
+        embed.set_footer(text="Cosmo Currency System • Exchange")
+        await ctx.send(embed=embed, view=ExchangePanelView(self))
 
     @commands.hybrid_command(name="exchange", aliases=["تبديل"], description="طلب تبديل عملات Cosmo إلى عملة أخرى")
     async def exchange(self, ctx: commands.Context, currency_name: str, amount: str, *, note: str = "لا يوجد"):
