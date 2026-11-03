@@ -807,7 +807,7 @@ class Advertisements(commands.Cog):
         else:
             await ctx.send("✅ تم تعطيل رتبة مشتري الإعلان التلقائية.")
 
-    @commands.hybrid_command(name="ad_stats", aliases=["إحصائيات_الإعلانات"], description="عرض إحصائيات الإعلانات وأرباحها")
+    @commands.command(name="ad_stats", aliases=["إحصائيات_الإعلانات"], description="عرض إحصائيات الإعلانات وأرباحها")
     async def ad_stats(self, ctx: commands.Context):
         if not premium_required(ctx) or not can_manage_ads(ctx):
             return await ctx.send("⛔ هذا الأمر متاح لمالك أو إدارة سيرفر Premium فقط.")
@@ -842,7 +842,7 @@ class Advertisements(commands.Cog):
         remove_ad_channel(ctx.guild.id, channel.id)
         await ctx.send(f"✅ تمت إزالة {channel.mention} من رومات الإعلانات المسموحة.")
 
-    @commands.hybrid_command(name="ad_channels", aliases=["رومات_الإعلانات"], description="عرض رومات الإعلانات المسموحة والإعدادات")
+    @commands.command(name="ad_channels", aliases=["رومات_الإعلانات"], description="عرض رومات الإعلانات المسموحة والإعدادات")
     async def ad_channels(self, ctx: commands.Context):
         if not premium_required(ctx):
             return await ctx.send("⛔ نظام الإعلانات متاح لسيرفرات Premium فقط.")

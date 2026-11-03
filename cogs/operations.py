@@ -47,7 +47,7 @@ class Operations(commands.Cog):
         self.periodic_report_worker.cancel()
         self.exchange_expiry_worker.cancel()
 
-    @commands.hybrid_command(name="audit_log", aliases=["سجل_التدقيق"], description="عرض سجل التدقيق الموحّد للعمليات")
+    @commands.command(name="audit_log", aliases=["سجل_التدقيق"], description="عرض سجل التدقيق الموحّد للعمليات")
     async def audit_log(self, ctx: commands.Context, limit: int = 20):
         if not _has_guild_admin(ctx):
             return await ctx.send("⛔ لا تملك صلاحية عرض سجل التدقيق.")
@@ -158,14 +158,14 @@ class Operations(commands.Cog):
         await asyncio.to_thread(database.record_audit, "backup_created", actor_id=ctx.author.id, actor_name=ctx.author.display_name, reason="manual backup", after=result, source="discord")
         await ctx.send(f"✅ أُنشئت النسخة `{result['id']}` بعد فحص SQLite. الملفات: `{len(result['files'])}`، النتيجة: `{result['ok']}`. المسار محفوظ على الخادم.")
 
-    @commands.hybrid_command(name="backup_list", aliases=["قائمة_النسخ"], description="عرض النسخ الاحتياطية المتاحة")
+    @commands.command(name="backup_list", aliases=["قائمة_النسخ"], description="عرض النسخ الاحتياطية المتاحة")
     async def backup_list(self, ctx: commands.Context):
         if not await check_is_owner(self.bot, ctx):
             return await ctx.send("⛔ هذا الأمر متاح لمالك البوت فقط.")
         rows = await asyncio.to_thread(backup_service.list_backups, os.getcwd())
         await ctx.send("\n".join(f"• `{r['id']}` — ملفات `{r['files']}` — صالح: `{r['ok']}`" for r in rows[:20]) or "ℹ️ لا توجد نسخ.")
 
-    @commands.hybrid_command(name="backup_verify", aliases=["فحص_نسخة"], description="فحص نسخة واختبار استعادتها في مجلد مؤقت")
+    @commands.command(name="backup_verify", aliases=["فحص_نسخة"], description="فحص نسخة واختبار استعادتها في مجلد مؤقت")
     async def backup_verify(self, ctx: commands.Context, backup_id: str):
         if not await check_is_owner(self.bot, ctx):
             return await ctx.send("⛔ هذا الأمر متاح لمالك البوت فقط.")
@@ -191,7 +191,7 @@ class Operations(commands.Cog):
         ticket_text = ", ".join(("مغلقة" if closed else "مفتوحة") + f": {count}" for closed, count in tickets) or "لا يوجد"
         return discord.Embed(title=f"ملخص الإدارة | {guild.name}", description=f"آخر {period_seconds // 3600} ساعة", color=discord.Color.teal()).add_field(name="الميزانية الحالية", value=f"`{int(budget[0] if budget else 0):,}` Cosmo").add_field(name="المدفوعات", value=payment_text, inline=False).add_field(name="التذاكر", value=ticket_text).add_field(name="رسائل اللفلات", value=f"`{levels:,}`").add_field(name="عمليات التدقيق", value=f"`{len(events)}`")
 
-    @commands.hybrid_command(name="admin_summary", aliases=["ملخص_الإدارة"], description="إرسال ملخص إداري يومي أو أسبوعي الآن")
+    @commands.command(name="admin_summary", aliases=["ملخص_الإدارة"], description="إرسال ملخص إداري يومي أو أسبوعي الآن")
     async def admin_summary(self, ctx: commands.Context, period: str = "daily"):
         if not _has_guild_admin(ctx):
             return await ctx.send("⛔ لا تملك صلاحية عرض الملخص.")

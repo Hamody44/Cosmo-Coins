@@ -234,7 +234,7 @@ class General(commands.Cog):
         latency = round(self.bot.latency * 1000)
         await ctx.send(f"🏓 بونق! سرعة الاستجابة: `{latency}ms`")
 
-    @commands.hybrid_command(name="server_count", aliases=["عدد_السيرفرات"], description="عرض عدد وإحصائيات السيرفرات")
+    @commands.command(name="server_count", aliases=["عدد_السيرفرات"], description="عرض عدد وإحصائيات السيرفرات")
     async def server_count(self, ctx: commands.Context):
         if not await check_is_owner(self.bot, ctx):
             total_guilds = len(self.bot.guilds)

@@ -299,7 +299,7 @@ class Economy(commands.Cog):
                 pass
             await ctx.send(f"⏱️ {ctx.author.mention} انتهى الوقت المحدد.")
 
-    @commands.hybrid_command(name="exchange_history", aliases=["سجل_التبديل"], description="عرض سجل عمليات التبديل ورقم كل طلب")
+    @commands.command(name="exchange_history", aliases=["سجل_التبديل"], description="عرض سجل عمليات التبديل ورقم كل طلب")
     async def exchange_history(self, ctx: commands.Context, member: discord.Member = None):
         target = member or ctx.author
         global_cursor.execute(
@@ -376,7 +376,7 @@ class Economy(commands.Cog):
             embed.set_footer(text=f"كتالوج Cosmo العام • صفحة {page_number}/{len(pages)}")
             await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="exchange_stats", aliases=["احصائيات_التبديل"], description="عرض إحصائيات عمليات التبديل الناجحة في هذا السيرفر")
+    @commands.command(name="exchange_stats", aliases=["احصائيات_التبديل"], description="عرض إحصائيات عمليات التبديل الناجحة في هذا السيرفر")
     async def exchange_stats(self, ctx: commands.Context):
         global_cursor.execute("SELECT COUNT(*), SUM(cosmo_amount) FROM exchange_logs WHERE guild_id = ? AND status = 'تم القبول'", (ctx.guild.id,))
         row = global_cursor.fetchone()
@@ -580,7 +580,7 @@ class Economy(commands.Cog):
         except:
             pass
 
-    @commands.hybrid_command(name="transfer_history", aliases=["سجل_التحويل"], description="عرض آخر عمليات التحويل العامة")
+    @commands.command(name="transfer_history", aliases=["سجل_التحويل"], description="عرض آخر عمليات التحويل العامة")
     async def transfer_history(self, ctx: commands.Context, member: discord.Member = None):
         target = member or ctx.author
         currency_label = get_currency_label(ctx.guild.id if ctx.guild else None)
