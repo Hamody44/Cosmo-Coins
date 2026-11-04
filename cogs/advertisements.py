@@ -324,7 +324,10 @@ class AdSettlementView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         result = await asyncio.to_thread(approve_ad_delivery, self.guild_id, self.order_id)
         if result["status"] == "paid":
-            await interaction.message.edit(view=None)
+            try:
+                await interaction.message.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
             await interaction.followup.send("✅ تم اعتماد التسليم وصرف الجوائز مرة واحدة.", ephemeral=True)
         else:
             await interaction.followup.send("⚠️ تعذر الصرف؛ تم نقل الطلب إلى `needs_review`.", ephemeral=True)
@@ -335,7 +338,10 @@ class AdSettlementView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         result = await asyncio.to_thread(reject_ad_delivery, self.guild_id, self.order_id)
         if result["status"] in {"refunded", "already_refunded"}:
-            await interaction.message.edit(view=None)
+            try:
+                await interaction.message.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
             await interaction.followup.send("✅ تمت إعادة الجيف إلى ميزانية السيرفر.", ephemeral=True)
         else:
             await interaction.followup.send("⚠️ تعذر الإرجاع تلقائيًا؛ تم نقل الطلب إلى `needs_review`.", ephemeral=True)
@@ -345,7 +351,10 @@ class AdSettlementView(discord.ui.View):
             return await interaction.response.send_message("⛔ لا تملك صلاحية إحالة هذا الإعلان للمراجعة.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
         await asyncio.to_thread(mark_ad_needs_review, self.guild_id, self.order_id, "manual review requested from settlement button")
-        await interaction.message.edit(view=None)
+        try:
+            await interaction.message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
         await interaction.followup.send("🔎 تم نقل الإعلان إلى `needs_review` للمراجعة اليدوية.", ephemeral=True)
 
 
@@ -677,6 +686,44 @@ class Advertisements(commands.Cog):
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 continue
 
+    async def _delete_ad_giveaway_message(self, guild: discord.Guild, order_id: int) -> bool:
+        """Delete the public giveaway post while retaining its ledger for settlement."""
+        giveaway = await asyncio.to_thread(get_ad_giveaway, guild.id, order_id)
+        if not giveaway or not giveaway.get("message_id") or not giveaway.get("channel_id"):
+            return False
+        channel = guild.get_channel(int(giveaway["channel_id"]))
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(int(giveaway["channel_id"]))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return False
+        try:
+            message = await channel.fetch_message(int(giveaway["message_id"]))
+            await message.delete()
+            return True
+        except discord.NotFound:
+            return True
+        except (discord.Forbidden, discord.HTTPException):
+            return False
+
+    async def _notify_advertiser_winners(self, guild: discord.Guild, order: dict, winner_ids: list[int]):
+        """Send the winner list privately because the public giveaway post is deleted."""
+        member = guild.get_member(int(order["advertiser_id"]))
+        if member is None:
+            try:
+                member = await guild.fetch_member(int(order["advertiser_id"]))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+        winner_text = ", ".join(f"<@{int(user_id)}>" for user_id in winner_ids) or "لا يوجد فائزون (لم يشارك أحد)."
+        try:
+            await member.send(
+                f"📣 انتهى جيف الإعلان `#{order['id']}`.\n"
+                f"🏆 الفائزون: {winner_text}\n"
+                "🧹 تم حذف رسالة الجيف من الروم، ويبقى قرار تسليم الجوائز لدى الإدارة."
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
     @ad_expiry_worker.before_loop
     async def before_ad_expiry_worker(self):
         await self.bot.wait_until_ready()
@@ -707,8 +754,8 @@ class Advertisements(commands.Cog):
             result = await asyncio.to_thread(finish_ad_giveaway, guild.id, item["order_id"], winner_ids)
             if result["status"] != "awaiting_owner_decision":
                 raise RuntimeError(f"unexpected finish status: {result['status']}")
-            await message.edit(view=AdSettlementView(self.bot, guild.id, item["order_id"]))
-            self.bot.add_view(AdSettlementView(self.bot, guild.id, item["order_id"]))
+            await self._delete_ad_giveaway_message(guild, item["order_id"])
+            await self._notify_advertiser_winners(guild, order, winner_ids)
         except Exception as exc:
             from advertising_store import mark_ad_needs_review
             mark_ad_needs_review(guild.id, item["order_id"], f"expired ad finalization failed: {exc}")
@@ -1059,7 +1106,16 @@ class Advertisements(commands.Cog):
         result = finish_ad_giveaway(ctx.guild.id, order_id, winner_ids)
         if result["status"] != "awaiting_owner_decision":
             return await ctx.send("⚠️ لا يمكن إنهاء هذا الجيف في حالته الحالية.")
-        await ctx.send(f"✅ انتهى الجيف #{order_id}. استخدم `ad_approve` أو `ad_reject` لاتخاذ القرار.")
+        await self._delete_ad_giveaway_message(ctx.guild, order_id)
+        order = get_ad_order(ctx.guild.id, order_id)
+        if order:
+            await self._notify_advertiser_winners(ctx.guild, order, winner_ids)
+        winners_text = ", ".join(f"<@{user_id}>" for user_id in winner_ids)
+        await ctx.send(
+            f"✅ انتهى الجيف #{order_id}.\n"
+            f"🏆 الفائزون: {winners_text}\n"
+            "🧹 تم حذف رسالة الجيف من الروم. استخدم `ad_approve` أو `ad_reject` لاتخاذ القرار."
+        )
 
     @commands.hybrid_command(name="ad_approve", aliases=["اعتماد_تسليم_الإعلان"], description="اعتماد تسليم جوائز إعلان")
     async def ad_approve(self, ctx: commands.Context, order_id: int):
