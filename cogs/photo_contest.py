@@ -382,10 +382,6 @@ class PhotoContest(commands.Cog):
     async def photo_start(self, ctx):
         if not self._admin(ctx): return await ctx.send("⛔ هذا الأمر للإدارة فقط.")
         conn, cur = get_guild_db(ctx.guild.id)
-        invite_event = cur.execute("SELECT event_id FROM invite_events WHERE guild_id=? AND status='active' LIMIT 1", (ctx.guild.id,)).fetchone()
-        if invite_event:
-            conn.close()
-            return await ctx.send("❌ أنهِ فعالية الدعوات أولًا قبل بدء مسابقة الصور.")
         row = cur.execute("SELECT contest_id,participation_channel_id,conditions FROM photo_contests WHERE guild_id=? AND status='draft' ORDER BY contest_id DESC LIMIT 1", (ctx.guild.id,)).fetchone()
         if not row: conn.close(); return await ctx.send("❌ أعد الإعداد أولًا.")
         cur.execute("UPDATE photo_contests SET status='active' WHERE contest_id=?", (row[0],)); conn.commit(); conn.close()
@@ -539,13 +535,9 @@ class PhotoContest(commands.Cog):
         conn, cur = get_guild_db(ctx.guild.id)
         log_row = cur.execute("SELECT invite_log FROM settings WHERE guild_id=?", (ctx.guild.id,)).fetchone()
         active = cur.execute("SELECT event_id, amount FROM invite_events WHERE guild_id=? AND status='active' LIMIT 1", (ctx.guild.id,)).fetchone()
-        photo_active = cur.execute("SELECT 1 FROM photo_contests WHERE guild_id=? AND status='active' LIMIT 1", (ctx.guild.id,)).fetchone()
         if not log_row or not log_row[0]:
             conn.close()
             return await ctx.send("❌ حدد روم سجل الدعوات أولًا باستخدام `!set_invite_log #الروم`.")
-        if photo_active:
-            conn.close()
-            return await ctx.send("❌ لا يمكن بدء فعالية الدعوات أثناء مسابقة الصور. أنهِ مسابقة الصور أولًا.")
         if active:
             conn.close()
             return await ctx.send(f"⚠️ توجد فعالية دعوات نشطة بالفعل برقم `{active[0]}` ومكافأة `{active[1]:,}` Cosmo.")
@@ -662,10 +654,16 @@ class PhotoContest(commands.Cog):
         risk_score, risk_reasons = invite_event_profile_risk(member) if event and status == 'valid' else (0, [])
         if risk_score >= 51:
             status = 'fake'
+        event_use_created = False
+        if event and status == 'valid' and inviter:
+            event_use_created = cur.execute(
+                "INSERT OR IGNORE INTO invite_event_uses(event_id,guild_id,member_id,inviter_id,invite_code,joined_at,status) VALUES(?,?,?,?,?,?,?)",
+                (event[0], member.guild.id, member.id, inviter, code, int(time.time()), 'valid'),
+            ).rowcount == 1
         cur.execute("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at,status,account_age_days,risk_score,risk_reasons) VALUES(?,?,?,?,?,?,?,?,?,?)", (member.guild.id, code, inviter, member.id, str(member), int(time.time()), status, age_days, risk_score, json.dumps(risk_reasons, ensure_ascii=False)))
         conn.commit(); conn.close()
         payout = None
-        if event and status == 'valid' and inviter:
+        if event and status == 'valid' and inviter and event_use_created:
             try:
                 payout = await asyncio.to_thread(
                     credit_invite_event_reward, member.guild.id, event[0], member.id, inviter, event[1]

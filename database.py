@@ -410,6 +410,11 @@ def get_guild_db(guild_id: int):
         channel_id INTEGER, amount INTEGER NOT NULL CHECK(amount > 0), started_at INTEGER NOT NULL,
         started_by INTEGER NOT NULL, ended_at INTEGER, status TEXT NOT NULL DEFAULT 'active')''')
     _ensure_guild_db_column(cur, "invite_events", "channel_id", "INTEGER", schema_key)
+    cur.execute('''CREATE TABLE IF NOT EXISTS invite_event_uses (
+        event_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, member_id INTEGER NOT NULL,
+        inviter_id INTEGER NOT NULL, invite_code TEXT, joined_at INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'valid',
+        PRIMARY KEY (event_id, member_id))''')
     cur.execute('''CREATE TABLE IF NOT EXISTS invite_uses (
         id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, invite_code TEXT,
         inviter_id INTEGER, member_id INTEGER NOT NULL, member_username TEXT, joined_at INTEGER NOT NULL,
@@ -1533,7 +1538,7 @@ def update_balance(user_id, amount):
 
 
 def credit_invite_event_reward(guild_id: int, event_id: int, member_id: int, inviter_id: int, amount: int) -> dict:
-    """Credit one invite-event reward exactly once for a member in an event."""
+    """Credit one reward per invited member; repeat calls for that member are idempotent."""
     amount = int(amount)
     if amount <= 0:
         raise ValueError("يجب أن تكون مكافأة الدعوة أكبر من صفر.")
