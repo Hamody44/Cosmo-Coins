@@ -588,12 +588,30 @@ class PhotoContest(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
+        lock = _invite_attribution_locks.setdefault(member.guild.id, asyncio.Lock())
+        async with lock:
+            await self._process_member_join(member)
+
+    async def _process_member_join(self, member):
         try:
             current = await member.guild.invites()
         except (discord.Forbidden, discord.HTTPException):
             # Keep the join in the total even when Discord does not reveal its invite.
-            current = []
-        conn, cur = get_guild_db(member.guild.id); old = {r[0]: r[1:] for r in cur.execute("SELECT code,uses,inviter_id FROM invite_snapshots WHERE guild_id=?", (member.guild.id,))}; found = next((i for i in current if int(i.uses or 0) > int(old.get(i.code, (0, None))[0])), None)
+            current = None
+        conn, cur = get_guild_db(member.guild.id)
+        old = {r[0]: r[1:] for r in cur.execute("SELECT code,uses,inviter_id FROM invite_snapshots WHERE guild_id=?", (member.guild.id,))}
+        found = select_used_invite(current, old) if current is not None else None
+        # Establish the new baseline immediately. Without this, several joins
+        # before the next on_ready would be attributed to the first invite that
+        # happened to appear in Discord's response.
+        if current is not None:
+            captured_at = int(time.time())
+            for invite in current:
+                cur.execute(
+                    "INSERT INTO invite_snapshots VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(guild_id,code) DO UPDATE SET inviter_id=excluded.inviter_id,uses=excluded.uses,captured_at=excluded.captured_at",
+                    (member.guild.id, invite.code, getattr(invite.inviter, "id", None), invite.uses or 0, captured_at),
+                )
         inviter = getattr(found.inviter, 'id', None) if found else None; code = found.code if found else None
         age_days = account_age_days(member)
         returned_member = cur.execute(
