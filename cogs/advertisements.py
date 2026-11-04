@@ -706,20 +706,53 @@ class Advertisements(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             return False
 
-    async def _notify_advertiser_winners(self, guild: discord.Guild, order: dict, winner_ids: list[int]):
-        """Send the winner list privately because the public giveaway post is deleted."""
+    async def _show_ad_giveaway_result(self, guild: discord.Guild, order_id: int, winner_ids: list[int]) -> bool:
+        """Replace the public giveaway post with a normal giveaway-style result."""
+        giveaway = await asyncio.to_thread(get_ad_giveaway, guild.id, order_id)
+        if not giveaway or not giveaway.get("message_id") or not giveaway.get("channel_id"):
+            return False
+        channel = guild.get_channel(int(giveaway["channel_id"]))
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(int(giveaway["channel_id"]))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return False
+        winner_text = ", ".join(f"<@{int(user_id)}>" for user_id in winner_ids)
+        if not winner_text:
+            winner_text = "لا يوجد فائزون (لم يشارك أحد)."
+        result_embed = discord.Embed(
+            title=f"🏆 انتهى جيف الإعلان #{order_id}",
+            description=f"الفائزون: {winner_text}",
+            color=discord.Color.green(),
+        )
+        result_embed.set_footer(text="يرجى متابعة تسليم الجائزة مع إدارة السيرفر")
+        try:
+            message = await channel.fetch_message(int(giveaway["message_id"]))
+            await message.clear_reactions()
+            await message.edit(content=None, embed=result_embed, view=None)
+            return True
+        except discord.NotFound:
+            return False
+        except (discord.Forbidden, discord.HTTPException):
+            return False
+
+    async def _notify_advertiser_finished(self, guild: discord.Guild, order: dict):
+        """Notify the advertiser privately without revealing winner names."""
         member = guild.get_member(int(order["advertiser_id"]))
         if member is None:
             try:
                 member = await guild.fetch_member(int(order["advertiser_id"]))
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 return
-        winner_text = ", ".join(f"<@{int(user_id)}>" for user_id in winner_ids) or "لا يوجد فائزون (لم يشارك أحد)."
+        channel_id = order.get("target_channel_id")
+        if not channel_id:
+            giveaway = await asyncio.to_thread(get_ad_giveaway, guild.id, int(order["id"]))
+            channel_id = giveaway.get("channel_id") if giveaway else None
+        channel_mention = f"<#{int(channel_id)}>" if channel_id else "روم الإعلان"
         try:
             await member.send(
-                f"📣 انتهى جيف الإعلان `#{order['id']}`.\n"
-                f"🏆 الفائزون: {winner_text}\n"
-                "🧹 تم حذف رسالة الجيف من الروم، ويبقى قرار تسليم الجوائز لدى الإدارة."
+                f"📣 انتهى جيف إعلانك `#{order['id']}` في {channel_mention}.\n"
+                "يرجى التحقق من روم الإعلان لمعرفة النتيجة ومتابعة التسليم مع الإدارة."
             )
         except (discord.Forbidden, discord.HTTPException):
             pass
@@ -754,8 +787,8 @@ class Advertisements(commands.Cog):
             result = await asyncio.to_thread(finish_ad_giveaway, guild.id, item["order_id"], winner_ids)
             if result["status"] != "awaiting_owner_decision":
                 raise RuntimeError(f"unexpected finish status: {result['status']}")
-            await self._delete_ad_giveaway_message(guild, item["order_id"])
-            await self._notify_advertiser_winners(guild, order, winner_ids)
+            await self._show_ad_giveaway_result(guild, item["order_id"], winner_ids)
+            await self._notify_advertiser_finished(guild, order)
         except Exception as exc:
             from advertising_store import mark_ad_needs_review
             mark_ad_needs_review(guild.id, item["order_id"], f"expired ad finalization failed: {exc}")
@@ -1106,15 +1139,14 @@ class Advertisements(commands.Cog):
         result = finish_ad_giveaway(ctx.guild.id, order_id, winner_ids)
         if result["status"] != "awaiting_owner_decision":
             return await ctx.send("⚠️ لا يمكن إنهاء هذا الجيف في حالته الحالية.")
-        await self._delete_ad_giveaway_message(ctx.guild, order_id)
         order = get_ad_order(ctx.guild.id, order_id)
         if order:
-            await self._notify_advertiser_winners(ctx.guild, order, winner_ids)
-        winners_text = ", ".join(f"<@{user_id}>" for user_id in winner_ids)
+            await self._show_ad_giveaway_result(ctx.guild, order_id, winner_ids)
+            await self._notify_advertiser_finished(ctx.guild, order)
         await ctx.send(
             f"✅ انتهى الجيف #{order_id}.\n"
-            f"🏆 الفائزون: {winners_text}\n"
-            "🧹 تم حذف رسالة الجيف من الروم. استخدم `ad_approve` أو `ad_reject` لاتخاذ القرار."
+            "🏆 تم إظهار الفائزين في روم الإعلان فقط.\n"
+            "استخدم `ad_approve` أو `ad_reject` لاتخاذ القرار."
         )
 
     @commands.hybrid_command(name="ad_approve", aliases=["اعتماد_تسليم_الإعلان"], description="اعتماد تسليم جوائز إعلان")
@@ -1122,6 +1154,8 @@ class Advertisements(commands.Cog):
         if not premium_required(ctx) or not can_manage_ads(ctx):
             return await ctx.send("⛔ هذا الأمر متاح لإدارة سيرفر Premium فقط.")
         result = approve_ad_delivery(ctx.guild.id, order_id)
+        if result["status"] == "paid":
+            await self._delete_ad_giveaway_message(ctx.guild, order_id)
         await ctx.send("✅ تم اعتماد التسليم وصرف الجوائز مرة واحدة." if result["status"] == "paid" else "⚠️ تعذر الصرف؛ تم نقل الطلب إلى `needs_review`.")
 
     @commands.hybrid_command(name="ad_reject", aliases=["رفض_تسليم_الإعلان"], description="رفض تسليم جوائز إعلان وإعادة الحجز")
@@ -1129,6 +1163,8 @@ class Advertisements(commands.Cog):
         if not premium_required(ctx) or not can_manage_ads(ctx):
             return await ctx.send("⛔ هذا الأمر متاح لإدارة سيرفر Premium فقط.")
         result = reject_ad_delivery(ctx.guild.id, order_id)
+        if result["status"] in {"refunded", "already_refunded"}:
+            await self._delete_ad_giveaway_message(ctx.guild, order_id)
         await ctx.send("✅ تمت إعادة حجز الجيف إلى ميزانية السيرفر." if result["status"] in {"refunded", "already_refunded"} else "⚠️ تعذر الإرجاع تلقائيًا؛ تم نقل الطلب إلى `needs_review`.")
 
     @commands.hybrid_command(name="ad_cleanup", aliases=["تنظيف_الإعلان"], description="إعادة اسم روم الإعلان بعد التسوية")
