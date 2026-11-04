@@ -73,10 +73,13 @@ class FinancialTransactionTests(unittest.TestCase):
         first = database.credit_invite_event_reward(1, 55, 1001, 7, 10)
         second = database.credit_invite_event_reward(1, 55, 1002, 7, 10)
         repeated = database.credit_invite_event_reward(1, 55, 1001, 7, 10)
+        previous_event = database.credit_invite_event_reward(1, 56, 1001, 99, 10)
         self.assertEqual(first["status"], "paid")
         self.assertEqual(second["status"], "paid")
         self.assertEqual(repeated["status"], "already_paid")
+        self.assertEqual(previous_event["status"], "already_rewarded_globally")
         self.assertEqual(self.balance(7), 20)
+        self.assertEqual(self.balance(99), 0)
 
     def test_exchange_creation_debits_and_records_in_one_operation(self):
         database.update_balance(11, 250)

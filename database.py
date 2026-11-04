@@ -1538,7 +1538,7 @@ def update_balance(user_id, amount):
 
 
 def credit_invite_event_reward(guild_id: int, event_id: int, member_id: int, inviter_id: int, amount: int) -> dict:
-    """Credit one reward per invited member; repeat calls for that member are idempotent."""
+    """Credit only the first invite reward for a member across all guild events."""
     amount = int(amount)
     if amount <= 0:
         raise ValueError("يجب أن تكون مكافأة الدعوة أكبر من صفر.")
@@ -1559,6 +1559,13 @@ def credit_invite_event_reward(guild_id: int, event_id: int, member_id: int, inv
                 raise ValueError("مكافأة فعالية الدعوات مسجلة ببيانات مختلفة.")
             conn.commit()
             return {"status": "already_paid", "amount": amount}
+        global_existing = conn.execute(
+            "SELECT event_id FROM invite_event_payouts WHERE guild_id=? AND member_id=? LIMIT 1",
+            (int(guild_id), int(member_id)),
+        ).fetchone()
+        if global_existing:
+            conn.commit()
+            return {"status": "already_rewarded_globally", "amount": amount, "previous_event_id": int(global_existing[0])}
         conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (int(inviter_id),))
         credit = conn.execute(
             "UPDATE balances SET balance=balance+? WHERE user_id=? AND balance<=?",

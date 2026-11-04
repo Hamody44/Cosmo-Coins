@@ -661,6 +661,7 @@ class PhotoContest(commands.Cog):
                 (event[0], member.guild.id, member.id, inviter, code, int(time.time()), 'valid'),
             ).rowcount == 1
         cur.execute("INSERT INTO invite_uses(guild_id,invite_code,inviter_id,member_id,member_username,joined_at,status,account_age_days,risk_score,risk_reasons) VALUES(?,?,?,?,?,?,?,?,?,?)", (member.guild.id, code, inviter, member.id, str(member), int(time.time()), status, age_days, risk_score, json.dumps(risk_reasons, ensure_ascii=False)))
+        invite_use_id = cur.lastrowid
         conn.commit(); conn.close()
         payout = None
         if event and status == 'valid' and inviter and event_use_created:
@@ -670,6 +671,15 @@ class PhotoContest(commands.Cog):
                 )
             except (ValueError, RuntimeError) as exc:
                 payout = {"status": "failed", "error": str(exc)}
+        if payout and payout.get("status") == "already_rewarded_globally":
+            status = "returned"
+            conn, cur = get_guild_db(member.guild.id)
+            cur.execute("UPDATE invite_uses SET status='returned' WHERE id=?", (invite_use_id,))
+            cur.execute(
+                "UPDATE invite_event_uses SET status='returned' WHERE event_id=? AND member_id=?",
+                (event[0], member.id),
+            )
+            conn.commit(); conn.close()
         if event and payout and payout.get("status") == "paid":
             event_channel = member.guild.get_channel(event[2]) if event[2] else None
             if event_channel:
@@ -705,6 +715,8 @@ class PhotoContest(commands.Cog):
             return f"تم صرف `{int(event[1]):,}` Cosmo للداعي"
         if payout.get("status") == "already_paid":
             return "تم صرفها مسبقًا"
+        if payout.get("status") == "already_rewarded_globally":
+            return "لم تُصرف: العضو سبق احتسابه في فعالية سابقة"
         return f"تعذر الصرف: {payout.get('error', 'خطأ غير معروف')}"
 
     @commands.Cog.listener()
@@ -795,20 +807,20 @@ class PhotoContest(commands.Cog):
                 return await ctx.send("❌ لم يتم العثور على فعالية دعوات بهذا الرقم في هذا السيرفر.")
             event_label = f"فعالية الدعوات `{event[0]}` • المكافأة `{event[1]:,}` • الحالة `{event[2]}`"
             rows = cur.execute(
-                "SELECT inviter_id, COUNT(*) FROM invite_event_uses WHERE guild_id=? AND event_id=? GROUP BY inviter_id ORDER BY COUNT(*) DESC, inviter_id",
+                "SELECT inviter_id, COUNT(*) FROM invite_event_uses WHERE guild_id=? AND event_id=? AND status='valid' GROUP BY inviter_id ORDER BY COUNT(*) DESC, inviter_id",
                 (ctx.guild.id, event_id),
             ).fetchall()
             total = cur.execute(
-                "SELECT COUNT(*) FROM invite_event_uses WHERE guild_id=? AND event_id=?",
+                "SELECT COUNT(*) FROM invite_event_uses WHERE guild_id=? AND event_id=? AND status='valid'",
                 (ctx.guild.id, event_id),
             ).fetchone()[0]
         else:
             rows = cur.execute(
-                "SELECT inviter_id, COUNT(*) FROM invite_event_uses WHERE guild_id=? GROUP BY inviter_id ORDER BY COUNT(*) DESC, inviter_id",
+                "SELECT inviter_id, COUNT(*) FROM invite_event_uses WHERE guild_id=? AND status='valid' GROUP BY inviter_id ORDER BY COUNT(*) DESC, inviter_id",
                 (ctx.guild.id,),
             ).fetchall()
             total = cur.execute(
-                "SELECT COUNT(*) FROM invite_event_uses WHERE guild_id=?",
+                "SELECT COUNT(*) FROM invite_event_uses WHERE guild_id=? AND status='valid'",
                 (ctx.guild.id,),
             ).fetchone()[0]
         conn.close()
