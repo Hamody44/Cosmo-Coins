@@ -778,6 +778,50 @@ class PhotoContest(commands.Cog):
         conn.close()
         await ctx.send("\n".join(f"{r[0] or 'غير محدد'}: صالح `{r[1] or 0}` • وهمي `{r[2] or 0}` • غادر `{r[3] or 0}` • عاد بعد مغادرة `{r[4] or 0}` • الإجمالي `{r[5]}`" for r in rows) or "لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح.")
 
+    @commands.command(name="invite_stats", aliases=["إحصائيات_الداعين", "احصائيات_الدعوات"])
+    async def invite_stats(self, ctx, event_id: Optional[int] = None):
+        """Show invite-event invitees per inviter without photo-contest records."""
+        if not self._admin(ctx):
+            return await ctx.send("⛔ للإدارة فقط.")
+        conn, cur = get_guild_db(ctx.guild.id)
+        event_label = "كل فعاليات الدعوات"
+        if event_id is not None:
+            event = cur.execute(
+                "SELECT event_id, amount, status FROM invite_events WHERE guild_id=? AND event_id=?",
+                (ctx.guild.id, event_id),
+            ).fetchone()
+            if not event:
+                conn.close()
+                return await ctx.send("❌ لم يتم العثور على فعالية دعوات بهذا الرقم في هذا السيرفر.")
+            event_label = f"فعالية الدعوات `{event[0]}` • المكافأة `{event[1]:,}` • الحالة `{event[2]}`"
+            rows = cur.execute(
+                "SELECT inviter_id, COUNT(*) FROM invite_event_uses WHERE guild_id=? AND event_id=? GROUP BY inviter_id ORDER BY COUNT(*) DESC, inviter_id",
+                (ctx.guild.id, event_id),
+            ).fetchall()
+            total = cur.execute(
+                "SELECT COUNT(*) FROM invite_event_uses WHERE guild_id=? AND event_id=?",
+                (ctx.guild.id, event_id),
+            ).fetchone()[0]
+        else:
+            rows = cur.execute(
+                "SELECT inviter_id, COUNT(*) FROM invite_event_uses WHERE guild_id=? GROUP BY inviter_id ORDER BY COUNT(*) DESC, inviter_id",
+                (ctx.guild.id,),
+            ).fetchall()
+            total = cur.execute(
+                "SELECT COUNT(*) FROM invite_event_uses WHERE guild_id=?",
+                (ctx.guild.id,),
+            ).fetchone()[0]
+        conn.close()
+        if not rows:
+            return await ctx.send(f"📊 {event_label}\nلا توجد دعوات مسجلة في سجل فعاليات الدعوات.")
+        lines = [f"📊 **إحصائيات الداعين — {event_label}**", f"إجمالي المدعوين المسجلين: `{total}`", ""]
+        displayed_rows = rows[:20]
+        lines.extend(f"{index}. <@{int(inviter_id)}> — **{int(count)}** مدعو" for index, (inviter_id, count) in enumerate(displayed_rows, 1))
+        if len(rows) > len(displayed_rows):
+            lines.append(f"... ويوجد `{len(rows) - len(displayed_rows)}` داعٍ إضافي؛ استخدم فلتر رقم الفعالية لعرض نطاق أصغر.")
+        lines.append("\nملاحظة: هذا التقرير يعتمد على سجل فعاليات الدعوات فقط، ولا يخلط بيانات مسابقة الصور.")
+        await ctx.send("\n".join(lines))
+
     @commands.command(name="invites_clear", aliases=["مسح_دعوات"])
     async def invites_clear(self, ctx, member: Optional[discord.Member] = None):
         if not self._admin(ctx): return await ctx.send("⛔ هذا الأمر للإدارة فقط.")
