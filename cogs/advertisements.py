@@ -762,7 +762,7 @@ class Advertisements(commands.Cog):
         try:
             await member.send(
                 f"📣 انتهى إعلان في سيرفرك `#{order['id']}` داخل {channel_mention}.\n"
-                "يرجى التحقق من روم الإعلان ومتابعة تسليم الجائزة مع الإدارة."
+                "يرجى التحقق من روم الإعلان ومتابعة تسليم الجائزة في حال الفائز / الفائزين حققوا الشروط"
             )
         except (discord.Forbidden, discord.HTTPException):
             pass
@@ -780,8 +780,7 @@ class Advertisements(commands.Cog):
             await member.send(
                 f"📣 انتهى إعلانك `#{order['id']}` في {channel_mention}.\n"
                 f"• مدة الإعلان: `{duration}`\n"
-                f"• المنشن المستخدم: `{mention_label}`\n"
-                "يرجى التحقق من روم الإعلان لمعرفة النتيجة ومتابعة التسليم مع الإدارة."
+                f"• المنشن المستخدم: `{mention_label}`"
             )
         except (discord.Forbidden, discord.HTTPException):
             pass
