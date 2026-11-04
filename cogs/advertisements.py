@@ -736,22 +736,51 @@ class Advertisements(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             return False
 
-    async def _notify_advertiser_finished(self, guild: discord.Guild, order: dict):
-        """Notify the advertiser privately without revealing winner names."""
-        member = guild.get_member(int(order["advertiser_id"]))
+    async def _get_ad_member(self, guild: discord.Guild, user_id: int):
+        member = guild.get_member(int(user_id))
         if member is None:
             try:
-                member = await guild.fetch_member(int(order["advertiser_id"]))
+                member = await guild.fetch_member(int(user_id))
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                return
+                return None
+        return member
+
+    async def _ad_channel_mention(self, guild: discord.Guild, order: dict) -> str:
         channel_id = order.get("target_channel_id")
         if not channel_id:
             giveaway = await asyncio.to_thread(get_ad_giveaway, guild.id, int(order["id"]))
             channel_id = giveaway.get("channel_id") if giveaway else None
-        channel_mention = f"<#{int(channel_id)}>" if channel_id else "روم الإعلان"
+        return f"<#{int(channel_id)}>" if channel_id else "روم الإعلان"
+
+    async def _notify_server_owner_finished(self, guild: discord.Guild, order: dict):
+        """Notify the server owner privately without revealing winner names."""
+        owner_id = int(order.get("server_owner_id") or guild.owner_id or 0)
+        member = await self._get_ad_member(guild, owner_id) if owner_id else None
+        if member is None:
+            return
+        channel_mention = await self._ad_channel_mention(guild, order)
         try:
             await member.send(
-                f"📣 انتهى جيف إعلانك `#{order['id']}` في {channel_mention}.\n"
+                f"📣 انتهى إعلان في سيرفرك `#{order['id']}` داخل {channel_mention}.\n"
+                "يرجى التحقق من روم الإعلان ومتابعة تسليم الجائزة مع الإدارة."
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _notify_advertiser_finished(self, guild: discord.Guild, order: dict):
+        """Notify the advertiser privately with ad details, but not winner names."""
+        member = await self._get_ad_member(guild, int(order["advertiser_id"]))
+        if member is None:
+            return
+        channel_mention = await self._ad_channel_mention(guild, order)
+        duration_labels = {"1d": "يوم واحد", "2d": "يومان", "3d": "3 أيام", "5d": "5 أيام", "7d": "7 أيام"}
+        duration = duration_labels.get(order.get("duration_key"), str(order.get("duration_key") or "غير محددة"))
+        mention_label = "@everyone" if order.get("mention_type") == "everyone" else "@here"
+        try:
+            await member.send(
+                f"📣 انتهى إعلانك `#{order['id']}` في {channel_mention}.\n"
+                f"• مدة الإعلان: `{duration}`\n"
+                f"• المنشن المستخدم: `{mention_label}`\n"
                 "يرجى التحقق من روم الإعلان لمعرفة النتيجة ومتابعة التسليم مع الإدارة."
             )
         except (discord.Forbidden, discord.HTTPException):
@@ -788,6 +817,7 @@ class Advertisements(commands.Cog):
             if result["status"] != "awaiting_owner_decision":
                 raise RuntimeError(f"unexpected finish status: {result['status']}")
             await self._show_ad_giveaway_result(guild, item["order_id"], winner_ids)
+            await self._notify_server_owner_finished(guild, order)
             await self._notify_advertiser_finished(guild, order)
         except Exception as exc:
             from advertising_store import mark_ad_needs_review
@@ -1142,6 +1172,7 @@ class Advertisements(commands.Cog):
         order = get_ad_order(ctx.guild.id, order_id)
         if order:
             await self._show_ad_giveaway_result(ctx.guild, order_id, winner_ids)
+            await self._notify_server_owner_finished(ctx.guild, order)
             await self._notify_advertiser_finished(ctx.guild, order)
         await ctx.send(
             f"✅ انتهى الجيف #{order_id}.\n"
