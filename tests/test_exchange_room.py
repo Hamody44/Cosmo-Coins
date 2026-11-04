@@ -12,7 +12,7 @@ from cogs.economy import (
     manual_exchange_transfer_command,
     manual_probot_transfer_command,
 )
-from cogs.photo_contest import select_used_invite
+from cogs.photo_contest import select_invite_for_join, select_used_invite
 
 
 class ExchangeRoomPersistenceTests(unittest.TestCase):
@@ -98,6 +98,19 @@ class InviteAttributionTests(unittest.TestCase):
         current = [self.invite("a", 4, 11), self.invite("b", 6, 22)]
         previous = {"a": (3, 11), "b": (5, 22)}
         self.assertIsNone(select_used_invite(current, previous))
+
+    def test_concurrent_invite_selection_is_deterministic(self):
+        current = [self.invite("b", 6, 22), self.invite("a", 6, 11)]
+        previous = {"a": (5, 11), "b": (5, 22)}
+        self.assertEqual(select_invite_for_join(current, previous).code, "a")
+
+    def test_concurrent_invite_selection_preserves_remaining_uses(self):
+        current = [self.invite("a", 7, 11)]
+        previous = {"a": (5, 11)}
+        first = select_invite_for_join(current, previous)
+        self.assertEqual(first.code, "a")
+        after_first = {"a": (6, 11)}
+        self.assertEqual(select_invite_for_join(current, after_first).code, "a")
 
 
 class ManualExchangeInstructionTests(unittest.TestCase):

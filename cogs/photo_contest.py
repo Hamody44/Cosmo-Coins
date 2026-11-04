@@ -40,6 +40,26 @@ def select_used_invite(current_invites, previous_snapshots):
     return candidates[0][1]
 
 
+def select_invite_for_join(current_invites, previous_snapshots):
+    """Select one pending invite use deterministically for a concurrent join.
+
+    Discord does not expose the invite code used by a member. When multiple
+    invite counters increase before the gateway events are handled, exact
+    per-member attribution is impossible; stable ordering prevents random
+    payouts while the snapshot logic preserves every remaining use.
+    """
+    candidates = []
+    for invite in current_invites or ():
+        old_uses, _old_inviter = previous_snapshots.get(invite.code, (0, None))
+        delta = int(invite.uses or 0) - int(old_uses or 0)
+        if delta > 0:
+            candidates.append((delta, str(invite.code), invite))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates[0][2]
+
+
 def account_age_days(user, now=None):
     created = getattr(user, "created_at", None)
     if created is None:
@@ -600,17 +620,32 @@ class PhotoContest(commands.Cog):
             current = None
         conn, cur = get_guild_db(member.guild.id)
         old = {r[0]: r[1:] for r in cur.execute("SELECT code,uses,inviter_id FROM invite_snapshots WHERE guild_id=?", (member.guild.id,))}
-        found = select_used_invite(current, old) if current is not None else None
+        found = select_invite_for_join(current, old) if current is not None else None
         # Establish the new baseline immediately. Without this, several joins
         # before the next on_ready would be attributed to the first invite that
         # happened to appear in Discord's response.
         if current is not None:
             captured_at = int(time.time())
             for invite in current:
+                current_uses = int(invite.uses or 0)
+                old_uses = int(old.get(invite.code, (0, None))[0])
+                pending_uses = (
+                    min(current_uses, old_uses + 1)
+                    if found is not None and invite.code == found.code
+                    else old_uses
+                    if current_uses > old_uses
+                    else current_uses
+                )
                 cur.execute(
                     "INSERT INTO invite_snapshots VALUES(?,?,?,?,?) "
                     "ON CONFLICT(guild_id,code) DO UPDATE SET inviter_id=excluded.inviter_id,uses=excluded.uses,captured_at=excluded.captured_at",
-                    (member.guild.id, invite.code, getattr(invite.inviter, "id", None), invite.uses or 0, captured_at),
+                    (
+                        member.guild.id,
+                        invite.code,
+                        getattr(invite.inviter, "id", None),
+                        pending_uses,
+                        captured_at,
+                    ),
                 )
         inviter = getattr(found.inviter, 'id', None) if found else None; code = found.code if found else None
         age_days = account_age_days(member)
