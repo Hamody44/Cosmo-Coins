@@ -217,6 +217,17 @@ def _allow_auto_join_for_giveaway(guild_id: int, message_id: int):
         conn.close()
 
 
+def _get_auto_join_users(guild_id: int) -> list[int]:
+    """Return member IDs currently opted in for this guild."""
+    conn, cur = get_guild_db(guild_id)
+    try:
+        return [int(row[0]) for row in cur.execute(
+            "SELECT user_id FROM giveaway_auto_join_preferences WHERE enabled = 1 ORDER BY user_id"
+        ).fetchall()]
+    finally:
+        conn.close()
+
+
 class AutoJoinGiveawayConfirmView(discord.ui.View):
     def __init__(self, cog, user_id: int):
         super().__init__(timeout=120)
@@ -945,6 +956,43 @@ class Games(commands.Cog):
             return await ctx.send("❌ استخدم الأمر داخل السيرفر فقط.")
         await asyncio.to_thread(_set_auto_join_preference, ctx.guild.id, ctx.author.id, False)
         await ctx.send("✅ تم إيقاف الدخول التلقائي. لن يتم إدخالك في الجيفات الجديدة المسموح بها.")
+
+    @commands.hybrid_command(
+        name="list_auto_join_giveaway",
+        aliases=["قائمة_الدخول_التلقائي"],
+        description="عرض الأعضاء المفعّلين لخدمة الدخول التلقائي للجيفات",
+    )
+    async def list_auto_join_giveaway(self, ctx: commands.Context):
+        if not ctx.guild or not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
+        user_ids = await asyncio.to_thread(_get_auto_join_users, ctx.guild.id)
+        if not user_ids:
+            return await ctx.send("ℹ️ لا يوجد أعضاء مفعّلون لخدمة الدخول التلقائي حاليًا.")
+
+        current_members = []
+        missing_ids = []
+        for user_id in user_ids:
+            member = ctx.guild.get_member(user_id)
+            if member:
+                current_members.append(member.mention)
+            else:
+                missing_ids.append(str(user_id))
+
+        lines = [
+            f"📋 **أعضاء الدخول التلقائي المفعّلون: {len(user_ids)}**",
+            f"**الموجودون في السيرفر:** {len(current_members)}",
+        ]
+        if current_members:
+            lines.append("\n".join(f"{index}. {mention}" for index, mention in enumerate(current_members, 1)))
+        if missing_ids:
+            lines.append(
+                "\n**معرّفات غير موجودة حاليًا في السيرفر:** "
+                + ", ".join(f"`{user_id}`" for user_id in missing_ids)
+            )
+
+        text = "\n".join(lines)
+        for start in range(0, len(text), 1900):
+            await ctx.send(text[start:start + 1900])
 
     @commands.hybrid_command(
         name="allow_join_giveaway",
