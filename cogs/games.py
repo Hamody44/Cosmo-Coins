@@ -137,6 +137,116 @@ def _change_giveaway_participant(guild_id: int, message_id: int, user_id: int, a
     finally:
         conn.close()
 
+
+def _set_auto_join_preference(guild_id: int, user_id: int, enabled: bool) -> int:
+    """Save one member's opt-in choice and add them to currently allowed giveaways."""
+    conn, cur = get_guild_db(guild_id)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            "INSERT INTO giveaway_auto_join_preferences (user_id, enabled) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET enabled = excluded.enabled",
+            (int(user_id), int(enabled)),
+        )
+        joined = 0
+        if enabled:
+            rows = cur.execute(
+                "SELECT message_id, participants_json FROM active_giveaways "
+                "WHERE status = 'active' AND auto_join_allowed = 1 AND end_timestamp > ?",
+                (int(time.time()),),
+            ).fetchall()
+            for message_id, participants_json in rows:
+                participants = json.loads(participants_json) if participants_json else []
+                if int(user_id) in participants:
+                    continue
+                participants.append(int(user_id))
+                cur.execute(
+                    "UPDATE active_giveaways SET participants_json = ? WHERE message_id = ? AND status = 'active'",
+                    (json.dumps(participants), message_id),
+                )
+                joined += 1
+        conn.commit()
+        return joined
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _allow_auto_join_for_giveaway(guild_id: int, message_id: int):
+    """Open one active giveaway to opted-in members and add them atomically."""
+    conn, cur = get_guild_db(guild_id)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = cur.execute(
+            "SELECT channel_id, participants_json, end_timestamp, auto_join_allowed "
+            "FROM active_giveaways WHERE message_id = ? AND status = 'active'",
+            (int(message_id),),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        if int(row[2] or 0) <= int(time.time()):
+            conn.rollback()
+            return {"expired": True, "already_allowed": bool(row[3])}
+
+        participants = json.loads(row[1]) if row[1] else []
+        opted_in = [int(item[0]) for item in cur.execute(
+            "SELECT user_id FROM giveaway_auto_join_preferences WHERE enabled = 1"
+        ).fetchall()]
+        existing = {int(user_id) for user_id in participants}
+        new_ids = [user_id for user_id in opted_in if user_id not in existing]
+        participants.extend(new_ids)
+        cur.execute(
+            "UPDATE active_giveaways SET auto_join_allowed = 1, participants_json = ? "
+            "WHERE message_id = ? AND status = 'active'",
+            (json.dumps(participants), int(message_id)),
+        )
+        conn.commit()
+        return {
+            "channel_id": int(row[0]),
+            "already_allowed": bool(row[3]),
+            "joined": len(new_ids),
+            "participant_count": len(participants),
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+class AutoJoinGiveawayConfirmView(discord.ui.View):
+    def __init__(self, cog, user_id: int):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.user_id = int(user_id)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("⛔ هذا التأكيد مخصص لصاحبه فقط.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="تأكيد الاشتراك التلقائي", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ استخدم الأمر داخل السيرفر فقط.", ephemeral=True)
+        joined = await asyncio.to_thread(
+            _set_auto_join_preference, interaction.guild.id, interaction.user.id, True
+        )
+        self.stop()
+        button.disabled = True
+        await interaction.response.edit_message(
+            content=(
+                "✅ تم تفعيل الاشتراك التلقائي. سيدخلك البوت في الجيف فقط بعد سماح الإدارة "
+                f"(تم إدخالك الآن في {joined} جيف مسموح).\n"
+                "لإيقافه استخدم `/stop_auto_join_giveaway`."
+            ),
+            view=self,
+        )
+
 def can_manage_server_games(ctx: commands.Context) -> bool:
     """مالك السيرفر يستطيع بدء ألعاب الجوائز حتى دون بريميوم؛ بقية الصلاحيات كما هي."""
     if not ctx.guild:
@@ -568,6 +678,34 @@ class Games(commands.Cog):
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
+    async def _refresh_giveaway_participant_count(self, guild, channel, msg_id: int):
+        try:
+            message = await channel.fetch_message(msg_id)
+            if not message.embeds:
+                return
+            conn, cur = get_guild_db(guild.id)
+            try:
+                row = cur.execute(
+                    "SELECT amount, winners_count, condition, participants_json, end_timestamp "
+                    "FROM active_giveaways WHERE message_id = ?",
+                    (msg_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            if not row:
+                return
+            amount, winners_count, condition, participants_json, end_timestamp = row
+            participants = json.loads(participants_json) if participants_json else []
+            embed = message.embeds[0]
+            embed.description = (
+                f"**الجائزة لكل فائز:** `{amount:,}` {get_currency_label(guild.id)}\n"
+                f"**عدد الفائزين:** `{winners_count}`\n**المشاركين:** `{len(participants)}`\n"
+                f"**الشرط:** {condition if condition else 'لا يوجد شرط'}\n**ينتهي:** <t:{end_timestamp}:R>"
+            )
+            await message.edit(embed=embed)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
     async def monitor_giveaway(self, guild_id: int, channel_id: int, msg_id: int, duration_sec: int):
         await asyncio.sleep(max(0, duration_sec))
         guild = self.bot.get_guild(guild_id)
@@ -778,6 +916,58 @@ class Games(commands.Cog):
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 return None
         return channel
+
+    @commands.hybrid_command(
+        name="auto_join_giveaway",
+        aliases=["دخول_تلقائي_جيف"],
+        description="طلب تفعيل الدخول التلقائي للجيفات بعد تأكيد العضو",
+    )
+    async def auto_join_giveaway(self, ctx: commands.Context):
+        if not ctx.guild:
+            return await ctx.send("❌ استخدم الأمر داخل السيرفر فقط.")
+        if is_blacklisted(ctx.author):
+            return await ctx.send("⛔ لا يمكن تفعيل الدخول التلقائي للحسابات الموجودة في البلاك ليست.")
+        await ctx.send(
+            "اضغط الزر لتأكيد اشتراكك في الدخول التلقائي.\n"
+            "لن يتم إدخالك في أي جيف إلا بعد أن تسمح الإدارة للجيف تحديدًا باستخدام "
+            "`/allow_join_giveaway`.\n"
+            "يمكنك الإلغاء لاحقًا عبر `/stop_auto_join_giveaway`.",
+            view=AutoJoinGiveawayConfirmView(self, ctx.author.id),
+        )
+
+    @commands.hybrid_command(
+        name="stop_auto_join_giveaway",
+        aliases=["إيقاف_دخول_تلقائي_جيف"],
+        description="إيقاف الدخول التلقائي إلى الجيفات",
+    )
+    async def stop_auto_join_giveaway(self, ctx: commands.Context):
+        if not ctx.guild:
+            return await ctx.send("❌ استخدم الأمر داخل السيرفر فقط.")
+        await asyncio.to_thread(_set_auto_join_preference, ctx.guild.id, ctx.author.id, False)
+        await ctx.send("✅ تم إيقاف الدخول التلقائي. لن يتم إدخالك في الجيفات الجديدة المسموح بها.")
+
+    @commands.hybrid_command(
+        name="allow_join_giveaway",
+        aliases=["السماح_بدخول_جيف"],
+        description="السماح للمشتركين بالدخول التلقائي في جيف محدد",
+    )
+    async def allow_join_giveaway(self, ctx: commands.Context, message_id: int):
+        if not ctx.guild or not can_manage_server_games(ctx):
+            return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
+        result = await asyncio.to_thread(_allow_auto_join_for_giveaway, ctx.guild.id, message_id)
+        if not result:
+            return await ctx.send("❌ لم أجد جيفًا نشطًا بهذا المعرّف.")
+        if result.get("expired"):
+            return await ctx.send("❌ انتهى وقت هذا الجيف؛ لا يمكن فتح الدخول التلقائي له.")
+        channel = await self._giveaway_channel(ctx.guild, result["channel_id"])
+        if channel:
+            await self._refresh_giveaway_participant_count(ctx.guild, channel, message_id)
+        if result["already_allowed"]:
+            return await ctx.send("ℹ️ الدخول التلقائي مسموح لهذا الجيف مسبقًا.")
+        await ctx.send(
+            f"✅ تم السماح بالدخول التلقائي للجيف `{message_id}`، "
+            f"وأُدخل {result['joined']} عضوًا مشتركًا تلقائيًا."
+        )
 
     @commands.hybrid_command(name="stop_giveaway", description="إيقاف جيف نشط وإرجاع كامل ميزانيته للسيرفر")
     async def stop_giveaway(self, ctx: commands.Context, message_id: int):

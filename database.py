@@ -172,6 +172,7 @@ def get_guild_db(guild_id: int):
         ("status", "TEXT NOT NULL DEFAULT 'active'"),
         ("generation", "INTEGER NOT NULL DEFAULT 0"),
         ("managed_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("auto_join_allowed", "INTEGER NOT NULL DEFAULT 0"),
     ):
         _ensure_guild_db_column(cur, "active_giveaways", column, definition, schema_key)
     if schema_key not in _guild_schema_initialized:
@@ -186,6 +187,10 @@ def get_guild_db(guild_id: int):
         user_id INTEGER,
         state TEXT NOT NULL,
         PRIMARY KEY(message_id, generation, prize_slot)
+    )''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS giveaway_auto_join_preferences (
+        user_id INTEGER PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0
     )''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS boost_system_config (
