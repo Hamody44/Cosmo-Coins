@@ -302,7 +302,7 @@ def auto_join_available(ctx: commands.Context) -> bool:
 
 
 def auto_join_unavailable_message() -> str:
-    return "⛔ ميزة الدخول التلقائي للجيفات متاحة داخل سيرفر Cosmo فقط."
+    return "⛔ الأمر غير متاح"
 
 class RouletteSession:
     def __init__(self, guild_id: int, amount: int):
