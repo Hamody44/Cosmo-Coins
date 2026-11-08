@@ -12,6 +12,7 @@ from database import (
     clean_display_name, get_unicode_font, PRIMARY_OWNER_ID, get_currency_label,
     credit_giveaway_prize, giveaway_has_any_payout,
     guarded_server_budget_credit,
+    COSMO_GUILD_ID,
 )
 from PIL import Image, ImageDraw, ImageOps
 
@@ -293,6 +294,15 @@ def can_manage_server_games(ctx: commands.Context) -> bool:
     if not ctx.guild:
         return False
     return ctx.author.id == ctx.guild.owner_id or is_bot_admin(ctx)
+
+
+def auto_join_available(ctx: commands.Context) -> bool:
+    """The auto-join feature is intentionally restricted to the Cosmo guild."""
+    return bool(ctx.guild and int(ctx.guild.id) == int(COSMO_GUILD_ID))
+
+
+def auto_join_unavailable_message() -> str:
+    return "⛔ ميزة الدخول التلقائي للجيفات متاحة داخل سيرفر Cosmo فقط."
 
 class RouletteSession:
     def __init__(self, guild_id: int, amount: int):
@@ -966,6 +976,8 @@ class Games(commands.Cog):
     async def auto_join_giveaway(self, ctx: commands.Context):
         if not ctx.guild:
             return await ctx.send("❌ استخدم الأمر داخل السيرفر فقط.")
+        if not auto_join_available(ctx):
+            return await ctx.send(auto_join_unavailable_message())
         if is_blacklisted(ctx.author):
             return await ctx.send("⛔ لا يمكن تفعيل الدخول التلقائي للحسابات الموجودة في البلاك ليست.")
         await ctx.send(
@@ -984,6 +996,8 @@ class Games(commands.Cog):
     async def stop_auto_join_giveaway(self, ctx: commands.Context):
         if not ctx.guild:
             return await ctx.send("❌ استخدم الأمر داخل السيرفر فقط.")
+        if not auto_join_available(ctx):
+            return await ctx.send(auto_join_unavailable_message())
         await asyncio.to_thread(_set_auto_join_preference, ctx.guild.id, ctx.author.id, False)
         await ctx.send("✅ تم إيقاف الدخول التلقائي. لن يتم إدخالك في الجيفات الجديدة المسموح بها.")
 
@@ -993,7 +1007,11 @@ class Games(commands.Cog):
         description="عرض الأعضاء المفعّلين لخدمة الدخول التلقائي للجيفات",
     )
     async def list_auto_join_giveaway(self, ctx: commands.Context):
-        if not ctx.guild or not can_manage_server_games(ctx):
+        if not ctx.guild:
+            return await ctx.send("❌ استخدم الأمر داخل السيرفر فقط.")
+        if not auto_join_available(ctx):
+            return await ctx.send(auto_join_unavailable_message())
+        if not can_manage_server_games(ctx):
             return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
         user_ids = await asyncio.to_thread(_get_auto_join_users, ctx.guild.id)
         if not user_ids:
@@ -1030,7 +1048,11 @@ class Games(commands.Cog):
         description="السماح للمشتركين بالدخول التلقائي في جيف محدد",
     )
     async def allow_join_giveaway(self, ctx: commands.Context, message_id: int):
-        if not ctx.guild or not can_manage_server_games(ctx):
+        if not ctx.guild:
+            return await ctx.send("❌ استخدم الأمر داخل السيرفر فقط.")
+        if not auto_join_available(ctx):
+            return await ctx.send(auto_join_unavailable_message())
+        if not can_manage_server_games(ctx):
             return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
         result = await asyncio.to_thread(_allow_auto_join_for_giveaway, ctx.guild.id, message_id)
         if not result:
