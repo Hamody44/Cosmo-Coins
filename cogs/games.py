@@ -230,7 +230,9 @@ def _get_auto_join_users(guild_id: int) -> list[int]:
 
 class AutoJoinGiveawayConfirmView(discord.ui.View):
     def __init__(self, cog, user_id: int):
-        super().__init__(timeout=120)
+        # Keep the confirmation available long enough for users who open the command
+        # from a mobile device or return to it later.
+        super().__init__(timeout=15 * 60)
         self.cog = cog
         self.user_id = int(user_id)
 
@@ -244,19 +246,47 @@ class AutoJoinGiveawayConfirmView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.guild:
             return await interaction.response.send_message("❌ استخدم الأمر داخل السيرفر فقط.", ephemeral=True)
-        joined = await asyncio.to_thread(
-            _set_auto_join_preference, interaction.guild.id, interaction.user.id, True
-        )
-        self.stop()
-        button.disabled = True
-        await interaction.response.edit_message(
-            content=(
-                "✅ تم تفعيل الاشتراك التلقائي. سيدخلك البوت في الجيف فقط بعد سماح الإدارة "
-                f"(تم إدخالك الآن في {joined} جيف مسموح).\n"
-                "لإيقافه استخدم `/stop_auto_join_giveaway`."
-            ),
-            view=self,
-        )
+        try:
+            joined = await asyncio.to_thread(
+                _set_auto_join_preference, interaction.guild.id, interaction.user.id, True
+            )
+            self.stop()
+            button.disabled = True
+            await interaction.response.edit_message(
+                content=(
+                    "✅ تم تفعيل الاشتراك التلقائي. سيدخلك البوت في الجيف فقط بعد سماح الإدارة "
+                    f"(تم إدخالك الآن في {joined} جيف مسموح).\n"
+                    "لإيقافه استخدم `/stop_auto_join_giveaway`."
+                ),
+                view=self,
+            )
+        except Exception as exc:
+            print(
+                f"Auto-join confirmation failed for guild {interaction.guild.id}, "
+                f"user {interaction.user.id}: {exc}"
+            )
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "⚠️ تعذر حفظ الاشتراك الآن. حاول الضغط مرة أخرى أو استخدم الأمر لاحقًا.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "⚠️ تعذر حفظ الاشتراك الآن. حاول الضغط مرة أخرى أو استخدم الأمر لاحقًا.",
+                    ephemeral=True,
+                )
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        print(f"Auto-join confirmation interaction error: {error}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "⚠️ انتهت صلاحية التأكيد أو حدث خطأ مؤقت. أعد استخدام `/auto_join_giveaway` للحصول على زر جديد.",
+                ephemeral=True,
+            )
 
 def can_manage_server_games(ctx: commands.Context) -> bool:
     """مالك السيرفر يستطيع بدء ألعاب الجوائز حتى دون بريميوم؛ بقية الصلاحيات كما هي."""
