@@ -76,7 +76,11 @@ async def check_premium_expiry_task():
             g_cur.execute("SELECT premium_end FROM premium_info WHERE premium_end > 0 AND premium_end <= ?", (now,))
             row = g_cur.fetchone()
             if row:
-                g_cur.execute("UPDATE premium_info SET premium_end = 0, custom_banner_url = NULL WHERE guild_id = ?", (guild.id,))
+                g_cur.execute(
+                    "UPDATE premium_info SET premium_end = 0, custom_banner_url = NULL, custom_bio = NULL "
+                    "WHERE guild_id = ?",
+                    (guild.id,),
+                )
                 g_conn.commit()
                 if guild.me:
                     try:
@@ -89,7 +93,7 @@ async def check_premium_expiry_task():
                         pass
                     try:
                         route = discord.http.Route("PATCH", "/guilds/{guild_id}/members/@me", guild_id=guild.id)
-                        await bot.http.request(route, json={"banner": None})
+                        await bot.http.request(route, json={"banner": None, "bio": None})
                     except Exception:
                         pass
         except Exception as exc:

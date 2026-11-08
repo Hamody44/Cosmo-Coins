@@ -1239,6 +1239,40 @@ class Admin(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ حدث خطأ غير متوقع: {e}")
 
+    @commands.command(
+        name="set_bot_bio",
+        aliases=["تغيير_بايو_البوت", "بايو_البوت"],
+        description="تغيير البايو الخاص بالبوت داخل هذا السيرفر (Premium)",
+    )
+    async def set_bot_bio(self, ctx: commands.Context, *, new_bio: str):
+        if not can_manage_bot(ctx):
+            return await ctx.send("⛔ ليس لديك صلاحية لإدارة البوت.")
+        if not is_guild_premium(ctx.guild.id):
+            return await ctx.send("💎 **ميزة بريميوم:** تغيير بايو البوت يتطلب اشتراك بريميوم نشط للسيرفر!")
+
+        new_bio = " ".join(new_bio.split())
+        if new_bio.casefold() in {"clear", "reset", "مسح", "افتراضي"}:
+            new_bio = ""
+        if len(new_bio) > 190:
+            return await ctx.send("❌ البايو يجب ألا يتجاوز 190 حرفًا.")
+        if any(not char.isprintable() for char in new_bio):
+            return await ctx.send("❌ البايو يحتوي على رموز غير صالحة.")
+
+        try:
+            await ctx.guild.me.edit(bio=new_bio or None)
+            g_conn, g_cur = get_guild_db(ctx.guild.id)
+            g_cur.execute("UPDATE premium_info SET custom_bio = ? WHERE guild_id = ?", (new_bio or None, ctx.guild.id))
+            g_conn.commit()
+            g_conn.close()
+            await ctx.send(
+                "✅ تم مسح بايو البوت في هذا السيرفر." if not new_bio
+                else "✅ تم تغيير بايو البوت في هذا السيرفر فقط بنجاح."
+            )
+        except discord.HTTPException as exc:
+            await ctx.send(f"❌ تعذر تغيير البايو داخل السيرفر: {exc}")
+        except Exception as exc:
+            await ctx.send(f"❌ حدث خطأ غير متوقع: {exc}")
+
     @commands.command(name="set_global_request_log", aliases=["لوج_الطلبات_العام"], description="تحديد الروم الموحد لاستقبال طلبات التبديل من كل السيرفرات (مالك البوت فقط)")
     async def set_global_request_log(self, ctx: commands.Context, channel: discord.TextChannel):
         if not await check_is_owner(self.bot, ctx):

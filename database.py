@@ -137,6 +137,7 @@ def get_guild_db(guild_id: int):
         custom_name TEXT,
         custom_avatar_url TEXT,
         custom_banner_url TEXT,
+        custom_bio TEXT,
         custom_currency_name TEXT
     )''')
 
@@ -372,6 +373,7 @@ def get_guild_db(guild_id: int):
 
     # ترقية الجداول في حال وجود قواعد بيانات منشأة مسبقاً
     _ensure_guild_db_column(cur, "premium_info", "custom_banner_url", "TEXT", schema_key)
+    _ensure_guild_db_column(cur, "premium_info", "custom_bio", "TEXT", schema_key)
     _ensure_guild_db_column(cur, "settings", "exchange_room", "INTEGER", schema_key)
     _ensure_guild_db_column(cur, "settings", "ticket_log", "INTEGER", schema_key)
     _ensure_guild_db_column(cur, "settings", "invite_log", "INTEGER", schema_key)
