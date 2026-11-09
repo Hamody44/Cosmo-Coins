@@ -129,6 +129,13 @@ class PoolGame:
         if self.turn_deadline is None and not self.moving:
             self.turn_deadline = float(now if now is not None else time.monotonic()) + TURN_SECONDS
 
+    @property
+    def turn_remaining(self) -> int:
+        """Return the visible turn timer without serializing the whole table."""
+        if self.turn_deadline is not None and not self.moving:
+            return max(0, int(self.turn_deadline - time.monotonic() + 0.999))
+        return 0
+
     def _expire_turn_if_needed(self) -> None:
         if self.turn_deadline is not None and time.monotonic() >= self.turn_deadline:
             self.turn_index = (self.turn_index + 1) % 2
@@ -141,6 +148,6 @@ class PoolGame:
             "turn_user_id": self.current_player_id,
             "moving": self.moving,
             "shot_number": self.shot_number,
-            "turn_remaining": max(0, int(self.turn_deadline - time.monotonic() + 0.999)) if self.turn_deadline and not self.moving else 0,
+            "turn_remaining": self.turn_remaining,
             "balls": [{"number": b.number, "x": round(b.x, 5), "y": round(b.y, 5), "pocketed": b.pocketed} for b in self.balls],
         }

@@ -29,6 +29,9 @@ from dashboard.pool_game import PoolGame
 LOGGER = logging.getLogger("cosmo.realtime")
 PROTOCOL_VERSION = "cosmo-8ball-v1"
 MAX_MESSAGE_BYTES = 16 * 1024
+# PoolGame.step() caps each integration step at 50 ms; 25 Hz stays below that
+# cap while reducing collision checks and WebSocket updates versus 30 Hz.
+POOL_PHYSICS_INTERVAL = 1 / 25
 
 
 @dataclass
@@ -325,12 +328,16 @@ async def _pool_physics_loop() -> None:
         try:
             for match_key, game in list(pool_games.items()):
                 changed = game.step()
-                remaining = game.public()["turn_remaining"]
+                # Avoid constructing a full 16-ball public snapshot just to read
+                # the timer; the snapshot is built only if it is broadcast.
+                remaining = game.turn_remaining
                 timer_changed = last_remaining.get(match_key) != remaining
                 last_remaining[match_key] = remaining
                 if changed or timer_changed:
                     await _broadcast_pool_state(match_key)
-            await asyncio.sleep(1 / 30 if any(game.moving for game in pool_games.values()) else 0.25)
+            await asyncio.sleep(
+                POOL_PHYSICS_INTERVAL if any(game.moving for game in pool_games.values()) else 0.25
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
