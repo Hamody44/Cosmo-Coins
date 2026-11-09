@@ -38,7 +38,9 @@ COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-DEFAULT_VISION_MODEL = "gemini-2.5-flash"
+# Flash-Lite is the lower-latency multimodal Gemini model and is sufficient for OCR-like number extraction.
+DEFAULT_VISION_MODEL = "gemini-2.5-flash-lite"
+VISION_REQUEST_TIMEOUT_SECONDS = 30
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_MIME_BY_EXTENSION = {
     ".jpg": "image/jpeg",
@@ -116,21 +118,30 @@ async def extract_numbers_from_image(
             raise RuntimeError("GEMINI_API_KEY is missing")
         client = genai.Client(api_key=api_key)
 
-    response = await client.aio.models.generate_content(
-        model=model or configured_model,
-        contents=[
-            (
-                "استخرج كل الأرقام الظاهرة في الصورة. أعد JSON صالحًا فقط بهذا الشكل: "
-                '{"numbers":["..."]}. ضع كل رقم أو قيمة رقمية في عنصر مستقل، وحافظ على ترتيب الظهور. '
-                "لا تخمّن أرقامًا غير واضحة، ولا تضع أي نص آخر داخل JSON."
+    try:
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=model or configured_model,
+                contents=[
+                    (
+                        "استخرج كل الأرقام الظاهرة في الصورة. أعد JSON صالحًا فقط بهذا الشكل: "
+                        '{"numbers":["..."]}. ضع كل رقم أو قيمة رقمية في عنصر مستقل، وحافظ على ترتيب الظهور. '
+                        "لا تخمّن أرقامًا غير واضحة، ولا تضع أي نص آخر داخل JSON."
+                    ),
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0,
+                    max_output_tokens=128,
+                    response_mime_type="application/json",
+                ),
             ),
-            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-        ],
-        config=types.GenerateContentConfig(
-            temperature=0,
-            response_mime_type="application/json",
-        ),
-    )
+            timeout=VISION_REQUEST_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            f"Gemini vision request timed out after {VISION_REQUEST_TIMEOUT_SECONDS} seconds"
+        ) from exc
 
     try:
         content = response.text

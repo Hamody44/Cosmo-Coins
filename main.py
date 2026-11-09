@@ -5,9 +5,7 @@ import subprocess
 import urllib.request
 import stat
 import json
-import math
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from database import (
@@ -29,105 +27,13 @@ intents.members = True
 intents.reactions = True
 intents.voice_states = True
 
-USER_COMMAND_COOLDOWN_SECONDS = 30
-user_command_cooldowns: dict[tuple[int, int], float] = {}
-COOLDOWN_EXEMPT_COMMANDS = frozenset({"delete", "box", "rename"})
-
-
-def command_ignores_cooldown(command) -> bool:
-    """Return whether a command should bypass and not consume the user cooldown."""
-    command_name = getattr(command, "qualified_name", None) or getattr(command, "name", None)
-    return command_name in COOLDOWN_EXEMPT_COMMANDS
-
-
-class UserCommandCooldown(commands.CheckFailure):
-    """Raised when a user invokes a second prefix command too soon."""
-
-    def __init__(self, retry_after: float):
-        self.retry_after = retry_after
-        super().__init__(f"retry after {retry_after:.3f} seconds")
-
-
-class AppUserCommandCooldown(app_commands.CheckFailure):
-    """Raised when a user invokes a second slash command too soon."""
-
-    def __init__(self, retry_after: float):
-        self.retry_after = retry_after
-        super().__init__()
-
-
-class CooldownCommandTree(app_commands.CommandTree):
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Buttons/modals are not commands and must not consume the command cooldown.
-        if interaction.command is None:
-            return True
-        if command_ignores_cooldown(interaction.command):
-            return True
-
-        user_id = getattr(interaction.user, "id", None)
-        if user_id is None:
-            return True
-        guild_id = int(getattr(interaction, "guild_id", None) or 0)
-        cooldown_key = (int(user_id), guild_id)
-        now = time.monotonic()
-        retry_at = user_command_cooldowns.get(cooldown_key, 0.0)
-        if retry_at > now:
-            raise AppUserCommandCooldown(retry_at - now)
-        return True
-
-
 bot = commands.Bot(
     command_prefix="!",
     intents=intents,
     help_command=None,
-    tree_cls=CooldownCommandTree,
 )
 bot.owner_id = PRIMARY_OWNER_ID
 
-
-async def check_user_command_cooldown(ctx: commands.Context) -> bool:
-    """Check the cooldown without consuming it before command validation."""
-    user_id = getattr(ctx.author, "id", None)
-    if user_id is None:
-        return True
-    guild_id = int(getattr(ctx.guild, "id", None) or 0)
-    cooldown_key = (int(user_id), guild_id)
-    now = time.monotonic()
-    retry_at = user_command_cooldowns.get(cooldown_key, 0.0)
-    if retry_at > now:
-        raise UserCommandCooldown(retry_at - now)
-    return True
-
-
-def _cooldown_key(user_id: int | None, guild_id: int | None) -> tuple[int, int] | None:
-    if user_id is None:
-        return None
-    return int(user_id), int(guild_id or 0)
-
-
-def _set_user_command_cooldown(user_id: int | None, guild_id: int | None) -> None:
-    key = _cooldown_key(user_id, guild_id)
-    if key is not None:
-        user_command_cooldowns[key] = time.monotonic() + USER_COMMAND_COOLDOWN_SECONDS
-
-
-@bot.before_invoke
-async def before_prefix_command(ctx: commands.Context) -> None:
-    """Run the cooldown check after command-specific checks have passed."""
-    if command_ignores_cooldown(getattr(ctx, "command", None)):
-        return
-    await check_user_command_cooldown(ctx)
-
-
-@bot.after_invoke
-async def after_prefix_command(ctx: commands.Context) -> None:
-    """Consume cooldown only after a prefix/hybrid command completes successfully."""
-    if command_ignores_cooldown(getattr(ctx, "command", None)):
-        return
-    _set_user_command_cooldown(
-        getattr(ctx.author, "id", None),
-        getattr(ctx.guild, "id", None),
-    )
 
 SHARED_GUILD_STATE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -381,28 +287,9 @@ async def on_ready():
 
 
 @bot.event
-async def on_app_command_completion(interaction: discord.Interaction, command: app_commands.Command):
-    """Consume cooldown only after a slash command completes successfully."""
-    if command_ignores_cooldown(command):
-        return
-    _set_user_command_cooldown(
-        getattr(interaction.user, "id", None),
-        getattr(interaction, "guild_id", None),
-    )
-
-@bot.event
 async def on_command_error(ctx, error):
     """Never leave a failed prefix/hybrid invocation without an explanation."""
     original = getattr(error, "original", error)
-    if isinstance(original, UserCommandCooldown):
-        try:
-            await ctx.send(
-                f"انتظر {math.ceil(original.retry_after)} ثانية قبل استخدام أمر آخر.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except Exception:
-            pass
-        return
     if isinstance(original, commands.CommandNotFound):
         return
     command_name = getattr(ctx.command, "qualified_name", "unknown")
@@ -420,16 +307,6 @@ async def on_app_command_error(interaction: discord.Interaction, error):
     original = getattr(error, "original", error)
     command_name = getattr(interaction.command, "name", "unknown") if interaction.command else "unknown"
     print(f"Slash command error command={command_name} type={type(original).__name__}: {original}")
-    if isinstance(original, AppUserCommandCooldown):
-        message = f"انتظر {math.ceil(original.retry_after)} ثانية قبل استخدام أمر آخر."
-        try:
-            if interaction.response.is_done():
-                await interaction.followup.send(message, ephemeral=True)
-            else:
-                await interaction.response.send_message(message, ephemeral=True)
-        except Exception:
-            pass
-        return
     if command_name not in {"8ball", "8ball_guess_reward", "8ball_claim"}:
         return
     message = f"❌ تعذر تنفيذ الأمر: {original}"
