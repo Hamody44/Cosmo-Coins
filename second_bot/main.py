@@ -54,9 +54,18 @@ def load_config() -> tuple[str, int]:
     return token, role_id
 
 
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, self_bot=True, help_command=None)
+def create_bot() -> commands.Bot:
+    """Create a bot compatible with both discord.py and discord.py-self."""
+    bot_options = {"command_prefix": "!", "self_bot": True, "help_command": None}
+    intents_type = getattr(discord, "Intents", None)
+    if intents_type is not None:
+        intents = intents_type.default()
+        intents.message_content = True
+        bot_options["intents"] = intents
+    return commands.Bot(**bot_options)
+
+
+bot = create_bot()
 
 class NotInSharedGuild(commands.CheckFailure):
     """Raised when a command is outside the primary bot's active guilds."""
