@@ -5,7 +5,7 @@
 ## الإعداد
 
 1. أنشئ تطبيقًا وبوتًا منفصلين من [Discord Developer Portal](https://discord.com/developers/applications)، ثم انسخ رمز البوت الخاص بهذا التطبيق فقط.
-2. انسخ `second_bot/.env.example` إلى `second_bot/.env`، ثم أدخل `SECOND_BOT_TOKEN` و`SAY_ALLOWED_ROLE_ID`. يقبل البرنامج أيضًا الاسم القديم `DISCORD_BOT_TOKEN`، ويفضّل القيمة الموجودة في `.env` الخاص بهذا البوت على متغيرات البيئة العامة لتفادي استخدام توكن Cosmo-Coins بالخطأ. قيمة الرتبة هي **Role ID** من السيرفر، وليست اسمها. فعّل Developer Mode في Discord ثم اختر Copy ID. لا تشارك الرمز ولا تضعه في Git.
+2. انسخ `second_bot/.env.example` إلى `second_bot/.env`، ثم أدخل `SECOND_BOT_TOKEN` و`SAY_ALLOWED_ROLE_ID`. لا يقبل البوت الثاني `DISCORD_BOT_TOKEN` كبديل، لتفادي استعمال توكن البوت الأساسي عند غياب إعداد توكن منفصل. قيمة الرتبة هي **Role ID** من السيرفر، وليست اسمها. فعّل Developer Mode في Discord ثم اختر Copy ID. لا تشارك الرمز ولا تضعه في Git.
 3. لا يحتاج البوت الثاني إلى إعداد `Gateway Intents` في هذا الوضع. يظل البوت الأساسي منفصلًا ويستخدم `Intents` الخاصة به.
 4. جهّز وصول البوت الثاني إلى السيرفرات المطلوبة وفق إعدادات Discord الحالية، مع الصلاحيات المذكورة أدناه.
 

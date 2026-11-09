@@ -16,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent
 SHARED_GUILD_STATE_PATH = BASE_DIR / ".runtime" / "shared_guilds.json"
 SHARED_GUILD_STATE_MAX_AGE_SECONDS = 90
 # The panel may expose Cosmo-Coins' DISCORD_BOT_TOKEN to every process.
-# Prefer this bot's local .env so it cannot accidentally inherit the other bot's token.
+# The second bot deliberately accepts only its dedicated token variable.
 load_dotenv(BASE_DIR / ".env", override=True)
 
 logging.basicConfig(
@@ -32,14 +32,11 @@ SAY_ALLOWED_ROLE_ID: int | None = None
 
 def load_config() -> tuple[str, int]:
     """Read and validate required environment variables."""
-    token = (
-        os.getenv("SECOND_BOT_TOKEN", "").strip()
-        or os.getenv("DISCORD_BOT_TOKEN", "").strip()
-    )
+    token = os.getenv("SECOND_BOT_TOKEN", "").strip()
     if token.lower().startswith("bot "):
         token = token[4:].strip()
     if not token:
-        raise ValueError("SECOND_BOT_TOKEN (or DISCORD_BOT_TOKEN) is missing. Set the account token in second_bot/.env.")
+        raise ValueError("SECOND_BOT_TOKEN is missing. Set the second bot's token in second_bot/.env.")
 
     role_id_value = os.getenv("SAY_ALLOWED_ROLE_ID", "").strip()
     try:
