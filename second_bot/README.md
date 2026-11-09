@@ -5,7 +5,7 @@
 ## الإعداد
 
 1. أنشئ تطبيقًا وبوتًا منفصلين من [Discord Developer Portal](https://discord.com/developers/applications)، ثم انسخ رمز البوت الخاص بهذا التطبيق فقط.
-2. انسخ `second_bot/.env.example` إلى `second_bot/.env`، ثم أدخل `DISCORD_BOT_TOKEN` و`SAY_ALLOWED_ROLE_ID`. قيمة الرتبة هي **Role ID** من السيرفر، وليست اسمها. فعّل Developer Mode في Discord ثم اختر Copy ID. لا تشارك الرمز ولا تضعه في Git.
+2. انسخ `second_bot/.env.example` إلى `second_bot/.env`، ثم أدخل `SECOND_BOT_TOKEN` و`SAY_ALLOWED_ROLE_ID`. يقبل البرنامج أيضًا الاسم القديم `DISCORD_BOT_TOKEN`، ويفضّل القيمة الموجودة في `.env` الخاص بهذا البوت على متغيرات البيئة العامة لتفادي استخدام توكن Cosmo-Coins بالخطأ. قيمة الرتبة هي **Role ID** من السيرفر، وليست اسمها. فعّل Developer Mode في Discord ثم اختر Copy ID. لا تشارك الرمز ولا تضعه في Git.
 3. من صفحة التطبيق، افتح **Bot → Privileged Gateway Intents** وفعّل **Message Content Intent**؛ يحتاج البوت إلى قراءة محتوى أوامر البادئة `!`.
 4. ادعُ البوت إلى السيرفر عبر OAuth2 باستخدام النطاق `bot`، مع الصلاحيات المذكورة أدناه.
 
@@ -15,6 +15,7 @@
 - **Manage Messages** حتى يتمكن من حذف رسالة الأمر التي كتبها المستخدم.
 - في سلاسل النقاش (Threads)، امنحه أيضًا **Send Messages in Threads**.
 - لا يحتاج البوت إلى صلاحية `Administrator`. إذا لم تتوفر صلاحية الإرسال، فسيسجّل ذلك في الطرفية لأن Discord لن يسمح له بإرسال رسالة خطأ داخل القناة.
+- المطلوب هو **Bot Token** من تبويب **Bot** في Developer Portal. لا يعمل `Application ID` أو `Client Secret` أو توكن مستخدم بدلًا منه؛ يمكن إدخال Bot Token الخام أو مع بادئة `Bot ` اختيارية.
 
 يستخدم البوت `discord.AllowedMentions.none()` لكل ما يرسله، لذلك لا يؤدي النص إلى تنبيه أشخاص أو أدوار أو `@everyone`.
 

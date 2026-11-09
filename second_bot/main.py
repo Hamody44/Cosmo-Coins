@@ -11,7 +11,9 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+# The panel may expose Cosmo-Coins' DISCORD_BOT_TOKEN to every process.
+# Prefer this bot's local .env so it cannot accidentally inherit the other bot's token.
+load_dotenv(BASE_DIR / ".env", override=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,9 +28,14 @@ SAY_ALLOWED_ROLE_ID: int | None = None
 
 def load_config() -> tuple[str, int]:
     """Read and validate required environment variables."""
-    token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    token = (
+        os.getenv("SECOND_BOT_TOKEN", "").strip()
+        or os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    )
+    if token.lower().startswith("bot "):
+        token = token[4:].strip()
     if not token:
-        raise ValueError("DISCORD_BOT_TOKEN is missing. Set it in second_bot/.env.")
+        raise ValueError("SECOND_BOT_TOKEN (or DISCORD_BOT_TOKEN) is missing. Set the bot token in second_bot/.env.")
 
     role_id_value = os.getenv("SAY_ALLOWED_ROLE_ID", "").strip()
     try:
@@ -178,7 +185,10 @@ def main() -> None:
     try:
         bot.run(token, log_handler=None)
     except discord.LoginFailure:
-        logger.critical("Discord rejected DISCORD_BOT_TOKEN. Check the token in second_bot/.env.")
+        logger.critical(
+            "Discord rejected the configured bot token. Verify that it is this application's Bot Token, "
+            "not an Application ID, Client Secret, or user token."
+        )
         sys.exit(2)
     except (discord.HTTPException, OSError):
         logger.exception("The bot stopped because it could not connect to Discord.")

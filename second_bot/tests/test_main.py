@@ -51,11 +51,27 @@ def make_context(*, role_ids: tuple[int, ...] = (ROLE_ID,), permissions: discord
 
 class BotConfigurationTests(unittest.TestCase):
     def test_load_config_returns_token_and_positive_role_id(self):
-        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": " test-token ", "SAY_ALLOWED_ROLE_ID": str(ROLE_ID)}):
+        with patch.dict(os.environ, {
+            "SECOND_BOT_TOKEN": "",
+            "DISCORD_BOT_TOKEN": " test-token ",
+            "SAY_ALLOWED_ROLE_ID": str(ROLE_ID),
+        }):
             self.assertEqual(main.load_config(), ("test-token", ROLE_ID))
 
+    def test_dedicated_token_takes_precedence_and_bot_prefix_is_removed(self):
+        with patch.dict(os.environ, {
+            "SECOND_BOT_TOKEN": " Bot second-bot-token ",
+            "DISCORD_BOT_TOKEN": "cosmo-coins-token",
+            "SAY_ALLOWED_ROLE_ID": str(ROLE_ID),
+        }):
+            self.assertEqual(main.load_config(), ("second-bot-token", ROLE_ID))
+
     def test_load_config_rejects_missing_token(self):
-        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "", "SAY_ALLOWED_ROLE_ID": str(ROLE_ID)}):
+        with patch.dict(os.environ, {
+            "SECOND_BOT_TOKEN": "",
+            "DISCORD_BOT_TOKEN": "",
+            "SAY_ALLOWED_ROLE_ID": str(ROLE_ID),
+        }):
             with self.assertRaisesRegex(ValueError, "DISCORD_BOT_TOKEN"):
                 main.load_config()
 
