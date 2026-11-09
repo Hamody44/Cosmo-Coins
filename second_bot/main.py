@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import json
+import base64
 import os
 import sys
 import time
@@ -11,10 +12,10 @@ import math
 import re
 from pathlib import Path
 
+import aiohttp
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-from google import genai
 from google.genai import types
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -38,9 +39,9 @@ COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-# Flash-Lite is the lower-latency multimodal Gemini model and is sufficient for OCR-like number extraction.
-DEFAULT_VISION_MODEL = "gemini-2.5-flash-lite"
-VISION_REQUEST_TIMEOUT_SECONDS = 30
+# The configured model is intentionally not replaced here; set GEMINI_VISION_MODEL in second_bot/.env.
+DEFAULT_VISION_MODEL = "gemini-3.8-flash"
+VISION_REQUEST_TIMEOUT_SECONDS = 25
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_MIME_BY_EXTENSION = {
     ".jpg": "image/jpeg",
@@ -113,40 +114,74 @@ async def extract_numbers_from_image(
 ) -> list[str]:
     """Ask Gemini Vision to return every number visible in an image."""
     api_key, configured_model = load_vision_config()
-    if client is None:
+    selected_model = model or configured_model
+    prompt = (
+        "استخرج كل الأرقام الظاهرة في الصورة. أعد JSON صالحًا فقط بهذا الشكل: "
+        '{"numbers":["..."]}. ضع كل رقم أو قيمة رقمية في عنصر مستقل، وحافظ على ترتيب الظهور. '
+        "لا تخمّن أرقامًا غير واضحة، ولا تضع أي نص آخر داخل JSON."
+    )
+
+    if client is not None:
+        # Kept for unit tests and callers that inject a Gemini-compatible client.
+        try:
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=selected_model,
+                    contents=[prompt, types.Part.from_bytes(data=image_bytes, mime_type=mime_type)],
+                    config=types.GenerateContentConfig(
+                        temperature=0,
+                        max_output_tokens=128,
+                        response_mime_type="application/json",
+                    ),
+                ),
+                timeout=VISION_REQUEST_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"Gemini vision request timed out after {VISION_REQUEST_TIMEOUT_SECONDS} seconds"
+            ) from exc
+        try:
+            content = response.text
+        except (AttributeError, ValueError) as exc:
+            raise RuntimeError("Gemini returned no readable text") from exc
+    else:
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is missing")
-        client = genai.Client(api_key=api_key)
-
-    try:
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=model or configured_model,
-                contents=[
-                    (
-                        "استخرج كل الأرقام الظاهرة في الصورة. أعد JSON صالحًا فقط بهذا الشكل: "
-                        '{"numbers":["..."]}. ضع كل رقم أو قيمة رقمية في عنصر مستقل، وحافظ على ترتيب الظهور. '
-                        "لا تخمّن أرقامًا غير واضحة، ولا تضع أي نص آخر داخل JSON."
-                    ),
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                ],
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    max_output_tokens=128,
-                    response_mime_type="application/json",
-                ),
-            ),
-            timeout=VISION_REQUEST_TIMEOUT_SECONDS,
+        endpoint = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{selected_model}:generateContent"
         )
-    except asyncio.TimeoutError as exc:
-        raise RuntimeError(
-            f"Gemini vision request timed out after {VISION_REQUEST_TIMEOUT_SECONDS} seconds"
-        ) from exc
+        request_body = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("ascii")}},
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0,
+                "maxOutputTokens": 128,
+                "responseMimeType": "application/json",
+            },
+        }
+        timeout = aiohttp.ClientTimeout(total=VISION_REQUEST_TIMEOUT_SECONDS)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(endpoint, params={"key": api_key}, json=request_body) as result:
+                    response_data = await result.json(content_type=None)
+                    if result.status >= 400:
+                        message = response_data.get("error", {}).get("message", f"HTTP {result.status}")
+                        raise RuntimeError(f"Gemini API error {result.status}: {message}")
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"Gemini vision request timed out after {VISION_REQUEST_TIMEOUT_SECONDS} seconds"
+            ) from exc
 
-    try:
-        content = response.text
-    except (AttributeError, ValueError) as exc:
-        raise RuntimeError("Gemini returned no readable text") from exc
+        try:
+            content = response_data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("Gemini returned no readable text") from exc
+
     if not content:
         return []
     return parse_numbers_response(content)
