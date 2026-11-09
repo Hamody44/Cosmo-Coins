@@ -183,6 +183,24 @@ def user_site_distributions() -> list[str]:
     return sorted(packages, key=str.casefold)
 
 
+def global_pip_distributions() -> list[str]:
+    """List pip-managed packages visible to base Python, excluding bootstrap tools."""
+    if sys.prefix != sys.base_prefix:
+        raise RuntimeError("Global cleanup must be run with base Python, not from inside a virtual environment.")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "list", "--format=freeze"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    packages = []
+    for line in result.stdout.splitlines():
+        name = line.split("==", 1)[0].strip()
+        if name and name.lower() not in PROTECTED_USER_PACKAGES:
+            packages.append(name)
+    return sorted(set(packages), key=str.casefold)
+
+
 def virtual_environments_exist(root: Path) -> bool:
     return all(
         (root / relative).is_file()
@@ -222,6 +240,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Report packages in the current user's site-packages; never touches system Python packages.",
     )
+    parser.add_argument(
+        "--clean-global-site",
+        action="store_true",
+        help="Report pip packages visible to base Python outside virtual environments.",
+    )
     return parser.parse_args()
 
 
@@ -234,6 +257,7 @@ def main() -> int:
     disposable = disposable_candidates(root)
     source = source_candidates(root) if args.include_source or args.delete_source else []
     user_packages = user_site_distributions() if args.clean_user_site else []
+    global_packages = global_pip_distributions() if args.clean_global_site else []
 
     print(f"Root: {root}")
     print("Protected: databases, logs, .env files, .runtime, backups, virtual environments, and requirements.")
@@ -250,6 +274,11 @@ def main() -> int:
         for package in user_packages:
             print(f"  [user package] {package}")
         print("System package paths such as /usr/lib and /usr/local/lib are never modified.")
+    if args.clean_global_site:
+        print(f"Global pip packages visible to base Python: {len(global_packages)}")
+        for package in global_packages:
+            print(f"  [global pip package] {package}")
+        print("Only packages reported by base Python's pip are candidates; apt/system files are not scanned directly.")
 
     if not args.apply:
         print("Dry run only; nothing was deleted. Use --apply after reviewing the list.")
@@ -272,6 +301,19 @@ def main() -> int:
             check=True,
         )
         print(f"Removed {len(user_packages)} user-site packages.")
+
+    if args.clean_global_site and global_packages:
+        if not virtual_environments_exist(root):
+            print("Refusing global cleanup: both project virtual environments must exist first.")
+            return 2
+        if not args.apply:
+            print("Dry run only; global pip packages were not removed. Use --apply after reviewing the list.")
+            return 0
+        subprocess.run(
+            [sys.executable, "-m", "pip", "uninstall", "--yes", *global_packages],
+            check=True,
+        )
+        print(f"Removed {len(global_packages)} global pip packages.")
 
     for path in disposable:
         remove_disposable(path)

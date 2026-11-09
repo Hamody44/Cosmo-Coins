@@ -109,3 +109,17 @@ python3 cleanup_unused_files.py --clean-user-site
 ```
 
 وعند التأكد من وجود `.venv` في جذر المشروع و`second_bot/.venv`، يمكن حذف مكتبات المستخدم فقط باستخدام `--apply --clean-user-site`. لا تلمس الأداة أبدًا مكتبات النظام في `/usr/lib` أو `/usr/local/lib`، لأن حذفها قد يعطل لوحة الاستضافة نفسها.
+
+إذا كانت الحزم القديمة ثُبّتت باستخدام `pip` العام وليس `pip install --user`، استخدم المعاينة التالية من Python العام:
+
+```bash
+python3 cleanup_unused_files.py --clean-global-site
+```
+
+ولحذف حزم pip العامة التي يعرضها Python الأساسي بعد مراجعة القائمة:
+
+```bash
+python3 cleanup_unused_files.py --apply --clean-global-site
+```
+
+هذا الخيار لا يعمل من داخل `.venv`، ويتطلب وجود بيئتي المشروع أولًا. وهو يحذف حزم pip فقط عبر `pip uninstall`، وليس ملفات النظام أو Python نفسه. لا تستخدمه إذا كانت لوحة الاستضافة أو خدمة أخرى تعتمد على حزم pip العامة نفسها.
