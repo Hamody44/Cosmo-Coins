@@ -42,6 +42,7 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # The configured model is intentionally not replaced here; set GEMINI_VISION_MODEL in second_bot/.env.
 DEFAULT_VISION_MODEL = "gemini-3.8-flash"
 DEFAULT_FALLBACK_VISION_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_OPENROUTER_MODEL = "openrouter/free"
 VISION_REQUEST_TIMEOUT_SECONDS = 20
 TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -105,6 +106,60 @@ def parse_numbers_response(content: str) -> list[str]:
     if not isinstance(numbers, list):
         raise RuntimeError("Gemini returned an invalid numbers list")
     return [str(value).strip() for value in numbers if str(value).strip()]
+
+
+async def extract_numbers_with_openrouter(
+    image_bytes: bytes,
+    mime_type: str,
+    *,
+    api_key: str,
+    model: str = DEFAULT_OPENROUTER_MODEL,
+) -> list[str]:
+    """Use OpenRouter's free vision router as a provider-level fallback."""
+    prompt = (
+        "استخرج كل الأرقام الظاهرة في الصورة. أعد JSON صالحًا فقط بهذا الشكل: "
+        '{"numbers":["..."]}. ضع كل رقم أو قيمة رقمية في عنصر مستقل، وحافظ على ترتيب الظهور. '
+        "لا تخمّن أرقامًا غير واضحة، ولا تضع أي نص آخر داخل JSON."
+    )
+    request_body = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+                    },
+                },
+            ],
+        }],
+        "temperature": 0,
+        "max_tokens": 128,
+    }
+    timeout = aiohttp.ClientTimeout(total=VISION_REQUEST_TIMEOUT_SECONDS)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=request_body,
+            ) as result:
+                response_data = await result.json(content_type=None)
+                if result.status >= 400:
+                    message = response_data.get("error", {}).get("message", f"HTTP {result.status}")
+                    raise RuntimeError(f"OpenRouter API error {result.status}: {message}")
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            f"OpenRouter vision request timed out after {VISION_REQUEST_TIMEOUT_SECONDS} seconds"
+        ) from exc
+
+    try:
+        content = response_data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("OpenRouter returned no readable text") from exc
+    return parse_numbers_response(content or "")
 
 
 async def extract_numbers_from_image(
@@ -197,6 +252,19 @@ async def extract_numbers_from_image(
                     logger.warning("%s", last_failure)
 
         if response_data is None or last_failure is not None and response_data.get("candidates") is None:
+            openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+            if openrouter_key:
+                try:
+                    logger.warning("Gemini was unavailable; trying OpenRouter free vision fallback.")
+                    return await extract_numbers_with_openrouter(
+                        image_bytes,
+                        mime_type,
+                        api_key=openrouter_key,
+                        model=os.getenv("OPENROUTER_VISION_MODEL", DEFAULT_OPENROUTER_MODEL).strip()
+                        or DEFAULT_OPENROUTER_MODEL,
+                    )
+                except RuntimeError as openrouter_failure:
+                    logger.warning("OpenRouter fallback failed: %s", openrouter_failure)
             raise last_failure or RuntimeError("Gemini returned no response")
 
         try:
