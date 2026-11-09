@@ -64,7 +64,6 @@ class CooldownCommandTree(app_commands.CommandTree):
         retry_at = user_command_cooldowns.get(cooldown_key, 0.0)
         if retry_at > now:
             raise AppUserCommandCooldown(retry_at - now)
-        user_command_cooldowns[cooldown_key] = now + USER_COMMAND_COOLDOWN_SECONDS
         return True
 
 
@@ -77,9 +76,8 @@ bot = commands.Bot(
 bot.owner_id = PRIMARY_OWNER_ID
 
 
-@bot.check
 async def check_user_command_cooldown(ctx: commands.Context) -> bool:
-    """Apply a 30-second cooldown independently per user and guild."""
+    """Check the cooldown without consuming it before command validation."""
     user_id = getattr(ctx.author, "id", None)
     if user_id is None:
         return True
@@ -89,8 +87,34 @@ async def check_user_command_cooldown(ctx: commands.Context) -> bool:
     retry_at = user_command_cooldowns.get(cooldown_key, 0.0)
     if retry_at > now:
         raise UserCommandCooldown(retry_at - now)
-    user_command_cooldowns[cooldown_key] = now + USER_COMMAND_COOLDOWN_SECONDS
     return True
+
+
+def _cooldown_key(user_id: int | None, guild_id: int | None) -> tuple[int, int] | None:
+    if user_id is None:
+        return None
+    return int(user_id), int(guild_id or 0)
+
+
+def _set_user_command_cooldown(user_id: int | None, guild_id: int | None) -> None:
+    key = _cooldown_key(user_id, guild_id)
+    if key is not None:
+        user_command_cooldowns[key] = time.monotonic() + USER_COMMAND_COOLDOWN_SECONDS
+
+
+@bot.before_invoke
+async def before_prefix_command(ctx: commands.Context) -> None:
+    """Run the cooldown check after command-specific checks have passed."""
+    await check_user_command_cooldown(ctx)
+
+
+@bot.after_invoke
+async def after_prefix_command(ctx: commands.Context) -> None:
+    """Consume cooldown only after a prefix/hybrid command completes successfully."""
+    _set_user_command_cooldown(
+        getattr(ctx.author, "id", None),
+        getattr(ctx.guild, "id", None),
+    )
 
 SHARED_GUILD_STATE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -341,6 +365,15 @@ async def on_ready():
             print(f"Synced {len(guild_synced)} slash commands to guild {sync_guild_id}.")
     except Exception as e:
         print(f"Error syncing slash commands ({type(e).__name__}): {e}")
+
+
+@bot.event
+async def on_app_command_completion(interaction: discord.Interaction, command: app_commands.Command):
+    """Consume cooldown only after a slash command completes successfully."""
+    _set_user_command_cooldown(
+        getattr(interaction.user, "id", None),
+        getattr(interaction, "guild_id", None),
+    )
 
 @bot.event
 async def on_command_error(ctx, error):
