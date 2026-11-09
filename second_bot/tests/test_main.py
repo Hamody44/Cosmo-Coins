@@ -89,6 +89,7 @@ class BotConfigurationTests(unittest.TestCase):
         options = bot_factory.call_args.kwargs
         self.assertNotIn("intents", options)
         self.assertTrue(options["self_bot"])
+        self.assertEqual(options["command_prefix"], "$")
 
 
 class SharedGuildCommandCheckTests(unittest.IsolatedAsyncioTestCase):
@@ -132,6 +133,29 @@ class SharedGuildCommandCheckTests(unittest.IsolatedAsyncioTestCase):
         ctx = make_context()
         await main.on_command_error(ctx, main.NotInSharedGuild("not shared"))
         ctx.send.assert_not_awaited()
+
+
+class UserCommandCooldownTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        main.user_command_cooldowns.clear()
+
+    def tearDown(self):
+        main.user_command_cooldowns.clear()
+
+    async def test_cooldown_is_personal_and_reports_remaining_time(self):
+        first_user = make_context()
+        second_user = make_context()
+        second_user.author.id = 987654322
+
+        with patch.object(main.time, "monotonic", side_effect=(100.0, 101.0, 101.0)):
+            self.assertTrue(await main.check_user_command_cooldown(first_user))
+            with self.assertRaises(main.UserCommandCooldown) as raised:
+                await main.check_user_command_cooldown(first_user)
+            self.assertAlmostEqual(raised.exception.retry_after, 29.0)
+            self.assertTrue(await main.check_user_command_cooldown(second_user))
+
+        await main.on_command_error(first_user, raised.exception)
+        self.assertIn("29", first_user.send.await_args.args[0])
 
 
 class SayCommandTests(unittest.IsolatedAsyncioTestCase):

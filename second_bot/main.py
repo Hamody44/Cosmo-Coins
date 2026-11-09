@@ -6,6 +6,8 @@ import json
 import os
 import sys
 import time
+import asyncio
+import math
 from pathlib import Path
 
 import discord
@@ -28,6 +30,10 @@ logger = logging.getLogger("second_bot")
 # Populated by load_config() in main(). Keeping imports side-effect free lets
 # the unit tests exercise commands without a real Discord token.
 SAY_ALLOWED_ROLE_ID: int | None = None
+COMMAND_PREFIX = "$"
+COMMAND_RESPONSE_DELAY_SECONDS = 1
+USER_COMMAND_COOLDOWN_SECONDS = 30
+user_command_cooldowns: dict[int, float] = {}
 
 
 def load_config() -> tuple[str, int]:
@@ -53,13 +59,21 @@ def load_config() -> tuple[str, int]:
 
 def create_bot() -> commands.Bot:
     """Create the self-client without configuring Gateway Intents."""
-    return commands.Bot(command_prefix="!", self_bot=True, help_command=None)
+    return commands.Bot(command_prefix=COMMAND_PREFIX, self_bot=True, help_command=None)
 
 
 bot = create_bot()
 
 class NotInSharedGuild(commands.CheckFailure):
     """Raised when a command is outside the primary bot's active guilds."""
+
+
+class UserCommandCooldown(commands.CheckFailure):
+    """Raised when a user invokes a second command during their cooldown."""
+
+    def __init__(self, retry_after: float):
+        self.retry_after = retry_after
+        super().__init__(f"retry after {retry_after:.3f} seconds")
 
 def load_shared_guild_ids(now: float | None = None) -> set[int]:
     """Return fresh primary-bot guild IDs; fail closed for missing or stale state."""
@@ -87,6 +101,22 @@ async def check_shared_guild(ctx: commands.Context) -> bool:
     """Only process commands in guilds where both bots are currently present."""
     if ctx.guild is None or int(ctx.guild.id) not in load_shared_guild_ids():
         raise NotInSharedGuild("Commands are only enabled in guilds shared with Cosmo-Coins.")
+    return True
+
+
+@bot.check
+async def check_user_command_cooldown(ctx: commands.Context) -> bool:
+    """Apply a separate 30-second command cooldown to each user of this bot."""
+    user_id = getattr(ctx.author, "id", None)
+    if user_id is None:
+        return True
+
+    now = time.monotonic()
+    retry_at = user_command_cooldowns.get(int(user_id), 0.0)
+    if retry_at > now:
+        raise UserCommandCooldown(retry_at - now)
+
+    user_command_cooldowns[int(user_id)] = now + USER_COMMAND_COOLDOWN_SECONDS
     return True
 
 
@@ -118,7 +148,7 @@ async def say(ctx: commands.Context, *, text: str) -> None:
 
     text = text.strip()
     if not text:
-        await send_notice(ctx, "النص فارغ. الاستخدام: `!say النص المطلوب`.")
+        await send_notice(ctx, f"النص فارغ. الاستخدام: `{COMMAND_PREFIX}say النص المطلوب`.")
         return
     if len(text) > 2000:
         await send_notice(ctx, "النص أطول من الحد المسموح (2000 حرف).")
@@ -159,6 +189,8 @@ async def say(ctx: commands.Context, *, text: str) -> None:
         await send_notice(ctx, "لا أستطيع حذف رسالة الأمر؛ امنحني صلاحية Manage Messages.")
         return
 
+    await asyncio.sleep(COMMAND_RESPONSE_DELAY_SECONDS)
+
     try:
         await ctx.message.delete()
     except discord.Forbidden:
@@ -182,6 +214,7 @@ async def say(ctx: commands.Context, *, text: str) -> None:
 @bot.command(name="ping")
 async def ping(ctx: commands.Context) -> None:
     """Show the bot's connected state and Discord gateway latency."""
+    await asyncio.sleep(COMMAND_RESPONSE_DELAY_SECONDS)
     latency_ms = round(bot.latency * 1000)
     response = f"حالة البوت: متصل\nسرعة الاستجابة (Ping): {latency_ms} ms"
     await ctx.send(response, allowed_mentions=discord.AllowedMentions.none())
@@ -196,11 +229,17 @@ async def on_ready() -> None:
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, NotInSharedGuild):
         return
+    if isinstance(error, UserCommandCooldown):
+        await send_notice(
+            ctx,
+            f"انتظر {math.ceil(error.retry_after)} ثانية قبل استخدام أمر آخر.",
+        )
+        return
     if isinstance(error, commands.CommandNotFound):
         return
 
     if isinstance(error, commands.MissingRequiredArgument) and ctx.command and ctx.command.name == "say":
-        await send_notice(ctx, "النص فارغ. الاستخدام: `!say النص المطلوب`.")
+        await send_notice(ctx, f"النص فارغ. الاستخدام: `{COMMAND_PREFIX}say النص المطلوب`.")
         return
 
     if isinstance(error, commands.CommandInvokeError):
