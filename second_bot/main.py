@@ -33,7 +33,7 @@ SAY_ALLOWED_ROLE_ID: int | None = None
 COMMAND_PREFIX = "$"
 COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
-user_command_cooldowns: dict[int, float] = {}
+user_command_cooldowns: dict[tuple[int, int], float] = {}
 
 
 def load_config() -> tuple[str, int]:
@@ -124,17 +124,19 @@ async def check_shared_guild(ctx: commands.Context) -> bool:
 
 @bot.check
 async def check_user_command_cooldown(ctx: commands.Context) -> bool:
-    """Apply a separate 30-second command cooldown to each user of this bot."""
+    """Apply a separate 30-second cooldown to each user in each guild."""
     user_id = getattr(ctx.author, "id", None)
     if user_id is None:
         return True
+    guild_id = int(getattr(ctx.guild, "id", None) or 0)
+    cooldown_key = (int(user_id), guild_id)
 
     now = time.monotonic()
-    retry_at = user_command_cooldowns.get(int(user_id), 0.0)
+    retry_at = user_command_cooldowns.get(cooldown_key, 0.0)
     if retry_at > now:
         raise UserCommandCooldown(retry_at - now)
 
-    user_command_cooldowns[int(user_id)] = now + USER_COMMAND_COOLDOWN_SECONDS
+    user_command_cooldowns[cooldown_key] = now + USER_COMMAND_COOLDOWN_SECONDS
     return True
 
 

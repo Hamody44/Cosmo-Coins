@@ -158,6 +158,14 @@ class UserCommandCooldownTests(unittest.IsolatedAsyncioTestCase):
         await main.on_command_error(first_user, raised.exception)
         self.assertIn("29", first_user.send.await_args.args[0])
 
+    async def test_same_user_can_use_command_in_another_guild(self):
+        first_guild = make_context(guild_id=777)
+        second_guild = make_context(guild_id=888)
+
+        with patch.object(main.time, "monotonic", return_value=100.0):
+            self.assertTrue(await main.check_user_command_cooldown(first_guild))
+            self.assertTrue(await main.check_user_command_cooldown(second_guild))
+
 
 class SayCommandTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):

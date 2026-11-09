@@ -30,7 +30,7 @@ intents.reactions = True
 intents.voice_states = True
 
 USER_COMMAND_COOLDOWN_SECONDS = 30
-user_command_cooldowns: dict[int, float] = {}
+user_command_cooldowns: dict[tuple[int, int], float] = {}
 
 
 class UserCommandCooldown(commands.CheckFailure):
@@ -58,11 +58,13 @@ class CooldownCommandTree(app_commands.CommandTree):
         user_id = getattr(interaction.user, "id", None)
         if user_id is None:
             return True
+        guild_id = int(getattr(interaction, "guild_id", None) or 0)
+        cooldown_key = (int(user_id), guild_id)
         now = time.monotonic()
-        retry_at = user_command_cooldowns.get(int(user_id), 0.0)
+        retry_at = user_command_cooldowns.get(cooldown_key, 0.0)
         if retry_at > now:
             raise AppUserCommandCooldown(retry_at - now)
-        user_command_cooldowns[int(user_id)] = now + USER_COMMAND_COOLDOWN_SECONDS
+        user_command_cooldowns[cooldown_key] = now + USER_COMMAND_COOLDOWN_SECONDS
         return True
 
 
@@ -77,15 +79,17 @@ bot.owner_id = PRIMARY_OWNER_ID
 
 @bot.check
 async def check_user_command_cooldown(ctx: commands.Context) -> bool:
-    """Apply the 30-second cooldown independently for each user of this bot."""
+    """Apply a 30-second cooldown independently per user and guild."""
     user_id = getattr(ctx.author, "id", None)
     if user_id is None:
         return True
+    guild_id = int(getattr(ctx.guild, "id", None) or 0)
+    cooldown_key = (int(user_id), guild_id)
     now = time.monotonic()
-    retry_at = user_command_cooldowns.get(int(user_id), 0.0)
+    retry_at = user_command_cooldowns.get(cooldown_key, 0.0)
     if retry_at > now:
         raise UserCommandCooldown(retry_at - now)
-    user_command_cooldowns[int(user_id)] = now + USER_COMMAND_COOLDOWN_SECONDS
+    user_command_cooldowns[cooldown_key] = now + USER_COMMAND_COOLDOWN_SECONDS
     return True
 
 SHARED_GUILD_STATE_PATH = os.path.join(
