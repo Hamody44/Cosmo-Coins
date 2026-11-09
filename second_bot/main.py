@@ -8,6 +8,7 @@ import sys
 import time
 import asyncio
 import math
+import re
 from pathlib import Path
 
 import discord
@@ -39,6 +40,13 @@ user_command_cooldowns: dict[tuple[int, int], float] = {}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 DEFAULT_VISION_MODEL = "gemini-2.5-flash"
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+IMAGE_MIME_BY_EXTENSION = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 
 
 def load_config() -> tuple[str, int]:
@@ -67,6 +75,31 @@ def load_vision_config() -> tuple[str, str]:
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     model = os.getenv("GEMINI_VISION_MODEL", DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL
     return api_key, model
+
+
+def attachment_image_mime_type(attachment) -> str | None:
+    """Return a supported image MIME type even when Discord omits content_type."""
+    content_type = (getattr(attachment, "content_type", None) or "").split(";", 1)[0].lower()
+    if content_type in SUPPORTED_IMAGE_TYPES:
+        return content_type
+    filename = str(getattr(attachment, "filename", ""))
+    return IMAGE_MIME_BY_EXTENSION.get(Path(filename).suffix.lower())
+
+
+def parse_numbers_response(content: str) -> list[str]:
+    """Parse Gemini JSON, tolerating Markdown code fences around the JSON."""
+    cleaned = content.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE).strip()
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Gemini returned invalid JSON for the image") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Gemini returned an invalid response object")
+    numbers = payload.get("numbers", [])
+    if not isinstance(numbers, list):
+        raise RuntimeError("Gemini returned an invalid numbers list")
+    return [str(value).strip() for value in numbers if str(value).strip()]
 
 
 async def extract_numbers_from_image(
@@ -99,17 +132,13 @@ async def extract_numbers_from_image(
         ),
     )
 
-    content = response.text
+    try:
+        content = response.text
+    except (AttributeError, ValueError) as exc:
+        raise RuntimeError("Gemini returned no readable text") from exc
     if not content:
         return []
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("The vision model returned invalid JSON") from exc
-    numbers = payload.get("numbers", [])
-    if not isinstance(numbers, list):
-        raise RuntimeError("The vision model returned an invalid numbers list")
-    return [str(value).strip() for value in numbers if str(value).strip()]
+    return parse_numbers_response(content)
 
 
 def create_bot() -> commands.Bot:
@@ -298,17 +327,18 @@ async def ping(ctx: commands.Context) -> None:
 @bot.command(name="numbers", aliases=["استخراج_الأرقام", "ارقام"])
 async def numbers(ctx: commands.Context) -> None:
     """Extract visible numbers from the first image attached to the command."""
-    attachment = next(
+    image_attachment = next(
         (
-            item
+            (item, attachment_image_mime_type(item))
             for item in getattr(ctx.message, "attachments", [])
-            if (item.content_type or "").split(";", 1)[0].lower() in SUPPORTED_IMAGE_TYPES
+            if attachment_image_mime_type(item) is not None
         ),
         None,
     )
-    if attachment is None:
+    if image_attachment is None:
         await send_notice(ctx, f"أرفق صورة مع الأمر، مثل: `{COMMAND_PREFIX}numbers`.")
         return
+    attachment, mime_type = image_attachment
 
     if getattr(attachment, "size", 0) > MAX_IMAGE_BYTES:
         await send_notice(ctx, "حجم الصورة كبير جدًا. الحد الأقصى هو 8 ميغابايت.")
@@ -327,11 +357,15 @@ async def numbers(ctx: commands.Context) -> None:
             return
         numbers_found = await extract_numbers_from_image(
             image_bytes,
-            (attachment.content_type or "image/png").split(";", 1)[0].lower(),
+            mime_type,
         )
+    except RuntimeError as exc:
+        logger.warning("Image number extraction failed: %s", exc)
+        await send_notice(ctx, "تعذر قراءة الأرقام من الصورة. جرّب صورة أوضح وتأكد من إعداد GEMINI_API_KEY.")
+        return
     except Exception:
-        logger.exception("Failed to extract numbers from an image.")
-        await send_notice(ctx, "تعذر استخراج الأرقام من الصورة الآن. حاول مرة أخرى لاحقًا.")
+        logger.exception("Unexpected failure while extracting numbers from an image.")
+        await send_notice(ctx, "حدث خطأ أثناء استخراج الأرقام من الصورة. حاول مرة أخرى لاحقًا.")
         return
 
     if not numbers_found:

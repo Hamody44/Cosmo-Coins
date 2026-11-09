@@ -294,6 +294,16 @@ class PingCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
+    def test_parse_numbers_accepts_json_code_block(self):
+        self.assertEqual(
+            main.parse_numbers_response('```json\n{"numbers":["101","22.5"]}\n```'),
+            ["101", "22.5"],
+        )
+
+    def test_attachment_image_type_uses_filename_when_content_type_is_missing(self):
+        attachment = SimpleNamespace(content_type=None, filename="receipt.JPG")
+        self.assertEqual(main.attachment_image_mime_type(attachment), "image/jpeg")
+
     async def test_extract_numbers_uses_json_response_and_image_data_url(self):
         fake_response = SimpleNamespace(text='{"numbers":["12.50","٣"]}')
         fake_models = SimpleNamespace(generate_content=AsyncMock(return_value=fake_response))
@@ -323,6 +333,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         ctx = make_context()
         attachment = SimpleNamespace(
             content_type="image/png",
+            filename="numbers.png",
             size=main.MAX_IMAGE_BYTES + 1,
             read=AsyncMock(),
         )
