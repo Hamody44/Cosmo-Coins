@@ -42,6 +42,31 @@ class CooldownRegressionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(main.AppUserCommandCooldown):
             await main.bot.tree.interaction_check(interaction)
 
+    async def test_exempt_prefix_commands_bypass_and_do_not_consume_cooldown(self):
+        for command_name in ("delete", "box", "rename"):
+            ctx = SimpleNamespace(
+                author=SimpleNamespace(id=123),
+                guild=SimpleNamespace(id=456),
+                command=SimpleNamespace(name=command_name),
+            )
+
+            await main.before_prefix_command(ctx)
+            await main.after_prefix_command(ctx)
+            self.assertEqual(main.user_command_cooldowns, {})
+
+    async def test_exempt_slash_commands_bypass_and_do_not_consume_cooldown(self):
+        for command_name in ("delete", "box", "rename"):
+            command = SimpleNamespace(name=command_name)
+            interaction = SimpleNamespace(
+                user=SimpleNamespace(id=123),
+                guild_id=456,
+                command=command,
+            )
+
+            self.assertTrue(await main.bot.tree.interaction_check(interaction))
+            await main.on_app_command_completion(interaction, command)
+            self.assertEqual(main.user_command_cooldowns, {})
+
 
 if __name__ == "__main__":
     unittest.main()

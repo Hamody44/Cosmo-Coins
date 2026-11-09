@@ -31,6 +31,13 @@ intents.voice_states = True
 
 USER_COMMAND_COOLDOWN_SECONDS = 30
 user_command_cooldowns: dict[tuple[int, int], float] = {}
+COOLDOWN_EXEMPT_COMMANDS = frozenset({"delete", "box", "rename"})
+
+
+def command_ignores_cooldown(command) -> bool:
+    """Return whether a command should bypass and not consume the user cooldown."""
+    command_name = getattr(command, "qualified_name", None) or getattr(command, "name", None)
+    return command_name in COOLDOWN_EXEMPT_COMMANDS
 
 
 class UserCommandCooldown(commands.CheckFailure):
@@ -53,6 +60,8 @@ class CooldownCommandTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # Buttons/modals are not commands and must not consume the command cooldown.
         if interaction.command is None:
+            return True
+        if command_ignores_cooldown(interaction.command):
             return True
 
         user_id = getattr(interaction.user, "id", None)
@@ -105,12 +114,16 @@ def _set_user_command_cooldown(user_id: int | None, guild_id: int | None) -> Non
 @bot.before_invoke
 async def before_prefix_command(ctx: commands.Context) -> None:
     """Run the cooldown check after command-specific checks have passed."""
+    if command_ignores_cooldown(getattr(ctx, "command", None)):
+        return
     await check_user_command_cooldown(ctx)
 
 
 @bot.after_invoke
 async def after_prefix_command(ctx: commands.Context) -> None:
     """Consume cooldown only after a prefix/hybrid command completes successfully."""
+    if command_ignores_cooldown(getattr(ctx, "command", None)):
+        return
     _set_user_command_cooldown(
         getattr(ctx.author, "id", None),
         getattr(ctx.guild, "id", None),
@@ -370,6 +383,8 @@ async def on_ready():
 @bot.event
 async def on_app_command_completion(interaction: discord.Interaction, command: app_commands.Command):
     """Consume cooldown only after a slash command completes successfully."""
+    if command_ignores_cooldown(command):
+        return
     _set_user_command_cooldown(
         getattr(interaction.user, "id", None),
         getattr(interaction, "guild_id", None),
