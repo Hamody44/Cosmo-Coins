@@ -41,7 +41,9 @@ user_command_cooldowns: dict[tuple[int, int], float] = {}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # The configured model is intentionally not replaced here; set GEMINI_VISION_MODEL in second_bot/.env.
 DEFAULT_VISION_MODEL = "gemini-3.8-flash"
-VISION_REQUEST_TIMEOUT_SECONDS = 25
+DEFAULT_FALLBACK_VISION_MODEL = "gemini-2.5-flash-lite"
+VISION_REQUEST_TIMEOUT_SECONDS = 20
+TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_MIME_BY_EXTENSION = {
     ".jpg": "image/jpeg",
@@ -147,10 +149,6 @@ async def extract_numbers_from_image(
     else:
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is missing")
-        endpoint = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{selected_model}:generateContent"
-        )
         request_body = {
             "contents": [{
                 "parts": [
@@ -164,18 +162,42 @@ async def extract_numbers_from_image(
                 "responseMimeType": "application/json",
             },
         }
+        fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", DEFAULT_FALLBACK_VISION_MODEL).strip()
+        models_to_try = [selected_model]
+        if fallback_model and fallback_model not in models_to_try:
+            models_to_try.append(fallback_model)
+
         timeout = aiohttp.ClientTimeout(total=VISION_REQUEST_TIMEOUT_SECONDS)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(endpoint, params={"key": api_key}, json=request_body) as result:
-                    response_data = await result.json(content_type=None)
-                    if result.status >= 400:
+        response_data = None
+        last_failure = None
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for model_name in models_to_try:
+                endpoint = (
+                    "https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model_name}:generateContent"
+                )
+                try:
+                    async with session.post(endpoint, params={"key": api_key}, json=request_body) as result:
+                        response_data = await result.json(content_type=None)
+                        if result.status < 400:
+                            break
                         message = response_data.get("error", {}).get("message", f"HTTP {result.status}")
-                        raise RuntimeError(f"Gemini API error {result.status}: {message}")
-        except asyncio.TimeoutError as exc:
-            raise RuntimeError(
-                f"Gemini vision request timed out after {VISION_REQUEST_TIMEOUT_SECONDS} seconds"
-            ) from exc
+                        last_failure = RuntimeError(f"Gemini API error {result.status}: {message}")
+                        if result.status not in TRANSIENT_GEMINI_STATUS_CODES:
+                            raise last_failure
+                        logger.warning(
+                            "Gemini model %s returned %s; trying fallback model if available.",
+                            model_name,
+                            result.status,
+                        )
+                except asyncio.TimeoutError as exc:
+                    last_failure = RuntimeError(
+                        f"Gemini model {model_name} timed out after {VISION_REQUEST_TIMEOUT_SECONDS} seconds"
+                    )
+                    logger.warning("%s", last_failure)
+
+        if response_data is None or last_failure is not None and response_data.get("candidates") is None:
+            raise last_failure or RuntimeError("Gemini returned no response")
 
         try:
             content = response_data["candidates"][0]["content"]["parts"][0]["text"]
@@ -407,7 +429,10 @@ async def numbers(ctx: commands.Context) -> None:
         )
     except RuntimeError as exc:
         logger.warning("Image number extraction failed: %s", exc)
-        await send_notice(ctx, "تعذر قراءة الأرقام من الصورة. جرّب صورة أوضح وتأكد من إعداد GEMINI_API_KEY.")
+        if "timed out" in str(exc).lower() or "gemini api error" in str(exc).lower():
+            await send_notice(ctx, "خدمة Gemini تأخرت أو غير متاحة مؤقتًا. حاول مرة أخرى بعد قليل.")
+        else:
+            await send_notice(ctx, "تعذر قراءة الأرقام من الصورة. جرّب صورة أوضح وتأكد من إعداد GEMINI_API_KEY.")
         return
     except Exception:
         logger.exception("Unexpected failure while extracting numbers from an image.")
