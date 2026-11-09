@@ -98,10 +98,22 @@ def load_shared_guild_ids(now: float | None = None) -> set[int]:
 
 @bot.check
 async def check_shared_guild(ctx: commands.Context) -> bool:
-    """Only process commands in guilds where both bots are currently present."""
-    if ctx.guild is None or int(ctx.guild.id) not in load_shared_guild_ids():
+    """Only process commands in guilds where this account is currently present.
+
+    The shared state file remains a fast path, but it is not authoritative: on
+    hosts where the primary bot's background task is delayed, the self-bot's
+    own guild cache is enough to confirm that it is in the server.
+    """
+    if ctx.guild is None:
         raise NotInSharedGuild("Commands are only enabled in guilds shared with Cosmo-Coins.")
-    return True
+    guild_id = int(ctx.guild.id)
+    if guild_id in load_shared_guild_ids():
+        return True
+    if bot.get_guild(guild_id) is not None:
+        logger.info("Accepted command in guild %s from the self-bot guild cache.", guild_id)
+        return True
+    logger.warning("Ignoring command in guild %s: guild is absent from the state file and cache.", guild_id)
+    raise NotInSharedGuild("Commands are only enabled in guilds shared with Cosmo-Coins.")
 
 
 @bot.check
@@ -218,6 +230,20 @@ async def ping(ctx: commands.Context) -> None:
     latency_ms = round(bot.latency * 1000)
     response = f"حالة البوت: متصل\nسرعة الاستجابة (Ping): {latency_ms} ms"
     await ctx.send(response, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.event
+async def on_message(message: discord.Message) -> None:
+    """Process self-account messages explicitly and log command-shaped input."""
+    content = message.content or ""
+    if content.startswith(COMMAND_PREFIX):
+        logger.info(
+            "Received command-shaped message guild=%s author=%s content=%r",
+            getattr(message.guild, "id", None),
+            getattr(message.author, "id", None),
+            content,
+        )
+    await bot.process_commands(message)
 
 
 @bot.event
