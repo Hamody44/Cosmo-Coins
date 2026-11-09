@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import discord
@@ -11,6 +13,8 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
+SHARED_GUILD_STATE_PATH = BASE_DIR / ".runtime" / "shared_guilds.json"
+SHARED_GUILD_STATE_MAX_AGE_SECONDS = 90
 # The panel may expose Cosmo-Coins' DISCORD_BOT_TOKEN to every process.
 # Prefer this bot's local .env so it cannot accidentally inherit the other bot's token.
 load_dotenv(BASE_DIR / ".env", override=True)
@@ -50,7 +54,40 @@ def load_config() -> tuple[str, int]:
     return token, role_id
 
 
-bot = commands.Bot(command_prefix="!", self_bot=True, help_command=None)
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents, self_bot=True, help_command=None)
+
+class NotInSharedGuild(commands.CheckFailure):
+    """Raised when a command is outside the primary bot's active guilds."""
+
+def load_shared_guild_ids(now: float | None = None) -> set[int]:
+    """Return fresh primary-bot guild IDs; fail closed for missing or stale state."""
+    try:
+        with SHARED_GUILD_STATE_PATH.open("r", encoding="utf-8") as state_file:
+            state = json.load(state_file)
+        updated_at = state.get("updated_at")
+        guild_ids = state.get("guild_ids")
+        if isinstance(updated_at, bool) or not isinstance(updated_at, (int, float)):
+            return set()
+        current_time = time.time() if now is None else now
+        age = current_time - float(updated_at)
+        if age < -30 or age > SHARED_GUILD_STATE_MAX_AGE_SECONDS or not isinstance(guild_ids, list):
+            return set()
+        return {
+            int(guild_id)
+            for guild_id in guild_ids
+            if not isinstance(guild_id, bool) and int(guild_id) > 0
+        }
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
+
+@bot.check
+async def check_shared_guild(ctx: commands.Context) -> bool:
+    """Only process commands in guilds where both bots are currently present."""
+    if ctx.guild is None or int(ctx.guild.id) not in load_shared_guild_ids():
+        raise NotInSharedGuild("Commands are only enabled in guilds shared with Cosmo-Coins.")
+    return True
 
 
 async def send_notice(ctx: commands.Context, message: str) -> None:
@@ -157,6 +194,8 @@ async def on_ready() -> None:
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
+    if isinstance(error, NotInSharedGuild):
+        return
     if isinstance(error, commands.CommandNotFound):
         return
 

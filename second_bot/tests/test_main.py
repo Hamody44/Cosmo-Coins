@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import os
+import json
+import tempfile
+import time
 import unittest
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -20,7 +23,7 @@ _BOT_SPEC.loader.exec_module(main)
 ROLE_ID = 123456789012345678
 
 
-def make_context(*, role_ids: tuple[int, ...] = (ROLE_ID,), permissions: discord.Permissions | None = None):
+def make_context(*, role_ids: tuple[int, ...] = (ROLE_ID,), permissions: discord.Permissions | None = None, guild_id: int = 777):
     if permissions is None:
         permissions = discord.Permissions(
             view_channel=True,
@@ -40,7 +43,7 @@ def make_context(*, role_ids: tuple[int, ...] = (ROLE_ID,), permissions: discord
     )
     message = SimpleNamespace(id=444, delete=AsyncMock())
     return SimpleNamespace(
-        guild=SimpleNamespace(me=bot_member),
+        guild=SimpleNamespace(id=guild_id, me=bot_member),
         author=author,
         channel=channel,
         message=message,
@@ -79,6 +82,49 @@ class BotConfigurationTests(unittest.TestCase):
         with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "token", "SAY_ALLOWED_ROLE_ID": "not-a-role"}):
             with self.assertRaisesRegex(ValueError, "SAY_ALLOWED_ROLE_ID"):
                 main.load_config()
+
+
+class SharedGuildCommandCheckTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.state_path = Path(self.temp_dir.name) / "shared_guilds.json"
+        self.path_patch = patch.object(main, "SHARED_GUILD_STATE_PATH", self.state_path)
+        self.path_patch.start()
+        self.addCleanup(self.path_patch.stop)
+        self.addCleanup(self.temp_dir.cleanup)
+
+    def write_state(self, guild_ids, updated_at=None):
+        self.state_path.write_text(json.dumps({
+            "updated_at": time.time() if updated_at is None else updated_at,
+            "guild_ids": guild_ids,
+        }), encoding="utf-8")
+
+    async def test_shared_guild_is_allowed(self):
+        self.write_state([777, 888])
+        self.assertTrue(await main.check_shared_guild(make_context()))
+
+    async def test_non_shared_guild_is_rejected(self):
+        self.write_state([888])
+        with self.assertRaises(main.NotInSharedGuild):
+            await main.check_shared_guild(make_context())
+
+    async def test_missing_or_stale_state_fails_closed(self):
+        self.assertEqual(main.load_shared_guild_ids(), set())
+        self.write_state([777], updated_at=time.time() - main.SHARED_GUILD_STATE_MAX_AGE_SECONDS - 1)
+        self.assertEqual(main.load_shared_guild_ids(), set())
+        with self.assertRaises(main.NotInSharedGuild):
+            await main.check_shared_guild(make_context())
+
+    async def test_direct_messages_are_rejected(self):
+        ctx = make_context()
+        ctx.guild = None
+        with self.assertRaises(main.NotInSharedGuild):
+            await main.check_shared_guild(ctx)
+
+    async def test_rejected_guild_command_is_silent(self):
+        ctx = make_context()
+        await main.on_command_error(ctx, main.NotInSharedGuild("not shared"))
+        ctx.send.assert_not_awaited()
 
 
 class SayCommandTests(unittest.IsolatedAsyncioTestCase):

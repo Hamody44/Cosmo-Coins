@@ -8,6 +8,7 @@
 global_cosmo.db
 global_cosmo_backup.db
 guilds_data/
+second_bot/.runtime/
 *.db
 *.log
 *.db-journal

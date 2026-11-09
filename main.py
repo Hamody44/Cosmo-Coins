@@ -4,6 +4,7 @@ import threading
 import subprocess
 import urllib.request
 import stat
+import json
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
@@ -28,6 +29,35 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 bot.owner_id = PRIMARY_OWNER_ID
+
+SHARED_GUILD_STATE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "second_bot",
+    ".runtime",
+    "shared_guilds.json",
+)
+
+def publish_shared_guild_state():
+    """Atomically publish this bot's guild IDs for the standalone second bot."""
+    state_dir = os.path.dirname(SHARED_GUILD_STATE_PATH)
+    os.makedirs(state_dir, exist_ok=True)
+    temporary_path = f"{SHARED_GUILD_STATE_PATH}.{os.getpid()}.tmp"
+    payload = {
+        "updated_at": time.time(),
+        "guild_ids": sorted(int(guild.id) for guild in bot.guilds),
+    }
+    with open(temporary_path, "w", encoding="utf-8") as state_file:
+        json.dump(payload, state_file, separators=(",", ":"))
+        state_file.flush()
+        os.fsync(state_file.fileno())
+    os.replace(temporary_path, SHARED_GUILD_STATE_PATH)
+
+@tasks.loop(seconds=30)
+async def publish_shared_guild_state_task():
+    try:
+        publish_shared_guild_state()
+    except OSError as exc:
+        print(f"⚠️ تعذر تحديث قائمة سيرفرات البوت الثاني: {exc}")
 
 def run_tunnel():
     token = os.getenv("CLOUDFLARE_TUNNEL_TOKEN")
@@ -212,9 +242,29 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
+@bot.listen("on_guild_join")
+async def publish_shared_guild_state_on_join(guild):
+    try:
+        publish_shared_guild_state()
+    except OSError as exc:
+        print(f"⚠️ تعذر تحديث قائمة السيرفرات بعد انضمام {guild.id}: {exc}")
+
+@bot.listen("on_guild_remove")
+async def publish_shared_guild_state_on_remove(guild):
+    try:
+        publish_shared_guild_state()
+    except OSError as exc:
+        print(f"⚠️ تعذر تحديث قائمة السيرفرات بعد مغادرة {guild.id}: {exc}")
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
+    try:
+        publish_shared_guild_state()
+    except OSError as exc:
+        print(f"⚠️ تعذر نشر قائمة سيرفرات البوت الثاني: {exc}")
+    if not publish_shared_guild_state_task.is_running():
+        publish_shared_guild_state_task.start()
     if not check_premium_expiry_task.is_running():
         check_premium_expiry_task.start()
     try:
