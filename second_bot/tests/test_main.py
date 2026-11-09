@@ -295,22 +295,21 @@ class PingCommandTests(unittest.IsolatedAsyncioTestCase):
 
 class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_extract_numbers_uses_json_response_and_image_data_url(self):
-        fake_response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content='{"numbers":["12.50","٣"]}'))]
-        )
-        fake_completions = SimpleNamespace(create=AsyncMock(return_value=fake_response))
-        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+        fake_response = SimpleNamespace(text='{"numbers":["12.50","٣"]}')
+        fake_models = SimpleNamespace(generate_content=AsyncMock(return_value=fake_response))
+        fake_client = SimpleNamespace(aio=SimpleNamespace(models=fake_models))
 
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "OPENAI_VISION_MODEL": "vision-test"}):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "GEMINI_VISION_MODEL": "vision-test"}):
             result = await main.extract_numbers_from_image(
                 b"image-bytes", "image/png", client=fake_client
             )
 
         self.assertEqual(result, ["12.50", "٣"])
-        request = fake_completions.create.await_args.kwargs
+        request = fake_models.generate_content.await_args.kwargs
         self.assertEqual(request["model"], "vision-test")
-        image_url = request["messages"][1]["content"][1]["image_url"]["url"]
-        self.assertTrue(image_url.startswith("data:image/png;base64,"))
+        image_part = request["contents"][1].inline_data
+        self.assertEqual(image_part.mime_type, "image/png")
+        self.assertEqual(image_part.data, b"image-bytes")
 
     async def test_numbers_without_image_reports_usage(self):
         ctx = make_context()

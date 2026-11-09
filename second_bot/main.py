@@ -7,14 +7,14 @@ import os
 import sys
 import time
 import asyncio
-import base64
 import math
 from pathlib import Path
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from google import genai
+from google.genai import types
 
 BASE_DIR = Path(__file__).resolve().parent
 SHARED_GUILD_STATE_PATH = BASE_DIR / ".runtime" / "shared_guilds.json"
@@ -37,7 +37,7 @@ COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-DEFAULT_VISION_MODEL = "gpt-4o-mini"
+DEFAULT_VISION_MODEL = "gemini-2.5-flash"
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 
@@ -63,9 +63,9 @@ def load_config() -> tuple[str, int]:
 
 
 def load_vision_config() -> tuple[str, str]:
-    """Read the optional OpenAI settings used by the image-number command."""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    model = os.getenv("OPENAI_VISION_MODEL", DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL
+    """Read the optional Gemini settings used by the image-number command."""
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    model = os.getenv("GEMINI_VISION_MODEL", DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL
     return api_key, model
 
 
@@ -76,41 +76,30 @@ async def extract_numbers_from_image(
     client=None,
     model: str | None = None,
 ) -> list[str]:
-    """Ask a vision model to return every number visible in an image."""
+    """Ask Gemini Vision to return every number visible in an image."""
     api_key, configured_model = load_vision_config()
     if client is None:
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing")
-        client = AsyncOpenAI(api_key=api_key)
+            raise RuntimeError("GEMINI_API_KEY is missing")
+        client = genai.Client(api_key=api_key)
 
-    encoded_image = base64.b64encode(image_bytes).decode("ascii")
-    response = await client.chat.completions.create(
+    response = await client.aio.models.generate_content(
         model=model or configured_model,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "استخرج كل الأرقام الظاهرة في الصورة. أعد JSON صالحًا فقط بهذا الشكل: "
-                    '{"numbers":["..."]}. ضع كل رقم أو قيمة رقمية في عنصر مستقل، وحافظ على ترتيب الظهور. '
-                    "لا تخمّن أرقامًا غير واضحة، ولا تضع أي نص آخر داخل JSON."
-                ),
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "استخرج الأرقام من هذه الصورة."},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{encoded_image}"},
-                    },
-                ],
-            },
+        contents=[
+            (
+                "استخرج كل الأرقام الظاهرة في الصورة. أعد JSON صالحًا فقط بهذا الشكل: "
+                '{"numbers":["..."]}. ضع كل رقم أو قيمة رقمية في عنصر مستقل، وحافظ على ترتيب الظهور. '
+                "لا تخمّن أرقامًا غير واضحة، ولا تضع أي نص آخر داخل JSON."
+            ),
+            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
         ],
+        config=types.GenerateContentConfig(
+            temperature=0,
+            response_mime_type="application/json",
+        ),
     )
 
-    content = response.choices[0].message.content if response.choices else None
+    content = response.text
     if not content:
         return []
     try:
@@ -327,8 +316,8 @@ async def numbers(ctx: commands.Context) -> None:
 
     api_key, _ = load_vision_config()
     if not api_key:
-        logger.error("The image-number command was used without OPENAI_API_KEY.")
-        await send_notice(ctx, "ميزة استخراج الأرقام غير مفعلة حاليًا؛ أضف OPENAI_API_KEY إلى إعدادات البوت.")
+        logger.error("The image-number command was used without GEMINI_API_KEY.")
+        await send_notice(ctx, "ميزة استخراج الأرقام غير مفعلة حاليًا؛ أضف GEMINI_API_KEY إلى إعدادات البوت.")
         return
 
     try:
