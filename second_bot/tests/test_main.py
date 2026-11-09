@@ -83,9 +83,8 @@ class BotConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "SAY_ALLOWED_ROLE_ID"):
                 main.load_config()
 
-    def test_create_bot_supports_discord_self_without_intents(self):
-        with patch.object(main, "discord", SimpleNamespace(Intents=None)), \
-                patch.object(main.commands, "Bot", return_value="fake-bot") as bot_factory:
+    def test_create_bot_does_not_pass_intents(self):
+        with patch.object(main.commands, "Bot", return_value="fake-bot") as bot_factory:
             self.assertEqual(main.create_bot(), "fake-bot")
 
         options = bot_factory.call_args.kwargs

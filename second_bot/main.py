@@ -55,14 +55,8 @@ def load_config() -> tuple[str, int]:
 
 
 def create_bot() -> commands.Bot:
-    """Create a bot compatible with both discord.py and discord.py-self."""
-    bot_options = {"command_prefix": "!", "self_bot": True, "help_command": None}
-    intents_type = getattr(discord, "Intents", None)
-    if intents_type is not None:
-        intents = intents_type.default()
-        intents.message_content = True
-        bot_options["intents"] = intents
-    return commands.Bot(**bot_options)
+    """Create the self-client without configuring Gateway Intents."""
+    return commands.Bot(command_prefix="!", self_bot=True, help_command=None)
 
 
 bot = create_bot()
