@@ -13,6 +13,9 @@ import ast
 import fnmatch
 import os
 import shutil
+import subprocess
+import sys
+import sysconfig
 from pathlib import Path
 
 
@@ -56,6 +59,7 @@ PROTECTED_FILE_PATTERNS = {
 # These directories contain runtime code or assets loaded dynamically.
 RUNTIME_DIRS = {"cogs", "dashboard", "second_bot"}
 ENTRYPOINTS = {"main.py", "run_bots.py", "run_bots.sh"}
+PROTECTED_USER_PACKAGES = {"pip", "setuptools", "wheel"}
 
 
 def is_in_dir(path: Path, names: set[str], root: Path) -> bool:
@@ -148,6 +152,44 @@ def disposable_candidates(root: Path) -> list[Path]:
     return sorted(path for path in iter_files(root) if is_disposable(path, root))
 
 
+def user_site_packages() -> Path:
+    """Return the per-user site-packages directory, never a system directory."""
+    configured = Path(sysconfig.get_paths().get("purelib", ""))
+    user_base = Path.home() / ".local"
+    candidates = [
+        Path(site) for site in sys.path if site and user_base in Path(site).parents
+    ]
+    if candidates:
+        return candidates[0]
+    return user_base / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+
+
+def user_site_distributions() -> list[str]:
+    """List package names installed in the user's site, excluding bootstrap tools."""
+    site = user_site_packages()
+    if not site.is_dir():
+        return []
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "list", "--user", "--format=freeze"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    packages = []
+    for line in result.stdout.splitlines():
+        name = line.split("==", 1)[0].strip()
+        if name and name.lower() not in PROTECTED_USER_PACKAGES:
+            packages.append(name)
+    return sorted(packages, key=str.casefold)
+
+
+def virtual_environments_exist(root: Path) -> bool:
+    return all(
+        (root / relative).is_file()
+        for relative in (".venv/bin/python", "second_bot/.venv/bin/python")
+    )
+
+
 def remove_disposable(path: Path) -> None:
     if path.is_dir():
         shutil.rmtree(path)
@@ -175,6 +217,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Dangerous: with --apply, delete reported unreachable Python files too.",
     )
+    parser.add_argument(
+        "--clean-user-site",
+        action="store_true",
+        help="Report packages in the current user's site-packages; never touches system Python packages.",
+    )
     return parser.parse_args()
 
 
@@ -186,6 +233,7 @@ def main() -> int:
 
     disposable = disposable_candidates(root)
     source = source_candidates(root) if args.include_source or args.delete_source else []
+    user_packages = user_site_distributions() if args.clean_user_site else []
 
     print(f"Root: {root}")
     print("Protected: databases, logs, .env files, .runtime, backups, virtual environments, and requirements.")
@@ -196,6 +244,12 @@ def main() -> int:
         print(f"Unreachable-looking Python files (manual review required): {len(source)}")
         for path in source:
             print(f"  [source]    {path.relative_to(root)}")
+    if args.clean_user_site:
+        print(f"User site-packages candidates: {len(user_packages)}")
+        print(f"  [protected path] {user_site_packages()}")
+        for package in user_packages:
+            print(f"  [user package] {package}")
+        print("System package paths such as /usr/lib and /usr/local/lib are never modified.")
 
     if not args.apply:
         print("Dry run only; nothing was deleted. Use --apply after reviewing the list.")
@@ -205,6 +259,19 @@ def main() -> int:
         print("Refusing source deletion: this script intentionally never deletes source files automatically.")
         print("Review the report and remove confirmed files manually with version control protection.")
         return 2
+
+    if args.clean_user_site and user_packages:
+        if not virtual_environments_exist(root):
+            print("Refusing user-site cleanup: both project virtual environments must exist first.")
+            return 2
+        if not args.apply:
+            print("Dry run only; user packages were not removed. Use --apply after reviewing the list.")
+            return 0
+        subprocess.run(
+            [sys.executable, "-m", "pip", "uninstall", "--yes", *user_packages],
+            check=True,
+        )
+        print(f"Removed {len(user_packages)} user-site packages.")
 
     for path in disposable:
         remove_disposable(path)
