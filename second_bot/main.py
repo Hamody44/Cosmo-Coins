@@ -1,4 +1,4 @@
-"""Standalone Discord bot with restricted !say and public !ping commands."""
+"""Standalone Discord self-client with restricted !say and public !ping commands."""
 from __future__ import annotations
 
 import logging
@@ -35,7 +35,7 @@ def load_config() -> tuple[str, int]:
     if token.lower().startswith("bot "):
         token = token[4:].strip()
     if not token:
-        raise ValueError("SECOND_BOT_TOKEN (or DISCORD_BOT_TOKEN) is missing. Set the bot token in second_bot/.env.")
+        raise ValueError("SECOND_BOT_TOKEN (or DISCORD_BOT_TOKEN) is missing. Set the account token in second_bot/.env.")
 
     role_id_value = os.getenv("SAY_ALLOWED_ROLE_ID", "").strip()
     try:
@@ -50,9 +50,7 @@ def load_config() -> tuple[str, int]:
     return token, role_id
 
 
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="!", self_bot=True, help_command=None)
 
 
 async def send_notice(ctx: commands.Context, message: str) -> None:
@@ -94,12 +92,16 @@ async def say(ctx: commands.Context, *, text: str) -> None:
         and any(role.id == SAY_ALLOWED_ROLE_ID for role in ctx.author.roles)
     )
     if not allowed_by_role:
-        try:
-            allowed_by_owner = await bot.is_owner(ctx.author)
-        except discord.HTTPException:
-            logger.exception("Could not verify whether user %s owns this bot.", ctx.author.id)
-            await send_notice(ctx, "تعذر التحقق من مالك البوت الآن. حاول مرة أخرى لاحقًا.")
-            return
+        # In self-bot mode, commands are processed only when sent by this account.
+        # Keep the owner fallback for isolated tests and compatible implementations.
+        allowed_by_owner = bot.user is not None and ctx.author.id == bot.user.id
+        if not allowed_by_owner:
+            try:
+                allowed_by_owner = await bot.is_owner(ctx.author)
+            except discord.HTTPException:
+                logger.exception("Could not verify whether user %s owns this account.", ctx.author.id)
+                await send_notice(ctx, "تعذر التحقق من مالك الحساب الآن. حاول مرة أخرى لاحقًا.")
+                return
         if not allowed_by_owner:
             await send_notice(ctx, "ليس لديك صلاحية استخدام هذا الأمر.")
             return
@@ -186,8 +188,7 @@ def main() -> None:
         bot.run(token, log_handler=None)
     except discord.LoginFailure:
         logger.critical(
-            "Discord rejected the configured bot token. Verify that it is this application's Bot Token, "
-            "not an Application ID, Client Secret, or user token."
+            "Discord rejected the configured account token. Verify that the configured token is valid."
         )
         sys.exit(2)
     except (discord.HTTPException, OSError):
