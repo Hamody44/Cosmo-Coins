@@ -7,12 +7,14 @@ import os
 import sys
 import time
 import asyncio
+import base64
 import math
 from pathlib import Path
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
 
 BASE_DIR = Path(__file__).resolve().parent
 SHARED_GUILD_STATE_PATH = BASE_DIR / ".runtime" / "shared_guilds.json"
@@ -34,6 +36,9 @@ COMMAND_PREFIX = "$"
 COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
 user_command_cooldowns: dict[tuple[int, int], float] = {}
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+DEFAULT_VISION_MODEL = "gpt-4o-mini"
+SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 
 def load_config() -> tuple[str, int]:
@@ -55,6 +60,67 @@ def load_config() -> tuple[str, int]:
         ) from exc
 
     return token, role_id
+
+
+def load_vision_config() -> tuple[str, str]:
+    """Read the optional OpenAI settings used by the image-number command."""
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    model = os.getenv("OPENAI_VISION_MODEL", DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL
+    return api_key, model
+
+
+async def extract_numbers_from_image(
+    image_bytes: bytes,
+    mime_type: str,
+    *,
+    client=None,
+    model: str | None = None,
+) -> list[str]:
+    """Ask a vision model to return every number visible in an image."""
+    api_key, configured_model = load_vision_config()
+    if client is None:
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is missing")
+        client = AsyncOpenAI(api_key=api_key)
+
+    encoded_image = base64.b64encode(image_bytes).decode("ascii")
+    response = await client.chat.completions.create(
+        model=model or configured_model,
+        temperature=0,
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "استخرج كل الأرقام الظاهرة في الصورة. أعد JSON صالحًا فقط بهذا الشكل: "
+                    '{"numbers":["..."]}. ضع كل رقم أو قيمة رقمية في عنصر مستقل، وحافظ على ترتيب الظهور. '
+                    "لا تخمّن أرقامًا غير واضحة، ولا تضع أي نص آخر داخل JSON."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "استخرج الأرقام من هذه الصورة."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{encoded_image}"},
+                    },
+                ],
+            },
+        ],
+    )
+
+    content = response.choices[0].message.content if response.choices else None
+    if not content:
+        return []
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("The vision model returned invalid JSON") from exc
+    numbers = payload.get("numbers", [])
+    if not isinstance(numbers, list):
+        raise RuntimeError("The vision model returned an invalid numbers list")
+    return [str(value).strip() for value in numbers if str(value).strip()]
 
 
 def create_bot() -> commands.Bot:
@@ -238,6 +304,53 @@ async def ping(ctx: commands.Context) -> None:
     latency_ms = round(bot.latency * 1000)
     response = f"حالة البوت: متصل\nسرعة الاستجابة (Ping): {latency_ms} ms"
     await ctx.send(response, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name="numbers", aliases=["استخراج_الأرقام", "ارقام"])
+async def numbers(ctx: commands.Context) -> None:
+    """Extract visible numbers from the first image attached to the command."""
+    attachment = next(
+        (
+            item
+            for item in getattr(ctx.message, "attachments", [])
+            if (item.content_type or "").split(";", 1)[0].lower() in SUPPORTED_IMAGE_TYPES
+        ),
+        None,
+    )
+    if attachment is None:
+        await send_notice(ctx, f"أرفق صورة مع الأمر، مثل: `{COMMAND_PREFIX}numbers`.")
+        return
+
+    if getattr(attachment, "size", 0) > MAX_IMAGE_BYTES:
+        await send_notice(ctx, "حجم الصورة كبير جدًا. الحد الأقصى هو 8 ميغابايت.")
+        return
+
+    api_key, _ = load_vision_config()
+    if not api_key:
+        logger.error("The image-number command was used without OPENAI_API_KEY.")
+        await send_notice(ctx, "ميزة استخراج الأرقام غير مفعلة حاليًا؛ أضف OPENAI_API_KEY إلى إعدادات البوت.")
+        return
+
+    try:
+        image_bytes = await attachment.read()
+        if len(image_bytes) > MAX_IMAGE_BYTES:
+            await send_notice(ctx, "حجم الصورة كبير جدًا. الحد الأقصى هو 8 ميغابايت.")
+            return
+        numbers_found = await extract_numbers_from_image(
+            image_bytes,
+            (attachment.content_type or "image/png").split(";", 1)[0].lower(),
+        )
+    except Exception:
+        logger.exception("Failed to extract numbers from an image.")
+        await send_notice(ctx, "تعذر استخراج الأرقام من الصورة الآن. حاول مرة أخرى لاحقًا.")
+        return
+
+    if not numbers_found:
+        await send_notice(ctx, "لم أجد أرقامًا واضحة في الصورة.")
+        return
+
+    result = "\n".join(f"{index}. `{value}`" for index, value in enumerate(numbers_found, start=1))
+    await ctx.send(f"الأرقام المستخرجة:\n{result}", allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.event

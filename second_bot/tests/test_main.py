@@ -293,5 +293,47 @@ class PingCommandTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extract_numbers_uses_json_response_and_image_data_url(self):
+        fake_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"numbers":["12.50","٣"]}'))]
+        )
+        fake_completions = SimpleNamespace(create=AsyncMock(return_value=fake_response))
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "OPENAI_VISION_MODEL": "vision-test"}):
+            result = await main.extract_numbers_from_image(
+                b"image-bytes", "image/png", client=fake_client
+            )
+
+        self.assertEqual(result, ["12.50", "٣"])
+        request = fake_completions.create.await_args.kwargs
+        self.assertEqual(request["model"], "vision-test")
+        image_url = request["messages"][1]["content"][1]["image_url"]["url"]
+        self.assertTrue(image_url.startswith("data:image/png;base64,"))
+
+    async def test_numbers_without_image_reports_usage(self):
+        ctx = make_context()
+        ctx.message.attachments = []
+
+        await main.numbers.callback(ctx)
+
+        self.assertIn("أرفق صورة", ctx.send.await_args.args[0])
+
+    async def test_numbers_rejects_oversized_image_before_reading(self):
+        ctx = make_context()
+        attachment = SimpleNamespace(
+            content_type="image/png",
+            size=main.MAX_IMAGE_BYTES + 1,
+            read=AsyncMock(),
+        )
+        ctx.message.attachments = [attachment]
+
+        await main.numbers.callback(ctx)
+
+        attachment.read.assert_not_awaited()
+        self.assertIn("8 ميغابايت", ctx.send.await_args.args[0])
+
+
 if __name__ == "__main__":
     unittest.main()
