@@ -58,8 +58,14 @@ def load_config() -> tuple[str, int]:
 
 
 def create_bot() -> commands.Bot:
-    """Create the self-client without configuring Gateway Intents."""
-    return commands.Bot(command_prefix=COMMAND_PREFIX, self_bot=True, help_command=None)
+    """Create an account-authenticated client that accepts commands from users.
+
+    In discord.py-self, ``self_bot=True`` intentionally ignores messages whose
+    author is not the logged-in account. The requested behavior is for the
+    account-authenticated client to answer commands sent by other accounts,
+    so ``user_bot=True`` is required here.
+    """
+    return commands.Bot(command_prefix=COMMAND_PREFIX, user_bot=True, help_command=None)
 
 
 bot = create_bot()

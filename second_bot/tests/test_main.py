@@ -82,13 +82,14 @@ class BotConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "SAY_ALLOWED_ROLE_ID"):
                 main.load_config()
 
-    def test_create_bot_does_not_pass_intents(self):
+    def test_create_bot_uses_account_mode_without_intents(self):
         with patch.object(main.commands, "Bot", return_value="fake-bot") as bot_factory:
             self.assertEqual(main.create_bot(), "fake-bot")
 
         options = bot_factory.call_args.kwargs
         self.assertNotIn("intents", options)
-        self.assertTrue(options["self_bot"])
+        self.assertTrue(options["user_bot"])
+        self.assertNotIn("self_bot", options)
         self.assertEqual(options["command_prefix"], "$")
 
 
