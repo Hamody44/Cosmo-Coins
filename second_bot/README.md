@@ -21,16 +21,16 @@
 
 ## تثبيت التبعيات
 
-تُثبّت كل مجموعة متطلبات في بيئة افتراضية مستقلة لتجنب تعارض تبعيات البوتين. سكربت `run_bots.sh` ينشئ البيئات الافتراضية ويثبت أو يحدّث المكتبات تلقائيًا عندما يتغير ملف `requirements.txt`، لذلك لا تحتاج إلى تعديل السكربت عند إضافة مكتبة جديدة. للتثبيت اليدوي من جذر المستودع:
+تُثبّت كل مجموعة متطلبات في بيئة افتراضية مستقلة لتجنب تعارض تبعيات البوتين. سكربت `run_bots.sh` ينشئ البيئات الافتراضية ويثبت أو يحدّث المكتبات تلقائيًا عندما يتغير ملف المتطلبات الخاص بكل بوت، لذلك لا تحتاج إلى تعديل السكربت عند إضافة مكتبة جديدة. ملفات المتطلبات تحمل امتداد `.lock` حتى لا تلتقطها لوحات الاستضافة وتثبتها في Python العام. للتثبيت اليدوي من جذر المستودع:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r cosmo_requirements.lock
 
 python3 -m venv second_bot/.venv
 second_bot/.venv/bin/python -m pip install --upgrade pip
-second_bot/.venv/bin/python -m pip install -r second_bot/requirements.txt
+second_bot/.venv/bin/python -m pip install -r second_bot/cosmo_second_requirements.lock
 ```
 
 قبل التشغيل، أنشئ أيضًا ملف `.env` الخاص ببوت Cosmo-Coins في جذر المستودع وفق إعداداته الحالية، إن لم يكن موجودًا بالفعل. لا تستبدل ملف `.env` قائمًا.

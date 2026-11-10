@@ -70,7 +70,7 @@ stop_bots() {
 trap stop_bots INT TERM
 
 launch_bot "Cosmo-Coins" "$ROOT_DIR" "$ROOT_DIR/cosmo_requirements.lock" || exit 1
-launch_bot "second_bot" "$ROOT_DIR/second_bot" "$ROOT_DIR/second_bot/requirements.txt" || { stop_bots; exit 1; }
+launch_bot "second_bot" "$ROOT_DIR/second_bot" "$ROOT_DIR/second_bot/cosmo_second_requirements.lock" || { stop_bots; exit 1; }
 
 # إذا توقف أحد البوتين، أوقف الآخر بدل تركه يعمل وحده دون مراقبة.
 if wait -n "${PIDS[@]}"; then
