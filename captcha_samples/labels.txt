@@ -3,3 +3,9 @@ sample2.webp 45454
 sample3.webp 85026
 sample4.webp 85240
 sample5.webp 41835
+captcha (5).webp 97790
+captcha (6).webp 39595
+captcha (7).webp 61807
+captcha (8).webp 77922
+captcha (9).webp 29406
+captcha (10).webp 75466
