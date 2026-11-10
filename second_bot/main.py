@@ -45,7 +45,6 @@ DEFAULT_FALLBACK_VISION_MODEL = "gemini-2.5-flash-lite"
 DEFAULT_OPENROUTER_MODEL = "openrouter/free"
 VISION_REQUEST_TIMEOUT_SECONDS = 20
 LOCAL_OCR_TIMEOUT_SECONDS = 8
-LOCAL_OCR_MIN_CONFIDENCE = 0.60
 TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_MIME_BY_EXTENSION = {
@@ -112,12 +111,12 @@ def parse_numbers_response(content: str) -> list[str]:
 
 
 def _local_ocr_engine():
-    """Load RapidOCR lazily so the bot can still start if OCR assets are unavailable."""
+    """Load ddddocr lazily so the bot can still start if OCR assets are unavailable."""
     global _LOCAL_OCR_ENGINE
     if _LOCAL_OCR_ENGINE is None:
-        from rapidocr_onnxruntime import RapidOCR
+        import ddddocr
 
-        _LOCAL_OCR_ENGINE = RapidOCR()
+        _LOCAL_OCR_ENGINE = ddddocr.DdddOcr(show_ad=False, ocr=True)
     return _LOCAL_OCR_ENGINE
 
 
@@ -127,35 +126,18 @@ def _normalize_local_number(value: str) -> str:
 
 
 def extract_numbers_locally(image_bytes: bytes, mime_type: str) -> list[str]:
-    """Extract high-confidence numeric tokens offline with RapidOCR."""
-    del mime_type  # RapidOCR receives decoded pixels, not the MIME label.
-    import cv2
-    import numpy as np
-
-    image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if image is None:
-        raise RuntimeError("Local OCR could not decode the image")
-
-    result, _ = _local_ocr_engine()(image)
-    if not result:
+    """Extract numeric tokens offline with ddddocr."""
+    del mime_type  # ddddocr receives image bytes, not the MIME label.
+    text = _local_ocr_engine().classification(image_bytes)
+    if not text:
         return []
 
     number_pattern = re.compile(r"[0-9٠-٩۰-۹]+(?:[.,٫][0-9٠-٩۰-۹]+)?")
     numbers: list[str] = []
-    for item in result:
-        if len(item) < 3:
-            continue
-        text = str(item[1])
-        try:
-            confidence = float(item[2])
-        except (TypeError, ValueError):
-            continue
-        if confidence < LOCAL_OCR_MIN_CONFIDENCE:
-            continue
-        for match in number_pattern.findall(text):
-            normalized = _normalize_local_number(match)
-            if normalized and normalized not in numbers:
-                numbers.append(normalized)
+    for match in number_pattern.findall(str(text)):
+        normalized = _normalize_local_number(match)
+        if normalized and normalized not in numbers:
+            numbers.append(normalized)
     return numbers
 
 
@@ -170,10 +152,10 @@ async def try_local_number_extraction(image_bytes: bytes, mime_type: str) -> lis
             timeout=LOCAL_OCR_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        logger.warning("Local RapidOCR timed out after %s seconds.", LOCAL_OCR_TIMEOUT_SECONDS)
+        logger.warning("Local ddddocr timed out after %s seconds.", LOCAL_OCR_TIMEOUT_SECONDS)
         return []
     except (ImportError, RuntimeError, OSError, ValueError) as exc:
-        logger.info("Local RapidOCR unavailable or found no usable numbers: %s", exc)
+        logger.info("Local ddddocr unavailable or found no usable numbers: %s", exc)
         return []
 
 
@@ -557,7 +539,7 @@ async def numbers(ctx: commands.Context) -> None:
 
         numbers_found = await try_local_number_extraction(image_bytes, mime_type)
         if numbers_found:
-            logger.info("Extracted %s number(s) locally with RapidOCR.", len(numbers_found))
+            logger.info("Extracted %s number(s) locally with ddddocr.", len(numbers_found))
         else:
             gemini_key, _ = load_vision_config()
             openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
