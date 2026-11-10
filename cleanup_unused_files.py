@@ -44,6 +44,7 @@ PROTECTED_DIRS = {
     "guilds_data",
     "backups",
     "node_modules",
+    ".local",
 }
 PROTECTED_FILE_PATTERNS = {
     ".env",
@@ -211,10 +212,14 @@ def virtual_environments_exist(root: Path) -> bool:
 
 
 def remove_disposable(path: Path) -> None:
-    if path.is_dir():
-        shutil.rmtree(path)
-    else:
-        path.unlink()
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except FileNotFoundError:
+        # pip uninstall may remove a cached file after the candidate list was built.
+        return
 
 
 def parse_args() -> argparse.Namespace:
