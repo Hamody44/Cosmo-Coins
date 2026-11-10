@@ -19,6 +19,13 @@ prepare_environment() {
         return 1
     fi
 
+    current_hash="$(sha256sum "$requirements" | awk '{print $1}')" || return 1
+
+    if [[ -x "$interpreter" && -f "$marker" && "$(cat "$marker")" != "$current_hash" ]]; then
+        printf 'تغيرت المتطلبات؛ إعادة إنشاء البيئة النظيفة لـ %s...\n' "$name"
+        rm -rf "$venv_dir"
+    fi
+
     if [[ ! -x "$interpreter" ]]; then
         printf 'إنشاء بيئة Python مستقلة لـ %s...\n' "$name"
         "$PYTHON_FALLBACK" -m venv "$venv_dir" || {
@@ -27,7 +34,6 @@ prepare_environment() {
         }
     fi
 
-    current_hash="$(sha256sum "$requirements" | awk '{print $1}')" || return 1
     if [[ ! -f "$marker" ]] || [[ "$(cat "$marker")" != "$current_hash" ]]; then
         printf 'تثبيت/تحديث متطلبات %s...\n' "$name"
         "$interpreter" -m pip install --disable-pip-version-check --no-cache-dir -r "$requirements" || {
