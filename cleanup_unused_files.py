@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Safely report and optionally remove disposable project artifacts.
 
-The default mode is a dry run. It only reports candidates and never deletes files.
+The normal no-argument mode cleans pip packages from base Python automatically after
+the project's virtual environments are present. Explicit report modes remain dry runs.
 With --apply, only clearly disposable generated artifacts are removed. Source files,
 backups, databases, environment files, virtual environments, and runtime state are
 always protected unless the caller explicitly opts into the dangerous source mode.
@@ -250,6 +251,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    automatic_global_cleanup = not any(
+        (args.apply, args.include_source, args.delete_source, args.clean_user_site, args.clean_global_site)
+    )
+    if automatic_global_cleanup:
+        args.apply = True
+        args.clean_global_site = True
+        print("Automatic mode: cleaning base-Python pip packages because no options were provided.")
     root = args.root.resolve()
     if not root.is_dir():
         raise SystemExit(f"Root directory does not exist: {root}")
