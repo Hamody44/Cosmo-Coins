@@ -44,6 +44,8 @@ DEFAULT_VISION_MODEL = "gemini-3.8-flash"
 DEFAULT_FALLBACK_VISION_MODEL = "gemini-2.5-flash-lite"
 DEFAULT_OPENROUTER_MODEL = "openrouter/free"
 VISION_REQUEST_TIMEOUT_SECONDS = 20
+LOCAL_OCR_TIMEOUT_SECONDS = 8
+LOCAL_OCR_MIN_CONFIDENCE = 0.60
 TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_MIME_BY_EXTENSION = {
@@ -53,6 +55,7 @@ IMAGE_MIME_BY_EXTENSION = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
+_LOCAL_OCR_ENGINE = None
 
 
 def load_config() -> tuple[str, int]:
@@ -106,6 +109,72 @@ def parse_numbers_response(content: str) -> list[str]:
     if not isinstance(numbers, list):
         raise RuntimeError("Gemini returned an invalid numbers list")
     return [str(value).strip() for value in numbers if str(value).strip()]
+
+
+def _local_ocr_engine():
+    """Load RapidOCR lazily so the bot can still start if OCR assets are unavailable."""
+    global _LOCAL_OCR_ENGINE
+    if _LOCAL_OCR_ENGINE is None:
+        from rapidocr_onnxruntime import RapidOCR
+
+        _LOCAL_OCR_ENGINE = RapidOCR()
+    return _LOCAL_OCR_ENGINE
+
+
+def _normalize_local_number(value: str) -> str:
+    translations = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+    return value.translate(translations).replace("٫", ".").strip()
+
+
+def extract_numbers_locally(image_bytes: bytes, mime_type: str) -> list[str]:
+    """Extract high-confidence numeric tokens offline with RapidOCR."""
+    del mime_type  # RapidOCR receives decoded pixels, not the MIME label.
+    import cv2
+    import numpy as np
+
+    image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError("Local OCR could not decode the image")
+
+    result, _ = _local_ocr_engine()(image)
+    if not result:
+        return []
+
+    number_pattern = re.compile(r"[0-9٠-٩۰-۹]+(?:[.,٫][0-9٠-٩۰-۹]+)?")
+    numbers: list[str] = []
+    for item in result:
+        if len(item) < 3:
+            continue
+        text = str(item[1])
+        try:
+            confidence = float(item[2])
+        except (TypeError, ValueError):
+            continue
+        if confidence < LOCAL_OCR_MIN_CONFIDENCE:
+            continue
+        for match in number_pattern.findall(text):
+            normalized = _normalize_local_number(match)
+            if normalized and normalized not in numbers:
+                numbers.append(normalized)
+    return numbers
+
+
+async def try_local_number_extraction(image_bytes: bytes, mime_type: str) -> list[str]:
+    """Run CPU-bound OCR off the Discord event loop with a short timeout."""
+    enabled = os.getenv("LOCAL_OCR_ENABLED", "true").strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return []
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(extract_numbers_locally, image_bytes, mime_type),
+            timeout=LOCAL_OCR_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Local RapidOCR timed out after %s seconds.", LOCAL_OCR_TIMEOUT_SECONDS)
+        return []
+    except (ImportError, RuntimeError, OSError, ValueError) as exc:
+        logger.info("Local RapidOCR unavailable or found no usable numbers: %s", exc)
+        return []
 
 
 async def extract_numbers_with_openrouter(
@@ -480,21 +549,35 @@ async def numbers(ctx: commands.Context) -> None:
         await send_notice(ctx, "حجم الصورة كبير جدًا. الحد الأقصى هو 8 ميغابايت.")
         return
 
-    api_key, _ = load_vision_config()
-    if not api_key:
-        logger.error("The image-number command was used without GEMINI_API_KEY.")
-        await send_notice(ctx, "ميزة استخراج الأرقام غير مفعلة حاليًا؛ أضف GEMINI_API_KEY إلى إعدادات البوت.")
-        return
-
     try:
         image_bytes = await attachment.read()
         if len(image_bytes) > MAX_IMAGE_BYTES:
             await send_notice(ctx, "حجم الصورة كبير جدًا. الحد الأقصى هو 8 ميغابايت.")
             return
-        numbers_found = await extract_numbers_from_image(
-            image_bytes,
-            mime_type,
-        )
+
+        numbers_found = await try_local_number_extraction(image_bytes, mime_type)
+        if numbers_found:
+            logger.info("Extracted %s number(s) locally with RapidOCR.", len(numbers_found))
+        else:
+            gemini_key, _ = load_vision_config()
+            openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+            if not gemini_key and not openrouter_key:
+                logger.error("Local OCR found no numbers and no remote vision API key is configured.")
+                await send_notice(
+                    ctx,
+                    "لم ينجح الاستخراج المحلي ولا توجد مفاتيح AI احتياطية. أضف GEMINI_API_KEY أو OPENROUTER_API_KEY.",
+                )
+                return
+            if gemini_key:
+                numbers_found = await extract_numbers_from_image(image_bytes, mime_type)
+            else:
+                numbers_found = await extract_numbers_with_openrouter(
+                    image_bytes,
+                    mime_type,
+                    api_key=openrouter_key,
+                    model=os.getenv("OPENROUTER_VISION_MODEL", DEFAULT_OPENROUTER_MODEL).strip()
+                    or DEFAULT_OPENROUTER_MODEL,
+                )
     except RuntimeError as exc:
         logger.warning("Image number extraction failed: %s", exc)
         if "timed out" in str(exc).lower() or "gemini api error" in str(exc).lower():
