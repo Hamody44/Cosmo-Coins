@@ -56,6 +56,7 @@ PROTECTED_FILE_PATTERNS = {
     "*.tar.gz",
     "requirements*.txt",
     "requirements*.in",
+    "*requirements*.lock",
 }
 # These directories contain runtime code or assets loaded dynamically.
 RUNTIME_DIRS = {"cogs", "dashboard", "second_bot"}
