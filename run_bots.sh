@@ -30,7 +30,7 @@ prepare_environment() {
     current_hash="$(sha256sum "$requirements" | awk '{print $1}')" || return 1
     if [[ ! -f "$marker" ]] || [[ "$(cat "$marker")" != "$current_hash" ]]; then
         printf 'تثبيت/تحديث متطلبات %s...\n' "$name"
-        "$interpreter" -m pip install --disable-pip-version-check -r "$requirements" || {
+        "$interpreter" -m pip install --disable-pip-version-check --no-cache-dir -r "$requirements" || {
             printf 'خطأ: تعذر تثبيت متطلبات %s.\n' "$name" >&2
             return 1
         }
