@@ -1,0 +1,2 @@
+# Intentionally empty.
+# The bots install their dependencies privately via run_bots.sh into .venv directories.
