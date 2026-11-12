@@ -33,6 +33,15 @@ second_bot/.venv/bin/python -m pip install --upgrade pip
 second_bot/.venv/bin/python -m pip install -r second_bot/cosmo_second_requirements.lock
 ```
 
+يعمل OCR المحلي الأساسي باستخدام Pillow فقط، لذلك لا يحتاج تثبيت OpenCV لتشغيل `type2` على الاستضافات محدودة المساحة. توجد نسخة نموذج متوافقة مع Pillow في `models/local_ocr_model_pillow.json`، ويختار البوت النموذج المطابق تلقائيًا. OpenCV أصبح تسريعًا اختياريًا؛ ثبّته فقط إذا كانت المساحة كافية:
+
+```bash
+PIP_NO_CACHE_DIR=1 second_bot/.venv/bin/pip install --no-cache-dir \
+  -r second_bot/cosmo_second_ocr_acceleration.lock
+```
+
+إذا ظهر `No space left on device`، تجاهل ملف التسريع الاختياري ولا تحاول تثبيته؛ سيستخدم البوت fallback الخاص بـPillow تلقائيًا.
+
 قبل التشغيل، أنشئ أيضًا ملف `.env` الخاص ببوت Cosmo-Coins في جذر المستودع وفق إعداداته الحالية، إن لم يكن موجودًا بالفعل. لا تستبدل ملف `.env` قائمًا.
 
 ## تشغيل البوتين معًا

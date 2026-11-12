@@ -13,9 +13,16 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-import cv2
-import numpy as np
-from PIL import Image, ImageOps
+try:
+    import cv2
+    import numpy as np
+
+    OPENCV_AVAILABLE = True
+except ImportError:  # Small hosting plans can run the local OCR with Pillow only.
+    cv2 = None
+    np = None
+    OPENCV_AVAILABLE = False
+from PIL import Image, ImageFilter, ImageOps
 
 IMAGE_SIZE = (300, 110)
 FEATURE_SIZE = (32, 48)
@@ -67,8 +74,10 @@ def _digit_crop(image: Image.Image, style: str, position: int) -> Image.Image:
     return image.crop((left, 0, right, IMAGE_SIZE[1]))
 
 
-def _remove_long_lines(mask: np.ndarray) -> np.ndarray:
+def _remove_long_lines(mask: Any) -> Any:
     """Remove only long, near-horizontal/diagonal strokes detected by Hough."""
+    if not OPENCV_AVAILABLE:
+        return mask
     lines = cv2.HoughLinesP(
         mask,
         1,
@@ -95,11 +104,24 @@ def _mask_digit(
     style: str,
     variant: str = "default",
 ) -> Image.Image:
-    """Create a binary digit mask with OpenCV's native image operations."""
-    rgb = np.asarray(image.convert("RGB"))
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    """Create a binary digit mask, using OpenCV when available and Pillow otherwise."""
     config = SETTINGS[style]
     threshold = config["threshold"]
+    if not OPENCV_AVAILABLE:
+        gray = ImageOps.grayscale(image)
+        # Pillow is the runtime fallback for low-storage hosts. Advanced variants
+        # intentionally collapse to the stable fixed threshold in this mode.
+        if style == "type1":
+            mask = gray.point(lambda value: 255 if value < threshold else 0)
+        else:
+            mask = gray.point(lambda value: 255 if value > threshold else 0)
+        opening = config["opening"]
+        if opening:
+            mask = mask.filter(ImageFilter.MinFilter(opening)).filter(ImageFilter.MaxFilter(opening))
+        return mask
+
+    rgb = np.asarray(image.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     if style == "type1" and variant == "otsu":
         _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     elif style == "type1" and variant == "adaptive":
@@ -135,13 +157,14 @@ def _normalize_mask(mask: Image.Image) -> Image.Image:
     scale = min((width - 4) / mask.width, (height - 4) / mask.height)
     new_width = max(1, round(mask.width * scale))
     new_height = max(1, round(mask.height * scale))
-    resized = cv2.resize(
-        np.asarray(mask), (new_width, new_height), interpolation=cv2.INTER_LINEAR
-    )
-    canvas.paste(
-        Image.fromarray(resized, mode="L"),
-        ((width - new_width) // 2, (height - new_height) // 2),
-    )
+    if OPENCV_AVAILABLE:
+        resized = cv2.resize(
+            np.asarray(mask), (new_width, new_height), interpolation=cv2.INTER_LINEAR
+        )
+        resized_image = Image.fromarray(resized, mode="L")
+    else:
+        resized_image = mask.resize((new_width, new_height), Image.Resampling.BILINEAR)
+    canvas.paste(resized_image, ((width - new_width) // 2, (height - new_height) // 2))
     return canvas
 
 
