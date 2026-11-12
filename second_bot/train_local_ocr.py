@@ -17,6 +17,7 @@ from typing import Any
 
 from local_ocr import (
     SETTINGS,
+    TYPE1_PREPROCESSING_VARIANTS,
     digit_features,
     full_image_feature,
     load_image,
@@ -112,6 +113,34 @@ def evaluate_character_level(prepared: list[dict[str, Any]]) -> dict[str, dict[s
     return result
 
 
+def evaluate_type1_preprocessing(rows: list[dict[str, str]], data_dir: Path) -> dict[str, Any]:
+    """Benchmark optional type1 preprocessing without changing the default path."""
+    type1_rows = [row for row in rows if row["type"] == "type1"]
+    results: dict[str, Any] = {}
+    for variant in TYPE1_PREPROCESSING_VARIANTS:
+        prepared = [
+            {
+                **row,
+                "char_features": digit_features(
+                    load_image(data_dir / row["filename"]), "type1", variant=variant
+                ),
+            }
+            for row in type1_rows
+        ]
+        templates = make_templates(prepared)
+        correct_digits = exact_sequences = 0
+        for row in prepared:
+            available = [t for t in templates if t["filename"] != row["filename"]]
+            guess = predict_digit_features(row["char_features"], available)["text"]
+            correct_digits += sum(a == b for a, b in zip(guess, row["answer"]))
+            exact_sequences += guess == row["answer"]
+        results[variant] = {
+            "digit_accuracy": correct_digits / max(1, len(type1_rows) * 5),
+            "exact_sequence_accuracy": exact_sequences / max(1, len(type1_rows)),
+        }
+    return results
+
+
 def hamming_distance(left: list[int], right: list[int]) -> float:
     if len(left) != len(right):
         raise ValueError("Full-image feature size mismatch")
@@ -187,6 +216,7 @@ def main() -> int:
     validation = {
         "character_level": evaluate_character_level(prepared),
         "full_sequence": evaluate_full_sequence(prepared),
+        "type1_preprocessing": evaluate_type1_preprocessing(rows, args.data),
     }
     print(json.dumps(validation, ensure_ascii=False, indent=2))
 

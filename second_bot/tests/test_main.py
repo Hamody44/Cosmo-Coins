@@ -344,6 +344,24 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         attachment.read.assert_not_awaited()
         self.assertIn("8 ميغابايت", ctx.send.await_args.args[0])
 
+    async def test_numbers_uses_local_ocr_for_type2_without_api_key(self):
+        ctx = make_context()
+        attachment = SimpleNamespace(
+            content_type="image/png",
+            filename="type2.png",
+            size=4,
+            read=AsyncMock(return_value=b"type2-image"),
+        )
+        ctx.message.attachments = [attachment]
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "", "OPENROUTER_API_KEY": ""}), \
+                patch.object(main, "extract_numbers_locally", return_value=["99598"]), \
+                patch.object(main, "extract_numbers_from_image", new=AsyncMock()) as remote_ocr:
+            await main.numbers.callback(ctx)
+
+        remote_ocr.assert_not_awaited()
+        self.assertIn("99598", ctx.send.await_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

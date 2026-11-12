@@ -1,4 +1,4 @@
-"""Lightweight, experimental, character-wise CAPTCHA OCR using Pillow only.
+"""Lightweight, experimental, character-wise CAPTCHA OCR using Pillow and OpenCV.
 
 The model is trained from captcha_samples/label.csv by train_local_ocr.py.
 It classifies digits independently, so it can form sequences not seen during
@@ -13,7 +13,9 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageFilter, ImageOps
+import cv2
+import numpy as np
+from PIL import Image, ImageOps
 
 IMAGE_SIZE = (300, 110)
 FEATURE_SIZE = (32, 48)
@@ -23,6 +25,7 @@ SETTINGS = {
     "type1": {"threshold": 100, "opening": 5},
     "type2": {"threshold": 150, "opening": 3},
 }
+TYPE1_PREPROCESSING_VARIANTS = ("default", "otsu", "adaptive", "line_clean")
 
 
 def load_image(source: bytes | str | Path | Image.Image) -> Image.Image:
@@ -64,18 +67,62 @@ def _digit_crop(image: Image.Image, style: str, position: int) -> Image.Image:
     return image.crop((left, 0, right, IMAGE_SIZE[1]))
 
 
-def _mask_digit(image: Image.Image, style: str) -> Image.Image:
-    gray = ImageOps.grayscale(image)
+def _remove_long_lines(mask: np.ndarray) -> np.ndarray:
+    """Remove only long, near-horizontal/diagonal strokes detected by Hough."""
+    lines = cv2.HoughLinesP(
+        mask,
+        1,
+        np.pi / 180,
+        threshold=15,
+        minLineLength=max(15, mask.shape[1] // 2),
+        maxLineGap=8,
+    )
+    if lines is None:
+        return mask
+    cleaned = mask.copy()
+    for x1, y1, x2, y2 in lines[:, 0]:
+        length = math.hypot(x2 - x1, y2 - y1)
+        angle = abs(math.degrees(math.atan2(y2 - y1, x2 - x1)))
+        near_horizontal = angle <= 18 or angle >= 162
+        near_diagonal = 28 <= angle <= 62 or 118 <= angle <= 152
+        if length >= mask.shape[1] * 0.55 and (near_horizontal or near_diagonal):
+            cv2.line(cleaned, (x1, y1), (x2, y2), 0, 2)
+    return cleaned
+
+
+def _mask_digit(
+    image: Image.Image,
+    style: str,
+    variant: str = "default",
+) -> Image.Image:
+    """Create a binary digit mask with OpenCV's native image operations."""
+    rgb = np.asarray(image.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     config = SETTINGS[style]
     threshold = config["threshold"]
-    if style == "type1":
-        mask = gray.point(lambda value: 255 if value < threshold else 0)
+    if style == "type1" and variant == "otsu":
+        _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    elif style == "type1" and variant == "adaptive":
+        mask = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 7
+        )
+    elif style == "type1":
+        _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)
     else:
-        mask = gray.point(lambda value: 255 if value > threshold else 0)
+        _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+    if style == "type1" and variant == "line_clean":
+        mask = _remove_long_lines(mask)
     opening = config["opening"]
     if opening:
-        mask = mask.filter(ImageFilter.MinFilter(opening)).filter(ImageFilter.MaxFilter(opening))
-    return mask
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (opening, opening))
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_OPEN,
+            kernel,
+            borderType=cv2.BORDER_CONSTANT,
+            borderValue=255,
+        )
+    return Image.fromarray(mask, mode="L")
 
 
 def _normalize_mask(mask: Image.Image) -> Image.Image:
@@ -88,8 +135,13 @@ def _normalize_mask(mask: Image.Image) -> Image.Image:
     scale = min((width - 4) / mask.width, (height - 4) / mask.height)
     new_width = max(1, round(mask.width * scale))
     new_height = max(1, round(mask.height * scale))
-    mask = mask.resize((new_width, new_height), Image.Resampling.BILINEAR)
-    canvas.paste(mask, ((width - new_width) // 2, (height - new_height) // 2))
+    resized = cv2.resize(
+        np.asarray(mask), (new_width, new_height), interpolation=cv2.INTER_LINEAR
+    )
+    canvas.paste(
+        Image.fromarray(resized, mode="L"),
+        ((width - new_width) // 2, (height - new_height) // 2),
+    )
     return canvas
 
 
@@ -123,12 +175,21 @@ def hog_feature(mask: Image.Image) -> list[float]:
     return [value / norm for value in feature]
 
 
-def digit_features(image: Image.Image, style: str) -> list[list[float]]:
+def digit_features(
+    image: Image.Image,
+    style: str,
+    *,
+    variant: str = "default",
+) -> list[list[float]]:
     image = load_image(image)
     if style not in SETTINGS:
         raise ValueError(f"Unknown CAPTCHA style: {style}")
+    if style == "type1" and variant not in TYPE1_PREPROCESSING_VARIANTS:
+        raise ValueError(f"Unknown type1 preprocessing variant: {variant}")
     return [
-        hog_feature(_normalize_mask(_mask_digit(_digit_crop(image, style, position), style)))
+        hog_feature(
+            _normalize_mask(_mask_digit(_digit_crop(image, style, position), style, variant))
+        )
         for position in range(5)
     ]
 

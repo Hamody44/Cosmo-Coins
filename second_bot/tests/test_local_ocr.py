@@ -2,7 +2,14 @@ import csv
 import unittest
 from pathlib import Path
 
-from local_ocr import detect_style, digit_features, load_image, load_model, predict_digit_features
+from local_ocr import (
+    TYPE1_PREPROCESSING_VARIANTS,
+    detect_style,
+    digit_features,
+    load_image,
+    load_model,
+    predict_digit_features,
+)
 from train_local_ocr import make_templates, prepare_rows, read_dataset
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +64,13 @@ class LocalOCRTests(unittest.TestCase):
         )
         self.assertEqual(len(result["text"]), 5)
         self.assertTrue(result["text"].isdigit())
+
+    def test_type1_preprocessing_variants_have_same_feature_shape(self):
+        image = load_image(DATA_DIR / "type1_01.webp")
+        for variant in TYPE1_PREPROCESSING_VARIANTS:
+            features = digit_features(image, "type1", variant=variant)
+            self.assertEqual(len(features), 5)
+            self.assertTrue(all(len(feature) == len(features[0]) for feature in features))
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import asyncio
 import math
 import re
 from pathlib import Path
+from functools import lru_cache
 
 import aiohttp
 import discord
@@ -18,7 +19,10 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from google.genai import types
 
+from local_ocr import load_model, recognize
+
 BASE_DIR = Path(__file__).resolve().parent
+LOCAL_OCR_MODEL_PATH = BASE_DIR / "models" / "local_ocr_model.json"
 SHARED_GUILD_STATE_PATH = BASE_DIR / ".runtime" / "shared_guilds.json"
 SHARED_GUILD_STATE_MAX_AGE_SECONDS = 90
 # The panel may expose Cosmo-Coins' DISCORD_BOT_TOKEN to every process.
@@ -81,6 +85,29 @@ def load_vision_config() -> tuple[str, str]:
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     model = os.getenv("GEMINI_VISION_MODEL", DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL
     return api_key, model
+
+
+@lru_cache(maxsize=1)
+def load_local_ocr_model() -> dict:
+    """Load the bundled local OCR model once per process."""
+    return load_model(LOCAL_OCR_MODEL_PATH)
+
+
+def extract_numbers_locally(image_bytes: bytes) -> list[str] | None:
+    """Return a validated local type2 result, or None for other/invalid images.
+
+    Type1 is deliberately left to the vision providers because its current
+    leave-one-image-out validation is not reliable enough for production use.
+    """
+    result = recognize(image_bytes, load_local_ocr_model())
+    if result.get("type") != "type2":
+        return None
+    text = str(result.get("text", ""))
+    if not re.fullmatch(r"\d{5}", text):
+        logger.warning("Local type2 OCR returned an invalid result: %r", text)
+        return None
+    logger.info("Using local OCR for type2 image: %s", text)
+    return [text]
 
 
 def attachment_image_mime_type(attachment) -> str | None:
@@ -486,25 +513,27 @@ async def numbers(ctx: commands.Context) -> None:
             await send_notice(ctx, "حجم الصورة كبير جدًا. الحد الأقصى هو 8 ميغابايت.")
             return
 
-        gemini_key, _ = load_vision_config()
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-        if not gemini_key and not openrouter_key:
-            logger.error("No image-vision API key is configured.")
-            await send_notice(
-                ctx,
-                "لا توجد مفاتيح خدمة رؤية AI. أضف GEMINI_API_KEY أو OPENROUTER_API_KEY.",
-            )
-            return
-        if gemini_key:
-            numbers_found = await extract_numbers_from_image(image_bytes, mime_type)
-        else:
-            numbers_found = await extract_numbers_with_openrouter(
-                image_bytes,
-                mime_type,
-                api_key=openrouter_key,
-                model=os.getenv("OPENROUTER_VISION_MODEL", DEFAULT_OPENROUTER_MODEL).strip()
-                or DEFAULT_OPENROUTER_MODEL,
-            )
+        numbers_found = extract_numbers_locally(image_bytes)
+        if numbers_found is None:
+            gemini_key, _ = load_vision_config()
+            openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+            if not gemini_key and not openrouter_key:
+                logger.error("No image-vision API key is configured.")
+                await send_notice(
+                    ctx,
+                    "لا توجد مفاتيح خدمة رؤية AI. أضف GEMINI_API_KEY أو OPENROUTER_API_KEY.",
+                )
+                return
+            if gemini_key:
+                numbers_found = await extract_numbers_from_image(image_bytes, mime_type)
+            else:
+                numbers_found = await extract_numbers_with_openrouter(
+                    image_bytes,
+                    mime_type,
+                    api_key=openrouter_key,
+                    model=os.getenv("OPENROUTER_VISION_MODEL", DEFAULT_OPENROUTER_MODEL).strip()
+                    or DEFAULT_OPENROUTER_MODEL,
+                )
     except RuntimeError as exc:
         logger.warning("Image number extraction failed: %s", exc)
         if "timed out" in str(exc).lower() or "gemini api error" in str(exc).lower():
