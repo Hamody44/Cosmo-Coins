@@ -300,6 +300,12 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
             ["101", "22.5"],
         )
 
+    def test_parse_ocr_space_response_requires_five_ascii_digits(self):
+        response = {"ParsedResults": [{"ParsedText": "12 880\n"}]}
+        self.assertEqual(main.parse_ocr_space_response(response), "12880")
+        with self.assertRaisesRegex(RuntimeError, "five-digit"):
+            main.parse_ocr_space_response({"ParsedResults": [{"ParsedText": "1288"}]})
+
     def test_attachment_image_type_uses_filename_when_content_type_is_missing(self):
         attachment = SimpleNamespace(content_type=None, filename="receipt.JPG")
         self.assertEqual(main.attachment_image_mime_type(attachment), "image/jpeg")
@@ -354,13 +360,34 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         )
         ctx.message.attachments = [attachment]
 
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "", "OPENROUTER_API_KEY": ""}), \
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "", "OPENROUTER_API_KEY": "", "OCR_SPACE_API_KEY": ""}), \
+                patch.object(main, "detect_image_style", return_value="type2"), \
                 patch.object(main, "extract_numbers_locally", return_value=["99598"]), \
                 patch.object(main, "extract_numbers_from_image", new=AsyncMock()) as remote_ocr:
             await main.numbers.callback(ctx)
 
         remote_ocr.assert_not_awaited()
         self.assertIn("99598", ctx.send.await_args.args[0])
+
+    async def test_numbers_uses_ocr_space_for_type1_only(self):
+        ctx = make_context()
+        attachment = SimpleNamespace(
+            content_type="image/png",
+            filename="type1.png",
+            size=4,
+            read=AsyncMock(return_value=b"type1-image"),
+        )
+        ctx.message.attachments = [attachment]
+
+        with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
+                patch.object(main, "detect_image_style", return_value="type1"), \
+                patch.object(main, "extract_numbers_with_ocr_space", new=AsyncMock(return_value=["12880"])) as ocr_space, \
+                patch.object(main, "extract_numbers_locally", return_value=["wrong"] ) as local_ocr:
+            await main.numbers.callback(ctx)
+
+        ocr_space.assert_awaited_once_with(b"type1-image", "image/png", api_key="ocr-test-key")
+        local_ocr.assert_not_called()
+        self.assertIn("12880", ctx.send.await_args.args[0])
 
 
 if __name__ == "__main__":

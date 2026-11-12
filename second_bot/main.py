@@ -19,7 +19,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from google.genai import types
 
-from local_ocr import load_model, recognize
+from local_ocr import detect_style, load_image, load_model, recognize
 
 BASE_DIR = Path(__file__).resolve().parent
 LOCAL_OCR_MODEL_PATH = BASE_DIR / "models" / "local_ocr_model.json"
@@ -48,6 +48,8 @@ DEFAULT_VISION_MODEL = "gemini-3.8-flash"
 DEFAULT_FALLBACK_VISION_MODEL = "gemini-2.5-flash-lite"
 DEFAULT_OPENROUTER_MODEL = "openrouter/free"
 VISION_REQUEST_TIMEOUT_SECONDS = 20
+OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
+OCR_SPACE_TIMEOUT_SECONDS = 20
 TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_MIME_BY_EXTENSION = {
@@ -107,6 +109,79 @@ def extract_numbers_locally(image_bytes: bytes) -> list[str] | None:
         logger.warning("Local type2 OCR returned an invalid result: %r", text)
         return None
     logger.info("Using local OCR for type2 image: %s", text)
+    return [text]
+
+
+def detect_image_style(image_bytes: bytes) -> str:
+    """Classify the CAPTCHA before choosing its OCR provider."""
+    return detect_style(load_image(image_bytes))
+
+
+def parse_ocr_space_response(response_data: dict) -> str:
+    """Extract exactly one five-digit answer from an OCR.Space response."""
+    if response_data.get("IsErroredOnProcessing"):
+        message = response_data.get("ErrorMessage") or response_data.get("ErrorDetails") or "unknown error"
+        raise RuntimeError(f"OCR.Space processing error: {message}")
+
+    parsed_results = response_data.get("ParsedResults") or []
+    text = "\n".join(
+        str(result.get("ParsedText", ""))
+        for result in parsed_results
+        if isinstance(result, dict)
+    )
+    digits = "".join(character for character in text if character in "0123456789")
+    if len(digits) != 5:
+        raise RuntimeError(f"OCR.Space returned an invalid five-digit result: {text!r}")
+    return digits
+
+
+async def extract_numbers_with_ocr_space(
+    image_bytes: bytes,
+    mime_type: str,
+    *,
+    api_key: str,
+) -> list[str]:
+    """Use OCR.Space for type1 images and return one validated five-digit value."""
+    extension_by_mime = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    form = aiohttp.FormData()
+    form.add_field(
+        "file",
+        image_bytes,
+        filename=f"captcha{extension_by_mime.get(mime_type, '.png')}",
+        content_type=mime_type,
+    )
+    form.add_field("language", "eng")
+    form.add_field("isOverlayRequired", "false")
+    form.add_field("detectOrientation", "true")
+    form.add_field("scale", "true")
+    form.add_field("OCREngine", "2")
+
+    timeout = aiohttp.ClientTimeout(total=OCR_SPACE_TIMEOUT_SECONDS)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                OCR_SPACE_ENDPOINT,
+                headers={"apikey": api_key},
+                data=form,
+            ) as result:
+                response_data = await result.json(content_type=None)
+                if result.status >= 400:
+                    message = response_data.get("ErrorMessage", f"HTTP {result.status}")
+                    raise RuntimeError(f"OCR.Space API error {result.status}: {message}")
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            f"OCR.Space request timed out after {OCR_SPACE_TIMEOUT_SECONDS} seconds"
+        ) from exc
+    except aiohttp.ClientError as exc:
+        raise RuntimeError(f"OCR.Space request failed: {exc}") from exc
+
+    text = parse_ocr_space_response(response_data)
+    logger.info("Using OCR.Space for type1 image: %s", text)
     return [text]
 
 
@@ -513,33 +588,29 @@ async def numbers(ctx: commands.Context) -> None:
             await send_notice(ctx, "حجم الصورة كبير جدًا. الحد الأقصى هو 8 ميغابايت.")
             return
 
-        numbers_found = extract_numbers_locally(image_bytes)
-        if numbers_found is None:
-            gemini_key, _ = load_vision_config()
-            openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-            if not gemini_key and not openrouter_key:
-                logger.error("No image-vision API key is configured.")
-                await send_notice(
-                    ctx,
-                    "لا توجد مفاتيح خدمة رؤية AI. أضف GEMINI_API_KEY أو OPENROUTER_API_KEY.",
-                )
+        image_style = detect_image_style(image_bytes)
+        if image_style == "type2":
+            numbers_found = extract_numbers_locally(image_bytes)
+            if numbers_found is None:
+                await send_notice(ctx, "تعذر قراءة أرقام صورة النوع الثاني محليًا.")
                 return
-            if gemini_key:
-                numbers_found = await extract_numbers_from_image(image_bytes, mime_type)
-            else:
-                numbers_found = await extract_numbers_with_openrouter(
-                    image_bytes,
-                    mime_type,
-                    api_key=openrouter_key,
-                    model=os.getenv("OPENROUTER_VISION_MODEL", DEFAULT_OPENROUTER_MODEL).strip()
-                    or DEFAULT_OPENROUTER_MODEL,
-                )
+        else:
+            ocr_space_key = os.getenv("OCR_SPACE_API_KEY", "").strip()
+            if not ocr_space_key:
+                logger.error("OCR_SPACE_API_KEY is missing for a type1 image.")
+                await send_notice(ctx, "أضف OCR_SPACE_API_KEY لاستخدام OCR.Space مع صور النوع الأول.")
+                return
+            numbers_found = await extract_numbers_with_ocr_space(
+                image_bytes,
+                mime_type,
+                api_key=ocr_space_key,
+            )
     except RuntimeError as exc:
         logger.warning("Image number extraction failed: %s", exc)
-        if "timed out" in str(exc).lower() or "gemini api error" in str(exc).lower():
-            await send_notice(ctx, "خدمة Gemini تأخرت أو غير متاحة مؤقتًا. حاول مرة أخرى بعد قليل.")
+        if "timed out" in str(exc).lower() or "api error" in str(exc).lower():
+            await send_notice(ctx, "خدمة OCR الخارجية تأخرت أو غير متاحة مؤقتًا. حاول مرة أخرى بعد قليل.")
         else:
-            await send_notice(ctx, "تعذر قراءة الأرقام من الصورة. جرّب صورة أوضح وتأكد من إعداد GEMINI_API_KEY.")
+            await send_notice(ctx, "تعذر قراءة الأرقام من الصورة. جرّب صورة أوضح وتأكد من إعداد OCR_SPACE_API_KEY.")
         return
     except Exception:
         logger.exception("Unexpected failure while extracting numbers from an image.")
