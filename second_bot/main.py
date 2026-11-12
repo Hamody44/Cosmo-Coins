@@ -24,6 +24,7 @@ from PIL import Image, ImageEnhance
 from local_ocr import detect_style, load_image, load_model, recognize
 
 BASE_DIR = Path(__file__).resolve().parent
+RUN_BOTS_SCRIPT = BASE_DIR.parent / "run_bots.sh"
 LOCAL_OCR_MODEL_PATH = BASE_DIR / "models" / "local_ocr_model.json"
 SHARED_GUILD_STATE_PATH = BASE_DIR / ".runtime" / "shared_guilds.json"
 SHARED_GUILD_STATE_MAX_AGE_SECONDS = 90
@@ -82,6 +83,28 @@ def load_config() -> tuple[str, int]:
         ) from exc
 
     return token, role_id
+
+
+async def control_primary_bot(action: str) -> str:
+    """Queue a control action for the primary bot through the shared supervisor."""
+    process = await asyncio.create_subprocess_exec(
+        "bash",
+        str(RUN_BOTS_SCRIPT),
+        "control",
+        action,
+        "primary",
+        cwd=BASE_DIR.parent,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        return "انتهت مهلة إرسال الطلب إلى مشرف التشغيل."
+    message = output.decode("utf-8", errors="replace").strip()
+    return message or f"تم إرسال طلب {action} إلى البوت الأساسي."
 
 
 def load_vision_config() -> tuple[str, str]:
@@ -490,6 +513,8 @@ async def check_shared_guild(ctx: commands.Context) -> bool:
 @bot.check
 async def check_user_command_cooldown(ctx: commands.Context) -> bool:
     """Apply a separate 30-second cooldown to each user in each guild."""
+    if ctx.command and ctx.command.name in {"start", "restart", "shutdown", "status"}:
+        return True
     user_id = getattr(ctx.author, "id", None)
     if user_id is None:
         return True
@@ -522,6 +547,46 @@ def can_send_in(channel: discord.abc.GuildChannel, permissions: discord.Permissi
     if isinstance(channel, discord.Thread):
         return permissions.send_messages_in_threads
     return permissions.send_messages
+
+
+async def check_control_owner(ctx: commands.Context) -> bool:
+    """Allow only the second-bot account, its owner, or the configured role."""
+    if bot.user is not None and getattr(ctx.author, "id", None) == bot.user.id:
+        return True
+    if (
+        SAY_ALLOWED_ROLE_ID is not None
+        and isinstance(ctx.author, discord.Member)
+        and any(role.id == SAY_ALLOWED_ROLE_ID for role in ctx.author.roles)
+    ):
+        return True
+    try:
+        return await bot.is_owner(ctx.author)
+    except discord.HTTPException:
+        return False
+
+
+@bot.command(name="start")
+@commands.check(check_control_owner)
+async def start_primary_bot(ctx: commands.Context) -> None:
+    await send_notice(ctx, f"🟢 {await control_primary_bot('start')}")
+
+
+@bot.command(name="restart")
+@commands.check(check_control_owner)
+async def restart_primary_bot(ctx: commands.Context) -> None:
+    await send_notice(ctx, f"🔄 {await control_primary_bot('restart')}")
+
+
+@bot.command(name="shutdown")
+@commands.check(check_control_owner)
+async def shutdown_primary_bot(ctx: commands.Context) -> None:
+    await send_notice(ctx, f"🔴 {await control_primary_bot('shutdown')}")
+
+
+@bot.command(name="status")
+@commands.check(check_control_owner)
+async def status_primary_bot(ctx: commands.Context) -> None:
+    await send_notice(ctx, f"ℹ️ {await control_primary_bot('status')}")
 
 
 @bot.command(name="say")

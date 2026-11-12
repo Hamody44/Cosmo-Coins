@@ -33,6 +33,30 @@ bot = commands.Bot(
     help_command=None,
 )
 bot.owner_id = PRIMARY_OWNER_ID
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+RUN_BOTS_SCRIPT = os.path.join(ROOT_DIR, "run_bots.sh")
+
+
+async def control_second_bot(action: str) -> str:
+    """Queue a control action for second_bot through the shared supervisor."""
+    process = await asyncio.create_subprocess_exec(
+        "bash",
+        RUN_BOTS_SCRIPT,
+        "control",
+        action,
+        "second_bot",
+        cwd=ROOT_DIR,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        return "انتهت مهلة إرسال الطلب إلى مشرف التشغيل."
+    message = output.decode("utf-8", errors="replace").strip()
+    return message or f"تم إرسال طلب {action} إلى البوت الثاني."
 
 
 SHARED_GUILD_STATE_PATH = os.path.join(
@@ -259,7 +283,32 @@ async def publish_shared_guild_state_on_remove(guild):
     try:
         publish_shared_guild_state()
     except OSError as exc:
-        print(f"⚠️ تعذر تحديث قائمة السيرفرات بعد مغادرة {guild.id}: {exc}")
+        print(f"⚠️ تعذر نشر قائمة سيرفرات البوت الثاني: {exc}")
+
+
+@bot.command(name="start")
+@commands.is_owner()
+async def start_second_bot(ctx):
+    await ctx.send(f"🟢 {await control_second_bot('start')}")
+
+
+@bot.command(name="restart")
+@commands.is_owner()
+async def restart_second_bot(ctx):
+    await ctx.send(f"🔄 {await control_second_bot('restart')}")
+
+
+@bot.command(name="shutdown")
+@commands.is_owner()
+async def shutdown_second_bot(ctx):
+    await ctx.send(f"🔴 {await control_second_bot('shutdown')}")
+
+
+@bot.command(name="status")
+@commands.is_owner()
+async def status_second_bot(ctx):
+    await ctx.send(f"ℹ️ {await control_second_bot('status')}")
+
 
 @bot.event
 async def on_ready():
