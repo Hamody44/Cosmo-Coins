@@ -306,6 +306,10 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "five-digit"):
             main.parse_ocr_space_response({"ParsedResults": [{"ParsedText": "1288"}]})
 
+    def test_first_five_digit_result_normalizes_provider_values(self):
+        self.assertEqual(main.first_five_digit_result(["not useful", "12 880"]), "12880")
+        self.assertIsNone(main.first_five_digit_result(["1288", "abcdef"]))
+
     def test_prepare_ocr_space_variants_converts_to_png(self):
         image_bytes = (Path(__file__).resolve().parents[2] / "captcha_samples" / "type1_01.webp").read_bytes()
         original_png, enhanced_png, binary_png = main.prepare_ocr_space_variants(image_bytes)
@@ -400,6 +404,30 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("قبل تحسين التباين", ctx.send.await_args.args[0])
         self.assertIn("بعد تحسين التباين", ctx.send.await_args.args[0])
         self.assertIn("بعد التكبير والأبيض والأسود", ctx.send.await_args.args[0])
+
+    async def test_type1_uses_gemini_when_ocr_space_fails(self):
+        with patch.dict(os.environ, {
+            "GEMINI_API_KEY": "gemini-test-key",
+            "GEMINI_VISION_MODEL": "vision-test",
+            "OPENROUTER_API_KEY": "",
+        }), patch.object(
+            main,
+            "extract_numbers_with_ocr_space_variants",
+            new=AsyncMock(side_effect=RuntimeError("no OCR text")),
+        ), patch.object(
+            main,
+            "extract_numbers_from_image",
+            new=AsyncMock(return_value=["12 880"]),
+        ) as gemini, patch.object(main, "extract_numbers_with_openrouter", new=AsyncMock()) as openrouter:
+            result = await main.extract_type1_with_fallback(
+                b"type1-image",
+                "image/png",
+                ocr_space_key="ocr-test-key",
+            )
+
+        self.assertEqual(result, ((None, None, None), "12880", None))
+        gemini.assert_awaited_once_with(b"type1-image", "image/png", model="vision-test")
+        openrouter.assert_not_awaited()
 
 
 if __name__ == "__main__":

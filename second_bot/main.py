@@ -310,6 +310,15 @@ def parse_numbers_response(content: str) -> list[str]:
     return [str(value).strip() for value in numbers if str(value).strip()]
 
 
+def first_five_digit_result(numbers: list[str]) -> str | None:
+    """Return the first provider result containing exactly five digits."""
+    for value in numbers:
+        digits = "".join(character for character in str(value) if character in "0123456789")
+        if len(digits) == 5:
+            return digits
+    return None
+
+
 async def extract_numbers_with_openrouter(
     image_bytes: bytes,
     mime_type: str,
@@ -362,6 +371,60 @@ async def extract_numbers_with_openrouter(
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("OpenRouter returned no readable text") from exc
     return parse_numbers_response(content or "")
+
+
+async def extract_type1_with_fallback(
+    image_bytes: bytes,
+    mime_type: str,
+    *,
+    ocr_space_key: str,
+) -> tuple[tuple[str | None, str | None, str | None], str | None, str | None]:
+    """Try OCR.Space, then Gemini and OpenRouter when OCR.Space cannot read type1."""
+    ocr_results: tuple[str | None, str | None, str | None] = (None, None, None)
+    if ocr_space_key:
+        try:
+            ocr_results = await extract_numbers_with_ocr_space_variants(
+                image_bytes,
+                api_key=ocr_space_key,
+            )
+            if any(ocr_results):
+                return ocr_results, None, None
+        except RuntimeError as exc:
+            logger.warning("OCR.Space failed for type1; trying vision fallbacks: %s", exc)
+    else:
+        logger.warning("OCR_SPACE_API_KEY is missing; skipping OCR.Space for type1 fallback path.")
+
+    gemini_key, gemini_model = load_vision_config()
+    if gemini_key:
+        try:
+            gemini_result = first_five_digit_result(
+                await extract_numbers_from_image(image_bytes, mime_type, model=gemini_model)
+            )
+            if gemini_result:
+                logger.info("Using Gemini fallback for type1 image: %s", gemini_result)
+                return ocr_results, gemini_result, None
+        except RuntimeError as exc:
+            logger.warning("Gemini type1 fallback failed: %s", exc)
+    else:
+        logger.info("GEMINI_API_KEY is not configured; skipping Gemini type1 fallback.")
+
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if openrouter_key:
+        try:
+            openrouter_result = first_five_digit_result(
+                await extract_numbers_with_openrouter(image_bytes, mime_type, api_key=openrouter_key)
+            )
+            if openrouter_result:
+                logger.info("Using OpenRouter fallback for type1 image: %s", openrouter_result)
+                return ocr_results, None, openrouter_result
+        except RuntimeError as exc:
+            logger.warning("OpenRouter type1 fallback failed: %s", exc)
+    else:
+        logger.info("OPENROUTER_API_KEY is not configured; skipping OpenRouter type1 fallback.")
+
+    raise RuntimeError(
+        "OCR.Space and all configured vision fallbacks failed to return five digits"
+    )
 
 
 async def extract_numbers_from_image(
@@ -738,21 +801,22 @@ async def numbers(ctx: commands.Context) -> None:
                 return
         else:
             ocr_space_key = os.getenv("OCR_SPACE_API_KEY", "").strip()
-            if not ocr_space_key:
-                logger.error("OCR_SPACE_API_KEY is missing for a type1 image.")
-                await send_notice(ctx, "أضف OCR_SPACE_API_KEY لاستخدام OCR.Space مع صور النوع الأول.")
-                return
-            before_contrast, after_contrast, upscaled_binary = await extract_numbers_with_ocr_space_variants(
+            (before_contrast, after_contrast, upscaled_binary), gemini_result, openrouter_result = await extract_type1_with_fallback(
                 image_bytes,
-                api_key=ocr_space_key,
+                mime_type,
+                ocr_space_key=ocr_space_key,
             )
             result_lines = [
                 f"قبل تحسين التباين: `{before_contrast or 'لم تُقرأ خمسة أرقام'}`",
                 f"بعد تحسين التباين: `{after_contrast or 'لم تُقرأ خمسة أرقام'}`",
                 f"بعد التكبير والأبيض والأسود: `{upscaled_binary or 'لم تُقرأ خمسة أرقام'}`",
             ]
+            if gemini_result:
+                result_lines.append(f"نتيجة Gemini الاحتياطية: `{gemini_result}`")
+            if openrouter_result:
+                result_lines.append(f"نتيجة OpenRouter الاحتياطية: `{openrouter_result}`")
             await ctx.send(
-                "نتيجة OCR.Space للنوع الأول:\n" + "\n".join(result_lines),
+                "نتيجة قراءة النوع الأول:\n" + "\n".join(result_lines),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
@@ -761,7 +825,10 @@ async def numbers(ctx: commands.Context) -> None:
         if "timed out" in str(exc).lower() or "api error" in str(exc).lower():
             await send_notice(ctx, "خدمة OCR الخارجية تأخرت أو غير متاحة مؤقتًا. حاول مرة أخرى بعد قليل.")
         else:
-            await send_notice(ctx, "تعذر قراءة الأرقام من الصورة. جرّب صورة أوضح وتأكد من إعداد OCR_SPACE_API_KEY.")
+            await send_notice(
+                ctx,
+                "تعذر قراءة الأرقام من الصورة. تأكد من إعداد OCR_SPACE_API_KEY أو GEMINI_API_KEY أو OPENROUTER_API_KEY.",
+            )
         return
     except Exception:
         logger.exception("Unexpected failure while extracting numbers from an image.")
