@@ -308,10 +308,12 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_prepare_ocr_space_variants_converts_to_png(self):
         image_bytes = (Path(__file__).resolve().parents[2] / "captcha_samples" / "type1_01.webp").read_bytes()
-        original_png, enhanced_png = main.prepare_ocr_space_variants(image_bytes)
+        original_png, enhanced_png, binary_png = main.prepare_ocr_space_variants(image_bytes)
         self.assertTrue(original_png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(enhanced_png.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertTrue(binary_png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertNotEqual(original_png, enhanced_png)
+        self.assertNotEqual(original_png, binary_png)
 
     def test_attachment_image_type_uses_filename_when_content_type_is_missing(self):
         attachment = SimpleNamespace(content_type=None, filename="receipt.JPG")
@@ -388,7 +390,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
                 patch.object(main, "detect_image_style", return_value="type1"), \
-                patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock(return_value=("12880", "12880"))) as ocr_space, \
+                patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock(return_value=("12880", "12880", "12880"))) as ocr_space, \
                 patch.object(main, "extract_numbers_locally", return_value=["wrong"] ) as local_ocr:
             await main.numbers.callback(ctx)
 
@@ -397,6 +399,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("12880", ctx.send.await_args.args[0])
         self.assertIn("قبل تحسين التباين", ctx.send.await_args.args[0])
         self.assertIn("بعد تحسين التباين", ctx.send.await_args.args[0])
+        self.assertIn("بعد التكبير والأبيض والأسود", ctx.send.await_args.args[0])
 
 
 if __name__ == "__main__":
