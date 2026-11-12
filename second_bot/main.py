@@ -19,11 +19,10 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from google.genai import types
 
-from local_ocr import OPENCV_AVAILABLE, load_model, recognize
+from local_ocr import load_model, recognize
 
 BASE_DIR = Path(__file__).resolve().parent
 LOCAL_OCR_MODEL_PATH = BASE_DIR / "models" / "local_ocr_model.json"
-LOCAL_OCR_PILLOW_MODEL_PATH = BASE_DIR / "models" / "local_ocr_model_pillow.json"
 SHARED_GUILD_STATE_PATH = BASE_DIR / ".runtime" / "shared_guilds.json"
 SHARED_GUILD_STATE_MAX_AGE_SECONDS = 90
 # The panel may expose Cosmo-Coins' DISCORD_BOT_TOKEN to every process.
@@ -91,8 +90,7 @@ def load_vision_config() -> tuple[str, str]:
 @lru_cache(maxsize=1)
 def load_local_ocr_model() -> dict:
     """Load the bundled local OCR model once per process."""
-    path = LOCAL_OCR_MODEL_PATH if OPENCV_AVAILABLE else LOCAL_OCR_PILLOW_MODEL_PATH
-    return load_model(path)
+    return load_model(LOCAL_OCR_MODEL_PATH)
 
 
 def extract_numbers_locally(image_bytes: bytes) -> list[str] | None:

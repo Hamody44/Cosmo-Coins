@@ -1,4 +1,4 @@
-"""Lightweight, experimental, character-wise CAPTCHA OCR using Pillow and OpenCV.
+"""Lightweight, experimental, character-wise CAPTCHA OCR using Pillow only.
 
 The model is trained from captcha_samples/label.csv by train_local_ocr.py.
 It classifies digits independently, so it can form sequences not seen during
@@ -13,15 +13,6 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-try:
-    import cv2
-    import numpy as np
-
-    OPENCV_AVAILABLE = True
-except ImportError:  # Small hosting plans can run the local OCR with Pillow only.
-    cv2 = None
-    np = None
-    OPENCV_AVAILABLE = False
 from PIL import Image, ImageFilter, ImageOps
 
 IMAGE_SIZE = (300, 110)
@@ -32,7 +23,7 @@ SETTINGS = {
     "type1": {"threshold": 100, "opening": 5},
     "type2": {"threshold": 150, "opening": 3},
 }
-TYPE1_PREPROCESSING_VARIANTS = ("default", "otsu", "adaptive", "line_clean")
+TYPE1_PREPROCESSING_VARIANTS = ("default",)
 
 
 def load_image(source: bytes | str | Path | Image.Image) -> Image.Image:
@@ -74,77 +65,23 @@ def _digit_crop(image: Image.Image, style: str, position: int) -> Image.Image:
     return image.crop((left, 0, right, IMAGE_SIZE[1]))
 
 
-def _remove_long_lines(mask: Any) -> Any:
-    """Remove only long, near-horizontal/diagonal strokes detected by Hough."""
-    if not OPENCV_AVAILABLE:
-        return mask
-    lines = cv2.HoughLinesP(
-        mask,
-        1,
-        np.pi / 180,
-        threshold=15,
-        minLineLength=max(15, mask.shape[1] // 2),
-        maxLineGap=8,
-    )
-    if lines is None:
-        return mask
-    cleaned = mask.copy()
-    for x1, y1, x2, y2 in lines[:, 0]:
-        length = math.hypot(x2 - x1, y2 - y1)
-        angle = abs(math.degrees(math.atan2(y2 - y1, x2 - x1)))
-        near_horizontal = angle <= 18 or angle >= 162
-        near_diagonal = 28 <= angle <= 62 or 118 <= angle <= 152
-        if length >= mask.shape[1] * 0.55 and (near_horizontal or near_diagonal):
-            cv2.line(cleaned, (x1, y1), (x2, y2), 0, 2)
-    return cleaned
-
-
 def _mask_digit(
     image: Image.Image,
     style: str,
     variant: str = "default",
 ) -> Image.Image:
-    """Create a binary digit mask, using OpenCV when available and Pillow otherwise."""
+    """Create a binary digit mask using only Pillow operations."""
     config = SETTINGS[style]
     threshold = config["threshold"]
-    if not OPENCV_AVAILABLE:
-        gray = ImageOps.grayscale(image)
-        # Pillow is the runtime fallback for low-storage hosts. Advanced variants
-        # intentionally collapse to the stable fixed threshold in this mode.
-        if style == "type1":
-            mask = gray.point(lambda value: 255 if value < threshold else 0)
-        else:
-            mask = gray.point(lambda value: 255 if value > threshold else 0)
-        opening = config["opening"]
-        if opening:
-            mask = mask.filter(ImageFilter.MinFilter(opening)).filter(ImageFilter.MaxFilter(opening))
-        return mask
-
-    rgb = np.asarray(image.convert("RGB"))
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    if style == "type1" and variant == "otsu":
-        _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    elif style == "type1" and variant == "adaptive":
-        mask = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 7
-        )
-    elif style == "type1":
-        _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)
+    gray = ImageOps.grayscale(image)
+    if style == "type1":
+        mask = gray.point(lambda value: 255 if value < threshold else 0)
     else:
-        _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
-    if style == "type1" and variant == "line_clean":
-        mask = _remove_long_lines(mask)
+        mask = gray.point(lambda value: 255 if value > threshold else 0)
     opening = config["opening"]
     if opening:
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (opening, opening))
-        mask = cv2.morphologyEx(
-            mask,
-            cv2.MORPH_OPEN,
-            kernel,
-            borderType=cv2.BORDER_CONSTANT,
-            borderValue=255,
-        )
-    return Image.fromarray(mask, mode="L")
+        mask = mask.filter(ImageFilter.MinFilter(opening)).filter(ImageFilter.MaxFilter(opening))
+    return mask
 
 
 def _normalize_mask(mask: Image.Image) -> Image.Image:
@@ -157,13 +94,7 @@ def _normalize_mask(mask: Image.Image) -> Image.Image:
     scale = min((width - 4) / mask.width, (height - 4) / mask.height)
     new_width = max(1, round(mask.width * scale))
     new_height = max(1, round(mask.height * scale))
-    if OPENCV_AVAILABLE:
-        resized = cv2.resize(
-            np.asarray(mask), (new_width, new_height), interpolation=cv2.INTER_LINEAR
-        )
-        resized_image = Image.fromarray(resized, mode="L")
-    else:
-        resized_image = mask.resize((new_width, new_height), Image.Resampling.BILINEAR)
+    resized_image = mask.resize((new_width, new_height), Image.Resampling.BILINEAR)
     canvas.paste(resized_image, ((width - new_width) // 2, (height - new_height) // 2))
     return canvas
 
