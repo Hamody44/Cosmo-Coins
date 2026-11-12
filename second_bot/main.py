@@ -10,6 +10,7 @@ import time
 import asyncio
 import math
 import re
+from io import BytesIO
 from pathlib import Path
 from functools import lru_cache
 
@@ -18,6 +19,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 from google.genai import types
+from PIL import Image, ImageEnhance
 
 from local_ocr import detect_style, load_image, load_model, recognize
 
@@ -135,6 +137,20 @@ def parse_ocr_space_response(response_data: dict) -> str:
     return digits
 
 
+def prepare_ocr_space_variants(image_bytes: bytes) -> tuple[bytes, bytes]:
+    """Return PNG bytes before and after contrast enhancement."""
+    with Image.open(BytesIO(image_bytes)) as source:
+        image = source.convert("RGB")
+
+    original_buffer = BytesIO()
+    image.save(original_buffer, format="PNG", optimize=True)
+
+    enhanced = ImageEnhance.Contrast(image).enhance(2.0)
+    enhanced_buffer = BytesIO()
+    enhanced.save(enhanced_buffer, format="PNG", optimize=True)
+    return original_buffer.getvalue(), enhanced_buffer.getvalue()
+
+
 async def extract_numbers_with_ocr_space(
     image_bytes: bytes,
     mime_type: str,
@@ -183,6 +199,33 @@ async def extract_numbers_with_ocr_space(
     text = parse_ocr_space_response(response_data)
     logger.info("Using OCR.Space for type1 image: %s", text)
     return [text]
+
+
+async def extract_numbers_with_ocr_space_variants(
+    image_bytes: bytes,
+    *,
+    api_key: str,
+) -> tuple[str | None, str | None]:
+    """Try OCR.Space on PNG and contrast-enhanced PNG, in that order."""
+    original_png, enhanced_png = prepare_ocr_space_variants(image_bytes)
+    results: list[str | None] = []
+    failures: list[str] = []
+    for label, payload in (("before contrast", original_png), ("after contrast", enhanced_png)):
+        try:
+            result = await extract_numbers_with_ocr_space(
+                payload,
+                "image/png",
+                api_key=api_key,
+            )
+            results.append(result[0] if result else None)
+        except RuntimeError as exc:
+            logger.warning("OCR.Space %s attempt failed: %s", label, exc)
+            failures.append(str(exc))
+            results.append(None)
+
+    if not any(results):
+        raise RuntimeError(f"OCR.Space failed for both image variants: {'; '.join(failures)}")
+    return results[0], results[1]
 
 
 def attachment_image_mime_type(attachment) -> str | None:
@@ -600,11 +643,19 @@ async def numbers(ctx: commands.Context) -> None:
                 logger.error("OCR_SPACE_API_KEY is missing for a type1 image.")
                 await send_notice(ctx, "أضف OCR_SPACE_API_KEY لاستخدام OCR.Space مع صور النوع الأول.")
                 return
-            numbers_found = await extract_numbers_with_ocr_space(
+            before_contrast, after_contrast = await extract_numbers_with_ocr_space_variants(
                 image_bytes,
-                mime_type,
                 api_key=ocr_space_key,
             )
+            result_lines = [
+                f"قبل تحسين التباين: `{before_contrast or 'لم تُقرأ خمسة أرقام'}`",
+                f"بعد تحسين التباين: `{after_contrast or 'لم تُقرأ خمسة أرقام'}`",
+            ]
+            await ctx.send(
+                "نتيجة OCR.Space للنوع الأول:\n" + "\n".join(result_lines),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
     except RuntimeError as exc:
         logger.warning("Image number extraction failed: %s", exc)
         if "timed out" in str(exc).lower() or "api error" in str(exc).lower():
