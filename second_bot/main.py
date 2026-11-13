@@ -50,7 +50,10 @@ user_command_cooldowns: dict[tuple[int, int], float] = {}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # The configured model is intentionally not replaced here; set GEMINI_VISION_MODEL in second_bot/.env.
 DEFAULT_VISION_MODEL = "gemini-3.8-flash"
-DEFAULT_FALLBACK_VISION_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_FALLBACK_VISION_MODEL = "gemini-3.5-flash-lite"
+LEGACY_GEMINI_MODEL_REPLACEMENTS = {
+    "gemini-2.5-flash-lite": "gemini-3.5-flash-lite",
+}
 DEFAULT_OPENROUTER_MODEL = "openrouter/free"
 VISION_REQUEST_TIMEOUT_SECONDS = 20
 OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
@@ -64,6 +67,10 @@ TYPE1_TEST_VARIANTS = (
 )
 TYPE1_TEST_LOCK = asyncio.Lock()
 TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+class OCRSpaceRateLimitError(RuntimeError):
+    """OCR.Space rejected the request with HTTP 429; this is not an OCR miss."""
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_MIME_BY_EXTENSION = {
     ".jpg": "image/jpeg",
@@ -122,6 +129,16 @@ def load_vision_config() -> tuple[str, str]:
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     model = os.getenv("GEMINI_VISION_MODEL", DEFAULT_VISION_MODEL).strip() or DEFAULT_VISION_MODEL
     return api_key, model
+
+
+def resolve_gemini_fallback_model(model: str) -> str:
+    """Replace a known fallback model unavailable to some new API accounts."""
+    selected = model.strip() or DEFAULT_FALLBACK_VISION_MODEL
+    replacement = LEGACY_GEMINI_MODEL_REPLACEMENTS.get(selected)
+    if replacement:
+        logger.warning("Replacing unavailable Gemini fallback model %s with %s.", selected, replacement)
+        return replacement
+    return selected
 
 
 @lru_cache(maxsize=1)
@@ -241,6 +258,13 @@ async def extract_numbers_with_ocr_space(
                     engine,
                     parsed_text,
                 )
+                if result.status == 429:
+                    message = response_data.get("ErrorMessage", "HTTP 429")
+                    retry_after = result.headers.get("Retry-After")
+                    wait_hint = f" Retry-After: {retry_after}." if retry_after else ""
+                    raise OCRSpaceRateLimitError(
+                        f"OCR.Space API error 429: {message}.{wait_hint}"
+                    )
                 if result.status >= 400:
                     message = response_data.get("ErrorMessage", f"HTTP {result.status}")
                     raise RuntimeError(f"OCR.Space API error {result.status}: {message}")
@@ -270,6 +294,7 @@ async def extract_numbers_with_ocr_space_variants(
     )
     results: dict[tuple[str, str], str | None] = {}
     failures: list[str] = []
+    rate_limited = False
     for label, payload in variants:
         for engine in OCR_SPACE_ENGINES:
             try:
@@ -284,6 +309,12 @@ async def extract_numbers_with_ocr_space_variants(
                 logger.warning("OCR.Space %s engine=%s attempt failed: %s", label, engine, exc)
                 failures.append(f"{label}/engine{engine}: {exc}")
                 results[(label, engine)] = None
+                if isinstance(exc, OCRSpaceRateLimitError):
+                    # Do not spend more requests on variants after a provider-level limit.
+                    rate_limited = True
+                    break
+        if rate_limited:
+            break
 
     if not any(results.values()):
         raise RuntimeError(f"OCR.Space failed for all image variants: {'; '.join(failures)}")
@@ -348,9 +379,14 @@ def build_type1_test_report(records: list[dict[str, object]]) -> tuple[str, byte
         for record in records:
             expected = str(record["expected"])
             predictions = record["predictions"]
+            provider_errors = record.get("provider_errors")
+            if isinstance(provider_errors, dict) and variant in provider_errors:
+                counts["api_error"] += 1
+                variant_rows.append(["", "فشل API", "", str(provider_errors[variant])[:300]])
+                continue
             if not isinstance(predictions, dict) or variant not in predictions:
                 counts["not_tested"] += 1
-                variant_rows.append(["", "لم تُختبر", ""])
+                variant_rows.append(["", "لم تُختبر", "", ""])
                 continue
             predicted = predictions.get(variant) if isinstance(predictions, dict) else None
             tested += 1
@@ -358,13 +394,14 @@ def build_type1_test_report(records: list[dict[str, object]]) -> tuple[str, byte
             error_count, mismatches = compare_five_digit_answer(expected, predicted)
             if error_count is None:
                 counts["unreadable"] += 1
-                variant_rows.append(["", "غير مقروء", ""])
+                variant_rows.append(["", "غير مقروء", "", ""])
                 continue
 
             variant_rows.append([
                 predicted or "",
                 str(error_count),
                 "; ".join(f"{position}:{truth}>{guess}" for position, truth, guess in mismatches),
+                "",
             ])
             if error_count == 0:
                 counts["correct"] += 1
@@ -380,7 +417,8 @@ def build_type1_test_report(records: list[dict[str, object]]) -> tuple[str, byte
             f"{arabic_label}: صحيح بالكامل {correct}/{tested} من المختبر ({rate:.1f}%)، "
             f"خطأ برقم واحد {counts['1_error']}، برقمين {counts['2_error']}، "
             f"بثلاثة {counts['3_error']}، بأربعة أو خمسة {counts['4plus_error']}، "
-            f"غير مقروء {counts['unreadable']}، لم تُختبر {counts['not_tested']}"
+            f"غير مقروء {counts['unreadable']}، فشل API {counts['api_error']}، "
+            f"لم تُختبر {counts['not_tested']}"
         )
         top_confusions = confusions.most_common(5)
         if top_confusions:
@@ -392,9 +430,9 @@ def build_type1_test_report(records: list[dict[str, object]]) -> tuple[str, byte
     writer = csv.writer(buffer)
     writer.writerow([
         "filename", "expected",
-        "before_contrast_prediction", "before_contrast_error_count", "before_contrast_wrong_digits",
-        "after_contrast_prediction", "after_contrast_error_count", "after_contrast_wrong_digits",
-        "upscaled_binary_prediction", "upscaled_binary_error_count", "upscaled_binary_wrong_digits",
+        "before_contrast_prediction", "before_contrast_error_count", "before_contrast_wrong_digits", "before_contrast_api_error",
+        "after_contrast_prediction", "after_contrast_error_count", "after_contrast_wrong_digits", "after_contrast_api_error",
+        "upscaled_binary_prediction", "upscaled_binary_error_count", "upscaled_binary_wrong_digits", "upscaled_binary_api_error",
     ])
     for row_index, record in enumerate(records):
         row = [record["filename"], record["expected"]]
@@ -429,6 +467,19 @@ def parse_numbers_response(content: str) -> list[str]:
     if not isinstance(numbers, list):
         raise RuntimeError("Gemini returned an invalid numbers list")
     return [str(value).strip() for value in numbers if str(value).strip()]
+
+
+def parse_openrouter_numbers_response(content: str) -> list[str]:
+    """Accept JSON, or one unambiguous five-digit value from plain model text."""
+    try:
+        return parse_numbers_response(content)
+    except RuntimeError as exc:
+        candidates = list(dict.fromkeys(re.findall(r"(?<![0-9])[0-9]{5}(?![0-9])", content)))
+        if len(candidates) == 1:
+            return candidates
+        raise RuntimeError(
+            "OpenRouter returned invalid JSON and no single unambiguous five-digit value"
+        ) from exc
 
 
 def first_five_digit_result(numbers: list[str]) -> str | None:
@@ -491,7 +542,7 @@ async def extract_numbers_with_openrouter(
         content = response_data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("OpenRouter returned no readable text") from exc
-    return parse_numbers_response(content or "")
+    return parse_openrouter_numbers_response(content or "")
 
 
 async def extract_type1_with_fallback(
@@ -502,6 +553,7 @@ async def extract_type1_with_fallback(
 ) -> tuple[dict[tuple[str, str], str | None], str | None, str | None]:
     """Try OCR.Space, then Gemini and OpenRouter when OCR.Space cannot read type1."""
     ocr_results: dict[tuple[str, str], str | None] = {}
+    failure_details: list[str] = []
     if ocr_space_key:
         try:
             ocr_results = await extract_numbers_with_ocr_space_variants(
@@ -512,8 +564,10 @@ async def extract_type1_with_fallback(
                 return ocr_results, None, None
         except RuntimeError as exc:
             logger.warning("OCR.Space failed for type1; trying vision fallbacks: %s", exc)
+            failure_details.append(f"OCR.Space: {exc}")
     else:
         logger.warning("OCR_SPACE_API_KEY is missing; skipping OCR.Space for type1 fallback path.")
+        failure_details.append("OCR_SPACE_API_KEY is missing")
 
     gemini_key, gemini_model = load_vision_config()
     if gemini_key:
@@ -526,6 +580,7 @@ async def extract_type1_with_fallback(
                 return ocr_results, gemini_result, None
         except RuntimeError as exc:
             logger.warning("Gemini type1 fallback failed: %s", exc)
+            failure_details.append(f"Gemini: {exc}")
     else:
         logger.info("GEMINI_API_KEY is not configured; skipping Gemini type1 fallback.")
 
@@ -540,11 +595,14 @@ async def extract_type1_with_fallback(
                 return ocr_results, None, openrouter_result
         except RuntimeError as exc:
             logger.warning("OpenRouter type1 fallback failed: %s", exc)
+            failure_details.append(f"OpenRouter: {exc}")
     else:
         logger.info("OPENROUTER_API_KEY is not configured; skipping OpenRouter type1 fallback.")
 
+    details = "; ".join(failure_details)
+    suffix = f" Details: {details}" if details else ""
     raise RuntimeError(
-        "OCR.Space and all configured vision fallbacks failed to return five digits"
+        "OCR.Space and all configured vision fallbacks failed to return five digits." + suffix
     )
 
 
@@ -603,7 +661,9 @@ async def extract_numbers_from_image(
                 "responseMimeType": "application/json",
             },
         }
-        fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", DEFAULT_FALLBACK_VISION_MODEL).strip()
+        fallback_model = resolve_gemini_fallback_model(
+            os.getenv("GEMINI_FALLBACK_MODEL", DEFAULT_FALLBACK_VISION_MODEL)
+        )
         models_to_try = [selected_model]
         if fallback_model and fallback_model not in models_to_try:
             models_to_try.append(fallback_model)
@@ -948,7 +1008,15 @@ async def numbers(ctx: commands.Context) -> None:
             return
     except RuntimeError as exc:
         logger.warning("Image number extraction failed: %s", exc)
-        if "timed out" in str(exc).lower() or "api error" in str(exc).lower():
+        error_text = str(exc).lower()
+        if "ocr.space api error 429" in error_text:
+            await send_notice(
+                ctx,
+                "رفض OCR.Space الطلبات مؤقتًا (HTTP 429)، لذلك أوقف البوت بقية محاولات OCR. "
+                "قد تكون الحصة أو سرعة الطلبات قد تجاوزت الحد؛ هذا لا يعني أن الصورة غير مقروءة. "
+                "انتظر تجدد الحصة أو تحقق من لوحة OCR.Space ثم أعد المحاولة.",
+            )
+        elif "timed out" in error_text or "api error" in error_text:
             await send_notice(ctx, "خدمة OCR الخارجية تأخرت أو غير متاحة مؤقتًا. حاول مرة أخرى بعد قليل.")
         else:
             await send_notice(
@@ -1000,6 +1068,7 @@ async def testall(ctx: commands.Context) -> None:
 
         for image_index, sample in enumerate(samples, start=1):
             predictions: dict[str, str | None] = {}
+            provider_errors: dict[str, str] = {}
             image_path = samples_dir / sample["filename"]
             try:
                 image_bytes = image_path.read_bytes()
@@ -1011,6 +1080,7 @@ async def testall(ctx: commands.Context) -> None:
                     "filename": sample["filename"],
                     "expected": sample["answer"],
                     "predictions": predictions,
+                    "provider_errors": {},
                 })
                 continue
 
@@ -1026,13 +1096,20 @@ async def testall(ctx: commands.Context) -> None:
                     predictions[variant] = result[0] if result else None
                 except RuntimeError as exc:
                     logger.warning("Engine 3 test failed for %s/%s: %s", image_path.name, variant, exc)
-                    predictions[variant] = None
                     error_text = str(exc).lower()
+                    if (
+                        "api error" in error_text
+                        or "request timed out" in error_text
+                        or "request failed" in error_text
+                    ):
+                        provider_errors[variant] = str(exc)
+                    else:
+                        predictions[variant] = None
                     if "api error 429" in error_text or "quota" in error_text or "limit reached" in error_text:
                         stop_reason = "توقف الاختبار مبكرًا بسبب حد الطلبات أو الحصة لدى OCR.Space."
                         break
-                    if "api error" in error_text:
-                        stop_reason = "توقف الاختبار مبكرًا بعد خطأ HTTP من OCR.Space لتفادي إرسال طلبات أخرى."
+                    if "api error" in error_text or "request timed out" in error_text or "request failed" in error_text:
+                        stop_reason = "توقف الاختبار مبكرًا بعد خطأ من OCR.Space لتفادي إرسال طلبات أخرى."
                         break
                 await asyncio.sleep(0.2)
 
@@ -1040,6 +1117,7 @@ async def testall(ctx: commands.Context) -> None:
                 "filename": sample["filename"],
                 "expected": sample["answer"],
                 "predictions": predictions,
+                "provider_errors": provider_errors,
             })
             if stop_reason:
                 break

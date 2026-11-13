@@ -338,6 +338,31 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[("before contrast", "3")], "original-3")
         self.assertEqual(result[("upscaled binary", "3")], "binary-3")
 
+    async def test_ocr_space_rate_limit_stops_remaining_variants(self):
+        response = AsyncMock(side_effect=main.OCRSpaceRateLimitError("OCR.Space API error 429: HTTP 429"))
+        with patch.object(
+            main,
+            "prepare_ocr_space_variants",
+            return_value=(b"original", b"enhanced", b"binary"),
+        ), patch.object(main, "extract_numbers_with_ocr_space", new=response):
+            with self.assertRaisesRegex(RuntimeError, "429"):
+                await main.extract_numbers_with_ocr_space_variants(
+                    b"source-image", api_key="ocr-test-key"
+                )
+        self.assertEqual(response.await_count, 1)
+
+    def test_old_gemini_fallback_model_is_migrated(self):
+        self.assertEqual(
+            main.resolve_gemini_fallback_model("gemini-2.5-flash-lite"),
+            "gemini-3.5-flash-lite",
+        )
+        self.assertEqual(main.resolve_gemini_fallback_model("custom-vision-model"), "custom-vision-model")
+
+    def test_openrouter_plain_text_accepts_only_one_unambiguous_five_digit_value(self):
+        self.assertEqual(main.parse_openrouter_numbers_response("The number appears to be 12345."), ["12345"])
+        with self.assertRaisesRegex(RuntimeError, "single unambiguous"):
+            main.parse_openrouter_numbers_response("Maybe 12345 or 54321")
+
     def test_type1_dataset_reader_loads_only_labeled_type1_images(self):
         sample_dir = Path(__file__).resolve().parents[2] / "captcha_samples"
         samples = main.load_type1_test_samples(sample_dir)
@@ -381,6 +406,20 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("5:5>4", report_text)
         self.assertIn("لم تُختبر", report_text)  # Missing attempts are not counted as unreadable.
 
+    def test_report_keeps_api_errors_out_of_ocr_unreadable_counts(self):
+        records = [{
+            "filename": "rate_limited.webp",
+            "expected": "12345",
+            "predictions": {},
+            "provider_errors": {"before contrast": "OCR.Space API error 429: HTTP 429"},
+        }]
+        summary, report = main.build_type1_test_report(records)
+        report_text = report.decode("utf-8-sig")
+        self.assertIn("صحيح بالكامل 0/0 من المختبر (0.0%)", summary)
+        self.assertIn("غير مقروء 0", summary)
+        self.assertIn("فشل API 1", summary)
+        self.assertIn("OCR.Space API error 429", report_text)
+
     async def test_testall_uses_engine_three_and_sends_csv_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -409,6 +448,31 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         final_call = ctx.send.await_args
         self.assertIn("صحيح بالكامل 2/2 من المختبر", final_call.args[0])
         self.assertEqual(final_call.kwargs["file"].filename, "testall_engine3_report.csv")
+
+    async def test_testall_stops_on_429_and_reports_provider_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sample_dir = root / "captcha_samples"
+            sample_dir.mkdir()
+            (sample_dir / "one.webp").write_bytes(b"first")
+            (sample_dir / "label.csv").write_text(
+                "filename,type,answer\none.webp,type1,12345\n",
+                encoding="utf-8",
+            )
+            ctx = make_context()
+            ocr_space = AsyncMock(
+                side_effect=main.OCRSpaceRateLimitError("OCR.Space API error 429: HTTP 429")
+            )
+            with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
+                    patch.object(main, "BASE_DIR", root / "second_bot"), \
+                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c")), \
+                    patch.object(main, "extract_numbers_with_ocr_space", new=ocr_space):
+                await main.testall.callback(ctx)
+
+        self.assertEqual(ocr_space.await_count, 1)
+        final_call = ctx.send.await_args
+        self.assertIn("فشل API 1", final_call.args[0])
+        self.assertIn("غير مقروء 0", final_call.args[0])
 
     def test_attachment_image_type_uses_filename_when_content_type_is_missing(self):
         attachment = SimpleNamespace(content_type=None, filename="receipt.JPG")
@@ -453,6 +517,25 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
         attachment.read.assert_not_awaited()
         self.assertIn("8 ميغابايت", ctx.send.await_args.args[0])
+
+    async def test_numbers_explains_ocr_space_429_as_provider_limit(self):
+        ctx = make_context()
+        attachment = SimpleNamespace(
+            content_type="image/png",
+            filename="type1.png",
+            size=4,
+            read=AsyncMock(return_value=b"type1-image"),
+        )
+        ctx.message.attachments = [attachment]
+        with patch.object(main, "detect_image_style", return_value="type1"), \
+                patch.object(
+                    main,
+                    "extract_type1_with_fallback",
+                    new=AsyncMock(side_effect=RuntimeError("OCR.Space API error 429: HTTP 429")),
+                ):
+            await main.numbers.callback(ctx)
+        self.assertIn("HTTP 429", ctx.send.await_args.args[0])
+        self.assertIn("لا يعني أن الصورة غير مقروءة", ctx.send.await_args.args[0])
 
     async def test_numbers_uses_local_ocr_for_type2_without_api_key(self):
         ctx = make_context()
