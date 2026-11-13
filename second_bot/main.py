@@ -11,7 +11,10 @@ import time
 import asyncio
 import math
 import re
+import hashlib
 from collections import Counter
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from io import BytesIO, StringIO
 from pathlib import Path
 from functools import lru_cache
@@ -60,17 +63,44 @@ OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
 OCR_SPACE_TIMEOUT_SECONDS = 20
 OCR_SPACE_ENGINES = ("3",)
 OCR_SPACE_UPSCALE_FACTOR = 3
+try:
+    OCR_SPACE_MIN_INTERVAL_SECONDS = max(0.0, float(os.getenv("OCR_SPACE_MIN_INTERVAL_SECONDS", "2")))
+except ValueError:
+    OCR_SPACE_MIN_INTERVAL_SECONDS = 2.0
+try:
+    OCR_SPACE_DAILY_REQUEST_BUDGET = max(1, int(os.getenv("OCR_SPACE_DAILY_REQUEST_BUDGET", "400")))
+except ValueError:
+    OCR_SPACE_DAILY_REQUEST_BUDGET = 400
+try:
+    OCR_SPACE_429_COOLDOWN_SECONDS = max(60.0, float(os.getenv("OCR_SPACE_429_COOLDOWN_SECONDS", "3600")))
+except ValueError:
+    OCR_SPACE_429_COOLDOWN_SECONDS = 3600.0
 TYPE1_TEST_VARIANTS = (
     ("before contrast", "قبل تحسين التباين"),
     ("after contrast", "بعد تحسين التباين"),
     ("upscaled binary", "بعد التكبير والأبيض والأسود"),
 )
 TYPE1_TEST_LOCK = asyncio.Lock()
+OCR_SPACE_RATE_LOCK = asyncio.Lock()
 TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 class OCRSpaceRateLimitError(RuntimeError):
     """OCR.Space rejected the request with HTTP 429; this is not an OCR miss."""
+
+    def __init__(self, message: str, *, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class OCRSpaceCooldownError(RuntimeError):
+    """A prior HTTP 429 cooldown is still active; no new request was sent."""
+
+
+class OCRSpaceDailyBudgetError(RuntimeError):
+    """The local daily safety budget prevented an OCR.Space request."""
+
+
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_MIME_BY_EXTENSION = {
     ".jpg": "image/jpeg",
@@ -79,6 +109,122 @@ IMAGE_MIME_BY_EXTENSION = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
+
+
+def runtime_state_path(filename: str) -> Path:
+    """Return an ignored, persistent path for small bot runtime state files."""
+    return BASE_DIR / ".runtime" / filename
+
+
+def read_runtime_json(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def write_runtime_json(path: Path, payload: dict[str, object]) -> None:
+    """Atomically persist runtime state so restarts do not lose progress."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary_path.replace(path)
+
+
+def load_ocr_space_rate_state(*, now: float | None = None) -> dict[str, object]:
+    """Load today's local request count and most recent request timestamp."""
+    state_path = runtime_state_path("ocr_space_rate_state.json")
+    state = read_runtime_json(state_path) or {}
+    utc_day = datetime.now(timezone.utc).date().isoformat()
+    if now is not None:
+        utc_day = datetime.fromtimestamp(now, timezone.utc).date().isoformat()
+    if state.get("utc_day") != utc_day:
+        return {"utc_day": utc_day, "requests": 0, "last_request_at": 0.0, "cooldown_until": 0.0}
+    try:
+        requests = max(0, int(state.get("requests", 0)))
+        last_request_at = max(0.0, float(state.get("last_request_at", 0.0)))
+        cooldown_until = max(0.0, float(state.get("cooldown_until", 0.0)))
+    except (TypeError, ValueError):
+        return {"utc_day": utc_day, "requests": 0, "last_request_at": 0.0, "cooldown_until": 0.0}
+    return {
+        "utc_day": utc_day,
+        "requests": requests,
+        "last_request_at": last_request_at,
+        "cooldown_until": cooldown_until,
+    }
+
+
+async def reserve_ocr_space_request_slot() -> None:
+    """Wait for the minimum interval and reserve one request from the UTC-day budget."""
+    async with OCR_SPACE_RATE_LOCK:
+        current_time = time.time()
+        state = load_ocr_space_rate_state(now=current_time)
+        requests = int(state["requests"])
+        cooldown_until = float(state["cooldown_until"])
+        if current_time < cooldown_until:
+            retry_at = datetime.fromtimestamp(cooldown_until, timezone.utc).isoformat()
+            raise OCRSpaceCooldownError(
+                f"OCR.Space is cooling down after HTTP 429 until {retry_at}; no request was sent"
+            )
+        if requests >= OCR_SPACE_DAILY_REQUEST_BUDGET:
+            raise OCRSpaceDailyBudgetError(
+                "OCR.Space local daily request safety budget reached "
+                f"({requests}/{OCR_SPACE_DAILY_REQUEST_BUDGET} per UTC day); no request was sent"
+            )
+
+        last_request_at = float(state["last_request_at"])
+        wait_seconds = OCR_SPACE_MIN_INTERVAL_SECONDS - (current_time - last_request_at)
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
+
+        current_time = time.time()
+        state = load_ocr_space_rate_state(now=current_time)
+        requests = int(state["requests"])
+        cooldown_until = float(state["cooldown_until"])
+        if current_time < cooldown_until:
+            retry_at = datetime.fromtimestamp(cooldown_until, timezone.utc).isoformat()
+            raise OCRSpaceCooldownError(
+                f"OCR.Space is cooling down after HTTP 429 until {retry_at}; no request was sent"
+            )
+        if requests >= OCR_SPACE_DAILY_REQUEST_BUDGET:
+            raise OCRSpaceDailyBudgetError(
+                "OCR.Space local daily request safety budget reached "
+                f"({requests}/{OCR_SPACE_DAILY_REQUEST_BUDGET} per UTC day); no request was sent"
+            )
+        state["requests"] = requests + 1
+        state["last_request_at"] = current_time
+        write_runtime_json(runtime_state_path("ocr_space_rate_state.json"), state)
+
+
+async def register_ocr_space_rate_limit(retry_after_seconds: float | None) -> None:
+    """Persist a cooldown after a provider 429; prefer its Retry-After header."""
+    delay = max(0.0, retry_after_seconds or OCR_SPACE_429_COOLDOWN_SECONDS)
+    async with OCR_SPACE_RATE_LOCK:
+        current_time = time.time()
+        state = load_ocr_space_rate_state(now=current_time)
+        state["cooldown_until"] = max(float(state["cooldown_until"]), current_time + delay)
+        write_runtime_json(runtime_state_path("ocr_space_rate_state.json"), state)
+
+
+def parse_retry_after_seconds(value: str | None) -> float | None:
+    """Parse Retry-After as seconds or an HTTP date."""
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value.strip()))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 def load_config() -> tuple[str, int]:
@@ -239,6 +385,7 @@ async def extract_numbers_with_ocr_space(
         raise ValueError(f"Unsupported OCR.Space engine: {engine}")
     form.add_field("OCREngine", engine)
 
+    await reserve_ocr_space_request_slot()
     timeout = aiohttp.ClientTimeout(total=OCR_SPACE_TIMEOUT_SECONDS)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -262,8 +409,11 @@ async def extract_numbers_with_ocr_space(
                     message = response_data.get("ErrorMessage", "HTTP 429")
                     retry_after = result.headers.get("Retry-After")
                     wait_hint = f" Retry-After: {retry_after}." if retry_after else ""
+                    retry_after_seconds = parse_retry_after_seconds(retry_after)
+                    await register_ocr_space_rate_limit(retry_after_seconds)
                     raise OCRSpaceRateLimitError(
-                        f"OCR.Space API error 429: {message}.{wait_hint}"
+                        f"OCR.Space API error 429: {message}.{wait_hint}",
+                        retry_after_seconds=retry_after_seconds,
                     )
                 if result.status >= 400:
                     message = response_data.get("ErrorMessage", f"HTTP {result.status}")
@@ -350,6 +500,105 @@ def load_type1_test_samples(samples_dir: Path) -> list[dict[str, str]]:
         row["answer"] = answer
         seen.add(filename)
     return rows
+
+
+def fingerprint_type1_dataset(samples_dir: Path, samples: list[dict[str, str]]) -> str:
+    """Hash labels and image contents so stale progress is never applied to new data."""
+    digest = hashlib.sha256()
+    for sample in samples:
+        digest.update(sample["filename"].encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(sample["answer"].encode("ascii"))
+        digest.update(b"\0")
+        with (samples_dir / sample["filename"]).open("rb") as image_file:
+            for chunk in iter(lambda: image_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def new_testall_checkpoint(dataset_fingerprint: str) -> dict[str, object]:
+    return {
+        "version": 1,
+        "dataset_fingerprint": dataset_fingerprint,
+        "records": {},
+        "in_progress": None,
+        "last_stop": None,
+    }
+
+
+def load_testall_checkpoint(path: Path, dataset_fingerprint: str) -> tuple[dict[str, object], bool]:
+    """Reuse a checkpoint only when its schema and complete dataset still match."""
+    checkpoint = read_runtime_json(path)
+    if (
+        checkpoint
+        and checkpoint.get("version") == 1
+        and checkpoint.get("dataset_fingerprint") == dataset_fingerprint
+        and isinstance(checkpoint.get("records"), dict)
+    ):
+        return checkpoint, True
+    return new_testall_checkpoint(dataset_fingerprint), False
+
+
+def testall_resume_position(
+    samples: list[dict[str, str]], checkpoint: dict[str, object]
+) -> tuple[str, str] | None:
+    records = checkpoint.get("records")
+    if not isinstance(records, dict):
+        return None
+    for sample in samples:
+        record = records.get(sample["filename"])
+        predictions = record.get("predictions", {}) if isinstance(record, dict) else {}
+        if not isinstance(predictions, dict):
+            predictions = {}
+        for variant, _ in TYPE1_TEST_VARIANTS:
+            if variant not in predictions:
+                return sample["filename"], variant
+    return None
+
+
+def testall_remaining_request_count(
+    samples: list[dict[str, str]], checkpoint: dict[str, object]
+) -> int:
+    records = checkpoint.get("records")
+    if not isinstance(records, dict):
+        return len(samples) * len(TYPE1_TEST_VARIANTS)
+    remaining = 0
+    for sample in samples:
+        record = records.get(sample["filename"])
+        predictions = record.get("predictions", {}) if isinstance(record, dict) else {}
+        if not isinstance(predictions, dict):
+            predictions = {}
+        remaining += sum(variant not in predictions for variant, _ in TYPE1_TEST_VARIANTS)
+    return remaining
+
+
+def testall_report_records(
+    samples: list[dict[str, str]],
+    checkpoint: dict[str, object],
+    current_failure: dict[str, str] | None = None,
+) -> list[dict[str, object]]:
+    """Build a full-dataset report, including untested rows and the current API failure."""
+    stored_records = checkpoint.get("records")
+    if not isinstance(stored_records, dict):
+        stored_records = {}
+    report_records: list[dict[str, object]] = []
+    for sample in samples:
+        stored = stored_records.get(sample["filename"])
+        predictions = stored.get("predictions", {}) if isinstance(stored, dict) else {}
+        if not isinstance(predictions, dict):
+            predictions = {}
+        provider_errors: dict[str, str] = {}
+        if current_failure and current_failure.get("filename") == sample["filename"]:
+            variant = current_failure.get("variant", "")
+            if variant:
+                provider_errors[variant] = current_failure.get("reason", "OCR.Space request failed")
+        report_records.append({
+            "filename": sample["filename"],
+            "expected": sample["answer"],
+            "predictions": dict(predictions),
+            "provider_errors": provider_errors,
+        })
+    return report_records
 
 
 def compare_five_digit_answer(expected: str, predicted: str | None) -> tuple[int | None, list[tuple[int, str, str]]]:
@@ -440,7 +689,7 @@ def build_type1_test_report(records: list[dict[str, object]]) -> tuple[str, byte
             row.extend(values_by_variant[variant][row_index])
         writer.writerow(row)
 
-    summary = f"تقرير اختبار OCR.Space Engine 3 — عدد الصور المقيمة: {total}\n" + "\n".join(summaries)
+    summary = f"تقرير اختبار OCR.Space Engine 3 — عدد الصور في المجموعة: {total}\n" + "\n".join(summaries)
     return summary, buffer.getvalue().encode("utf-8-sig")
 
 
@@ -1009,7 +1258,15 @@ async def numbers(ctx: commands.Context) -> None:
     except RuntimeError as exc:
         logger.warning("Image number extraction failed: %s", exc)
         error_text = str(exc).lower()
-        if "ocr.space api error 429" in error_text:
+        if isinstance(exc, OCRSpaceDailyBudgetError):
+            await send_notice(
+                ctx,
+                "بلغ البوت سقف الطلبات المحلي الآمن لـOCR.Space لهذا اليوم؛ لم يُرسل طلب جديد. "
+                "انتظر تجدد الحصة ثم حاول مرة أخرى.",
+            )
+        elif isinstance(exc, OCRSpaceCooldownError):
+            await send_notice(ctx, f"OCR.Space في فترة تهدئة بعد 429؛ لم يُرسل طلب جديد. {exc}")
+        elif "ocr.space api error 429" in error_text:
             await send_notice(
                 ctx,
                 "رفض OCR.Space الطلبات مؤقتًا (HTTP 429)، لذلك أوقف البوت بقية محاولات OCR. "
@@ -1040,7 +1297,7 @@ async def numbers(ctx: commands.Context) -> None:
 @bot.command(name="testall")
 @commands.check(check_control_owner)
 async def testall(ctx: commands.Context) -> None:
-    """Evaluate OCR.Space Engine 3 against all labeled type1 samples."""
+    """Evaluate OCR.Space Engine 3, resuming from a saved per-variant checkpoint."""
     api_key = os.getenv("OCR_SPACE_API_KEY", "").strip()
     if not api_key:
         await send_notice(ctx, "لم يُضبط OCR_SPACE_API_KEY في ملف إعدادات البوت.")
@@ -1053,38 +1310,73 @@ async def testall(ctx: commands.Context) -> None:
         samples_dir = BASE_DIR.parent / "captcha_samples"
         try:
             samples = load_type1_test_samples(samples_dir)
+            dataset_fingerprint = fingerprint_type1_dataset(samples_dir, samples)
         except (OSError, ValueError, csv.Error) as exc:
             await send_notice(ctx, f"تعذر تحميل عينات النوع الأول: {exc}")
             return
 
-        estimated_requests = len(samples) * len(TYPE1_TEST_VARIANTS)
+        checkpoint_path = runtime_state_path("testall_engine3_checkpoint.json")
+        checkpoint, resumed = load_testall_checkpoint(checkpoint_path, dataset_fingerprint)
+        checkpoint_records = checkpoint.get("records")
+        if not isinstance(checkpoint_records, dict):
+            checkpoint_records = {}
+            checkpoint["records"] = checkpoint_records
+        write_runtime_json(checkpoint_path, checkpoint)
+
+        resume_position = testall_resume_position(samples, checkpoint)
+        remaining_requests = testall_remaining_request_count(samples, checkpoint)
+        if resumed and resume_position:
+            start_description = (
+                f"استئناف من {resume_position[0]} / {resume_position[1]}؛ "
+                "النتائج المكتملة محفوظة ولن تُرسل إلى OCR.Space مرة أخرى."
+            )
+        elif resumed:
+            start_description = "كل المعالجات مكتملة في نقطة الحفظ؛ سأعيد إرسال التقرير دون طلبات OCR جديدة."
+        else:
+            start_description = "لا توجد نقطة حفظ مطابقة لهذه المجموعة؛ يبدأ الاختبار من أول صورة."
         progress_message = await ctx.send(
-            f"بدأ اختبار {len(samples)} صورة من النوع الأول باستخدام OCR.Space Engine 3 فقط. "
-            f"الحد الأقصى المتوقع {estimated_requests} طلبًا (ثلاث معالجات لكل صورة)."
+            f"اختبار {len(samples)} صورة من النوع الأول باستخدام OCR.Space Engine 3. {start_description} "
+            f"المعالجات المتبقية: {remaining_requests} طلبًا كحد أقصى؛ "
+            f"الفاصل {OCR_SPACE_MIN_INTERVAL_SECONDS:g} ثانية، والسقف المحلي "
+            f"{OCR_SPACE_DAILY_REQUEST_BUDGET} طلب/يوم UTC."
         )
-        records: list[dict[str, object]] = []
         request_count = 0
         stop_reason: str | None = None
+        current_failure: dict[str, str] | None = None
 
         for image_index, sample in enumerate(samples, start=1):
-            predictions: dict[str, str | None] = {}
-            provider_errors: dict[str, str] = {}
+            stored_record = checkpoint_records.get(sample["filename"])
+            if not isinstance(stored_record, dict):
+                stored_record = {"expected": sample["answer"], "predictions": {}}
+                checkpoint_records[sample["filename"]] = stored_record
+            predictions = stored_record.get("predictions")
+            if not isinstance(predictions, dict):
+                predictions = {}
+                stored_record["predictions"] = predictions
+
+            if all(variant in predictions for variant, _ in TYPE1_TEST_VARIANTS):
+                continue
+
             image_path = samples_dir / sample["filename"]
             try:
                 image_bytes = image_path.read_bytes()
                 prepared_variants = prepare_ocr_space_variants(image_bytes)
             except (OSError, ValueError) as exc:
                 logger.warning("Could not prepare test image %s: %s", image_path.name, exc)
-                predictions = {variant: None for variant, _ in TYPE1_TEST_VARIANTS}
-                records.append({
-                    "filename": sample["filename"],
-                    "expected": sample["answer"],
-                    "predictions": predictions,
-                    "provider_errors": {},
-                })
+                for variant, _ in TYPE1_TEST_VARIANTS:
+                    predictions.setdefault(variant, None)
+                write_runtime_json(checkpoint_path, checkpoint)
                 continue
 
             for (variant, _), payload in zip(TYPE1_TEST_VARIANTS, prepared_variants):
+                if variant in predictions:
+                    continue
+                checkpoint["in_progress"] = {
+                    "filename": sample["filename"],
+                    "variant": variant,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                }
+                write_runtime_json(checkpoint_path, checkpoint)
                 request_count += 1
                 try:
                     result = await extract_numbers_with_ocr_space(
@@ -1094,51 +1386,72 @@ async def testall(ctx: commands.Context) -> None:
                         engine="3",
                     )
                     predictions[variant] = result[0] if result else None
+                    checkpoint["in_progress"] = None
+                    checkpoint["last_stop"] = None
+                    write_runtime_json(checkpoint_path, checkpoint)
                 except RuntimeError as exc:
                     logger.warning("Engine 3 test failed for %s/%s: %s", image_path.name, variant, exc)
                     error_text = str(exc).lower()
-                    if (
-                        "api error" in error_text
+                    is_provider_failure = (
+                        isinstance(exc, (OCRSpaceRateLimitError, OCRSpaceCooldownError, OCRSpaceDailyBudgetError))
+                        or "api error" in error_text
                         or "request timed out" in error_text
                         or "request failed" in error_text
-                    ):
-                        provider_errors[variant] = str(exc)
-                    else:
-                        predictions[variant] = None
-                    if "api error 429" in error_text or "quota" in error_text or "limit reached" in error_text:
-                        stop_reason = "توقف الاختبار مبكرًا بسبب حد الطلبات أو الحصة لدى OCR.Space."
+                    )
+                    if is_provider_failure:
+                        current_failure = {
+                            "filename": sample["filename"],
+                            "variant": variant,
+                            "reason": str(exc),
+                        }
+                        checkpoint["in_progress"] = None
+                        checkpoint["last_stop"] = {
+                            **current_failure,
+                            "stopped_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        write_runtime_json(checkpoint_path, checkpoint)
+                        if isinstance(exc, OCRSpaceCooldownError):
+                            stop_reason = "لا يزال OCR.Space في فترة التهدئة؛ لم يُرسل طلب جديد وستُعاد المعالجة لاحقًا."
+                        elif isinstance(exc, OCRSpaceRateLimitError) or "429" in error_text or "quota" in error_text or "limit reached" in error_text:
+                            stop_reason = "أوقف الاختبار طلبات OCR بسبب 429/الحصة؛ ستُعاد هذه المعالجة عند الاستئناف."
+                        elif isinstance(exc, OCRSpaceDailyBudgetError):
+                            stop_reason = "بلغ البوت السقف اليومي المحلي؛ لم يُرسل هذا الطلب وستُعاد المحاولة لاحقًا."
+                        else:
+                            stop_reason = "تعطل طلب OCR.Space؛ حُفظت نقطة الاستئناف ولن تُعاد النتائج السابقة."
                         break
-                    if "api error" in error_text or "request timed out" in error_text or "request failed" in error_text:
-                        stop_reason = "توقف الاختبار مبكرًا بعد خطأ من OCR.Space لتفادي إرسال طلبات أخرى."
-                        break
-                await asyncio.sleep(0.2)
 
-            records.append({
-                "filename": sample["filename"],
-                "expected": sample["answer"],
-                "predictions": predictions,
-                "provider_errors": provider_errors,
-            })
+                    predictions[variant] = None
+                    checkpoint["in_progress"] = None
+                    write_runtime_json(checkpoint_path, checkpoint)
+
             if stop_reason:
                 break
             if image_index % 10 == 0 or image_index == len(samples):
                 try:
                     await progress_message.edit(
                         content=f"اختبار Engine 3 جارٍ: اكتملت {image_index}/{len(samples)} صورة "
-                        f"({request_count} طلب OCR.Space)."
+                        f"({request_count} محاولة طلب في هذه الجلسة)."
                     )
                 except discord.HTTPException:
                     logger.info("Could not update testall progress message.")
 
+        records = testall_report_records(samples, checkpoint, current_failure)
         summary, report_csv = build_type1_test_report(records)
-        summary += f"\nالطلبات المنفذة: {request_count} من {estimated_requests}."
-        if len(records) < len(samples):
-            summary += f"\nتم تقييم {len(records)} من أصل {len(samples)} صورة."
+        summary += f"\nمحاولات الطلب في هذه الجلسة: {request_count} من {remaining_requests} المتبقية عند بدايتها."
         if stop_reason:
-            summary += f"\n{stop_reason}"
+            summary += (
+                f"\n{stop_reason} نقطة الحفظ: {current_failure['filename']} / {current_failure['variant']}. "
+                "شغّل $testall لاحقًا للمتابعة من هذه المعالجة."
+            )
 
         try:
-            await progress_message.edit(content="اكتمل اختبار الصور؛ أرفقت التقرير التفصيلي.")
+            final_status = (
+                f"توقف testall؛ حُفظت نقطة الاستئناف عند {current_failure['filename']} / "
+                f"{current_failure['variant']}."
+                if stop_reason and current_failure
+                else "اكتمل اختبار الصور؛ أرفقت التقرير التفصيلي."
+            )
+            await progress_message.edit(content=final_status)
         except discord.HTTPException:
             logger.info("Could not update final testall progress message.")
         await ctx.send(
@@ -1146,6 +1459,8 @@ async def testall(ctx: commands.Context) -> None:
             file=discord.File(BytesIO(report_csv), filename="testall_engine3_report.csv"),
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        if not stop_reason:
+            checkpoint_path.unlink(missing_ok=True)
 
 
 @bot.event

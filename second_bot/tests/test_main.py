@@ -351,6 +351,68 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(response.await_count, 1)
 
+    async def test_ocr_space_local_limiter_persists_cooldown_and_daily_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(main, "BASE_DIR", Path(tmp) / "second_bot"), \
+                    patch.object(main, "OCR_SPACE_MIN_INTERVAL_SECONDS", 0), \
+                    patch.object(main, "OCR_SPACE_DAILY_REQUEST_BUDGET", 1):
+                await main.reserve_ocr_space_request_slot()
+                await main.register_ocr_space_rate_limit(120)
+                state = main.load_ocr_space_rate_state()
+                self.assertEqual(state["requests"], 1)
+                self.assertGreater(float(state["cooldown_until"]), time.time())
+                with self.assertRaises(main.OCRSpaceCooldownError):
+                    await main.reserve_ocr_space_request_slot()
+
+                state["cooldown_until"] = 0
+                main.write_runtime_json(
+                    main.runtime_state_path("ocr_space_rate_state.json"), state
+                )
+                with self.assertRaises(main.OCRSpaceDailyBudgetError):
+                    await main.reserve_ocr_space_request_slot()
+
+    async def test_ocr_space_http_429_saves_retry_after_without_another_call(self):
+        class FakeResponse:
+            status = 429
+            headers = {"Retry-After": "120"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def json(self, content_type=None):
+                return {"ErrorMessage": "HTTP 429"}
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def post(self, *args, **kwargs):
+                return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(main, "BASE_DIR", Path(tmp) / "second_bot"), \
+                    patch.object(main, "OCR_SPACE_MIN_INTERVAL_SECONDS", 0), \
+                    patch.object(main.aiohttp, "ClientSession", return_value=FakeSession()):
+                with self.assertRaises(main.OCRSpaceRateLimitError) as caught:
+                    await main.extract_numbers_with_ocr_space(
+                        b"fake-image", "image/png", api_key="test-key", engine="3"
+                    )
+                self.assertEqual(caught.exception.retry_after_seconds, 120.0)
+                with self.assertRaises(main.OCRSpaceCooldownError):
+                    await main.reserve_ocr_space_request_slot()
+                state = main.load_ocr_space_rate_state()
+                self.assertEqual(state["requests"], 1)
+                self.assertGreaterEqual(float(state["cooldown_until"]), time.time() + 110)
+
+    def test_retry_after_parses_seconds(self):
+        self.assertEqual(main.parse_retry_after_seconds("45"), 45.0)
+
     def test_old_gemini_fallback_model_is_migrated(self):
         self.assertEqual(
             main.resolve_gemini_fallback_model("gemini-2.5-flash-lite"),
@@ -473,6 +535,66 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         final_call = ctx.send.await_args
         self.assertIn("فشل API 1", final_call.args[0])
         self.assertIn("غير مقروء 0", final_call.args[0])
+
+    async def test_testall_resumes_at_failed_variant_and_restarts_after_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sample_dir = root / "captcha_samples"
+            sample_dir.mkdir()
+            (sample_dir / "one.webp").write_bytes(b"first")
+            (sample_dir / "two.webp").write_bytes(b"second")
+            (sample_dir / "label.csv").write_text(
+                "filename,type,answer\none.webp,type1,12345\ntwo.webp,type1,54321\n",
+                encoding="utf-8",
+            )
+            bot_dir = root / "second_bot"
+            checkpoint_path = bot_dir / ".runtime" / "testall_engine3_checkpoint.json"
+
+            first_context = make_context()
+            first_run = AsyncMock(side_effect=[
+                ["12345"], ["12345"], ["12345"],
+                main.OCRSpaceRateLimitError("OCR.Space API error 429: HTTP 429"),
+            ])
+            with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
+                    patch.object(main, "BASE_DIR", bot_dir), \
+                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c")), \
+                    patch.object(main, "extract_numbers_with_ocr_space", new=first_run):
+                await main.testall.callback(first_context)
+                self.assertTrue(checkpoint_path.is_file())
+                samples = main.load_type1_test_samples(sample_dir)
+                checkpoint, resumed = main.load_testall_checkpoint(
+                    checkpoint_path, main.fingerprint_type1_dataset(sample_dir, samples)
+                )
+                self.assertTrue(resumed)
+                self.assertEqual(main.testall_resume_position(samples, checkpoint), ("two.webp", "before contrast"))
+                self.assertEqual(
+                    set(checkpoint["records"]["one.webp"]["predictions"]),
+                    {variant for variant, _ in main.TYPE1_TEST_VARIANTS},
+                )
+                self.assertEqual(main.testall_remaining_request_count(samples, checkpoint), 3)
+
+            resume_context = make_context()
+            resumed_run = AsyncMock(side_effect=[["54321"], ["54321"], ["54321"]])
+            with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
+                    patch.object(main, "BASE_DIR", bot_dir), \
+                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c")), \
+                    patch.object(main, "extract_numbers_with_ocr_space", new=resumed_run):
+                await main.testall.callback(resume_context)
+                self.assertFalse(checkpoint_path.exists())
+
+            self.assertEqual(first_run.await_count, 4)
+            self.assertEqual(resumed_run.await_count, 3)
+            self.assertIn("صحيح بالكامل 2/2 من المختبر", resume_context.send.await_args.args[0])
+
+            fresh_context = make_context()
+            fresh_run = AsyncMock(side_effect=[["12345"]] * 3 + [["54321"]] * 3)
+            with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
+                    patch.object(main, "BASE_DIR", bot_dir), \
+                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c")), \
+                    patch.object(main, "extract_numbers_with_ocr_space", new=fresh_run):
+                await main.testall.callback(fresh_context)
+
+            self.assertEqual(fresh_run.await_count, 6)
 
     def test_attachment_image_type_uses_filename_when_content_type_is_missing(self):
         attachment = SimpleNamespace(content_type=None, filename="receipt.JPG")
