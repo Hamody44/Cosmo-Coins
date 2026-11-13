@@ -319,6 +319,26 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(original_png, enhanced_png)
         self.assertNotEqual(original_png, binary_png)
 
+    async def test_ocr_space_variants_checks_engines_two_and_three_for_each_variant(self):
+        responses = AsyncMock(side_effect=lambda payload, mime_type, *, api_key, engine: [f"{payload.decode()}-{engine}"])
+        with patch.object(
+            main,
+            "prepare_ocr_space_variants",
+            return_value=(b"original", b"enhanced", b"binary"),
+        ), patch.object(main, "extract_numbers_with_ocr_space", new=responses):
+            result = await main.extract_numbers_with_ocr_space_variants(
+                b"source-image", api_key="ocr-test-key"
+            )
+
+        self.assertEqual(responses.await_count, 6)
+        self.assertEqual(
+            [call.kwargs["engine"] for call in responses.await_args_list],
+            ["2", "3", "2", "3", "2", "3"],
+        )
+        self.assertEqual(result[("before contrast", "2")], "original-2")
+        self.assertEqual(result[("before contrast", "3")], "original-3")
+        self.assertEqual(result[("upscaled binary", "3")], "binary-3")
+
     def test_attachment_image_type_uses_filename_when_content_type_is_missing(self):
         attachment = SimpleNamespace(content_type=None, filename="receipt.JPG")
         self.assertEqual(main.attachment_image_mime_type(attachment), "image/jpeg")
@@ -394,16 +414,25 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
                 patch.object(main, "detect_image_style", return_value="type1"), \
-                patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock(return_value=("12880", "12880", "12880"))) as ocr_space, \
+                patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock(return_value={
+                    ("before contrast", "2"): "12880",
+                    ("before contrast", "3"): "12880",
+                    ("after contrast", "2"): "12880",
+                    ("after contrast", "3"): "12880",
+                    ("upscaled binary", "2"): "12880",
+                    ("upscaled binary", "3"): "12880",
+                })) as ocr_space, \
                 patch.object(main, "extract_numbers_locally", return_value=["wrong"] ) as local_ocr:
             await main.numbers.callback(ctx)
 
         ocr_space.assert_awaited_once_with(b"type1-image", api_key="ocr-test-key")
         local_ocr.assert_not_called()
         self.assertIn("12880", ctx.send.await_args.args[0])
-        self.assertIn("قبل تحسين التباين", ctx.send.await_args.args[0])
-        self.assertIn("بعد تحسين التباين", ctx.send.await_args.args[0])
-        self.assertIn("بعد التكبير والأبيض والأسود", ctx.send.await_args.args[0])
+        output = ctx.send.await_args.args[0]
+        self.assertIn("قبل تحسين التباين (المحرك 2)", output)
+        self.assertIn("قبل تحسين التباين (المحرك 3)", output)
+        self.assertIn("بعد تحسين التباين (المحرك 2)", output)
+        self.assertIn("بعد التكبير والأبيض والأسود (المحرك 3)", output)
 
     async def test_type1_uses_gemini_when_ocr_space_fails(self):
         with patch.dict(os.environ, {
@@ -425,7 +454,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
                 ocr_space_key="ocr-test-key",
             )
 
-        self.assertEqual(result, ((None, None, None), "12880", None))
+        self.assertEqual(result, ({}, "12880", None))
         gemini.assert_awaited_once_with(b"type1-image", "image/png", model="vision-test")
         openrouter.assert_not_awaited()
 

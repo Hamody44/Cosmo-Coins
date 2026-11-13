@@ -53,7 +53,7 @@ DEFAULT_OPENROUTER_MODEL = "openrouter/free"
 VISION_REQUEST_TIMEOUT_SECONDS = 20
 OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
 OCR_SPACE_TIMEOUT_SECONDS = 20
-OCR_SPACE_ENGINES = ("1", "2")
+OCR_SPACE_ENGINES = ("2", "3")
 OCR_SPACE_UPSCALE_FACTOR = 3
 TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -252,18 +252,17 @@ async def extract_numbers_with_ocr_space_variants(
     image_bytes: bytes,
     *,
     api_key: str,
-) -> tuple[str | None, str | None, str | None]:
-    """Try both OCR.Space engines on three progressively processed PNGs."""
+) -> dict[tuple[str, str], str | None]:
+    """Test both OCR.Space engines independently on all three PNG variants."""
     original_png, enhanced_png, binary_png = prepare_ocr_space_variants(image_bytes)
     variants = (
         ("before contrast", original_png),
         ("after contrast", enhanced_png),
         ("upscaled binary", binary_png),
     )
-    results: list[str | None] = []
+    results: dict[tuple[str, str], str | None] = {}
     failures: list[str] = []
     for label, payload in variants:
-        successful_result: str | None = None
         for engine in OCR_SPACE_ENGINES:
             try:
                 result = await extract_numbers_with_ocr_space(
@@ -272,17 +271,15 @@ async def extract_numbers_with_ocr_space_variants(
                     api_key=api_key,
                     engine=engine,
                 )
-                successful_result = result[0] if result else None
-                if successful_result:
-                    break
+                results[(label, engine)] = result[0] if result else None
             except RuntimeError as exc:
                 logger.warning("OCR.Space %s engine=%s attempt failed: %s", label, engine, exc)
                 failures.append(f"{label}/engine{engine}: {exc}")
-        results.append(successful_result)
+                results[(label, engine)] = None
 
-    if not any(results):
+    if not any(results.values()):
         raise RuntimeError(f"OCR.Space failed for all image variants: {'; '.join(failures)}")
-    return results[0], results[1], results[2]
+    return results
 
 
 def attachment_image_mime_type(attachment) -> str | None:
@@ -378,9 +375,9 @@ async def extract_type1_with_fallback(
     mime_type: str,
     *,
     ocr_space_key: str,
-) -> tuple[tuple[str | None, str | None, str | None], str | None, str | None]:
+) -> tuple[dict[tuple[str, str], str | None], str | None, str | None]:
     """Try OCR.Space, then Gemini and OpenRouter when OCR.Space cannot read type1."""
-    ocr_results: tuple[str | None, str | None, str | None] = (None, None, None)
+    ocr_results: dict[tuple[str, str], str | None] = {}
     if ocr_space_key:
         try:
             ocr_results = await extract_numbers_with_ocr_space_variants(
@@ -801,15 +798,20 @@ async def numbers(ctx: commands.Context) -> None:
                 return
         else:
             ocr_space_key = os.getenv("OCR_SPACE_API_KEY", "").strip()
-            (before_contrast, after_contrast, upscaled_binary), gemini_result, openrouter_result = await extract_type1_with_fallback(
+            ocr_results, gemini_result, openrouter_result = await extract_type1_with_fallback(
                 image_bytes,
                 mime_type,
                 ocr_space_key=ocr_space_key,
             )
+            variant_labels = (
+                ("before contrast", "قبل تحسين التباين"),
+                ("after contrast", "بعد تحسين التباين"),
+                ("upscaled binary", "بعد التكبير والأبيض والأسود"),
+            )
             result_lines = [
-                f"قبل تحسين التباين: `{before_contrast or 'لم تُقرأ خمسة أرقام'}`",
-                f"بعد تحسين التباين: `{after_contrast or 'لم تُقرأ خمسة أرقام'}`",
-                f"بعد التكبير والأبيض والأسود: `{upscaled_binary or 'لم تُقرأ خمسة أرقام'}`",
+                f"{label} (المحرك {engine}): `{ocr_results.get((variant, engine)) or 'لم تُقرأ خمسة أرقام'}`"
+                for variant, label in variant_labels
+                for engine in OCR_SPACE_ENGINES
             ]
             if gemini_result:
                 result_lines.append(f"نتيجة Gemini الاحتياطية: `{gemini_result}`")
