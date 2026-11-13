@@ -319,7 +319,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(original_png, enhanced_png)
         self.assertNotEqual(original_png, binary_png)
 
-    async def test_ocr_space_variants_checks_engines_two_and_three_for_each_variant(self):
+    async def test_ocr_space_variants_checks_only_engine_three_for_each_variant(self):
         responses = AsyncMock(side_effect=lambda payload, mime_type, *, api_key, engine: [f"{payload.decode()}-{engine}"])
         with patch.object(
             main,
@@ -330,14 +330,85 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
                 b"source-image", api_key="ocr-test-key"
             )
 
-        self.assertEqual(responses.await_count, 6)
+        self.assertEqual(responses.await_count, 3)
         self.assertEqual(
             [call.kwargs["engine"] for call in responses.await_args_list],
-            ["2", "3", "2", "3", "2", "3"],
+            ["3", "3", "3"],
         )
-        self.assertEqual(result[("before contrast", "2")], "original-2")
         self.assertEqual(result[("before contrast", "3")], "original-3")
         self.assertEqual(result[("upscaled binary", "3")], "binary-3")
+
+    def test_type1_dataset_reader_loads_only_labeled_type1_images(self):
+        sample_dir = Path(__file__).resolve().parents[2] / "captcha_samples"
+        samples = main.load_type1_test_samples(sample_dir)
+        self.assertEqual(len(samples), 50)
+        self.assertTrue(all(row["type"] == "type1" for row in samples))
+
+    def test_five_digit_comparison_reports_positions_and_confusions(self):
+        count, mismatches = main.compare_five_digit_answer("92824", "91482")
+        self.assertEqual(count, 4)
+        self.assertEqual(
+            mismatches,
+            [(2, "2", "1"), (3, "8", "4"), (4, "2", "8"), (5, "4", "2")],
+        )
+        self.assertEqual(main.compare_five_digit_answer("92824", None), (None, []))
+
+    def test_report_summarizes_each_variant_and_exports_mistaken_digits(self):
+        records = [
+            {
+                "filename": "one.webp",
+                "expected": "12345",
+                "predictions": {
+                    "before contrast": "12345",
+                    "after contrast": "12344",
+                    "upscaled binary": None,
+                },
+            },
+            {
+                "filename": "two.webp",
+                "expected": "54321",
+                "predictions": {
+                    "before contrast": "54321",
+                    "after contrast": None,
+                },
+            },
+        ]
+        summary, report = main.build_type1_test_report(records)
+        report_text = report.decode("utf-8-sig")
+        self.assertIn("صحيح بالكامل 2/2 من المختبر (100.0%)", summary)
+        self.assertIn("خطأ برقم واحد 1", summary)
+        self.assertIn("غير مقروء 1", summary)
+        self.assertIn("5:5>4", report_text)
+        self.assertIn("لم تُختبر", report_text)  # Missing attempts are not counted as unreadable.
+
+    async def test_testall_uses_engine_three_and_sends_csv_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sample_dir = root / "captcha_samples"
+            sample_dir.mkdir()
+            (sample_dir / "one.webp").write_bytes(b"first")
+            (sample_dir / "two.webp").write_bytes(b"second")
+            (sample_dir / "label.csv").write_text(
+                "filename,type,answer\none.webp,type1,12345\ntwo.webp,type1,54321\n",
+                encoding="utf-8",
+            )
+            ctx = make_context()
+            results = [
+                ["12345"], ["12345"], ["12345"],
+                ["54321"], ["54320"], [],
+            ]
+            ocr_space = AsyncMock(side_effect=results)
+            with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
+                    patch.object(main, "BASE_DIR", root / "second_bot"), \
+                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c")), \
+                    patch.object(main, "extract_numbers_with_ocr_space", new=ocr_space):
+                await main.testall.callback(ctx)
+
+        self.assertEqual(ocr_space.await_count, 6)
+        self.assertTrue(all(call.kwargs["engine"] == "3" for call in ocr_space.await_args_list))
+        final_call = ctx.send.await_args
+        self.assertIn("صحيح بالكامل 2/2 من المختبر", final_call.args[0])
+        self.assertEqual(final_call.kwargs["file"].filename, "testall_engine3_report.csv")
 
     def test_attachment_image_type_uses_filename_when_content_type_is_missing(self):
         attachment = SimpleNamespace(content_type=None, filename="receipt.JPG")
@@ -415,11 +486,8 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
                 patch.object(main, "detect_image_style", return_value="type1"), \
                 patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock(return_value={
-                    ("before contrast", "2"): "12880",
                     ("before contrast", "3"): "12880",
-                    ("after contrast", "2"): "12880",
                     ("after contrast", "3"): "12880",
-                    ("upscaled binary", "2"): "12880",
                     ("upscaled binary", "3"): "12880",
                 })) as ocr_space, \
                 patch.object(main, "extract_numbers_locally", return_value=["wrong"] ) as local_ocr:
@@ -429,9 +497,9 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         local_ocr.assert_not_called()
         self.assertIn("12880", ctx.send.await_args.args[0])
         output = ctx.send.await_args.args[0]
-        self.assertIn("قبل تحسين التباين (المحرك 2)", output)
         self.assertIn("قبل تحسين التباين (المحرك 3)", output)
-        self.assertIn("بعد تحسين التباين (المحرك 2)", output)
+        self.assertNotIn("المحرك 2", output)
+        self.assertIn("بعد تحسين التباين (المحرك 3)", output)
         self.assertIn("بعد التكبير والأبيض والأسود (المحرك 3)", output)
 
     async def test_type1_uses_gemini_when_ocr_space_fails(self):

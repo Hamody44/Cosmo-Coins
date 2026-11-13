@@ -4,13 +4,15 @@ from __future__ import annotations
 import logging
 import json
 import base64
+import csv
 import os
 import sys
 import time
 import asyncio
 import math
 import re
-from io import BytesIO
+from collections import Counter
+from io import BytesIO, StringIO
 from pathlib import Path
 from functools import lru_cache
 
@@ -53,8 +55,14 @@ DEFAULT_OPENROUTER_MODEL = "openrouter/free"
 VISION_REQUEST_TIMEOUT_SECONDS = 20
 OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
 OCR_SPACE_TIMEOUT_SECONDS = 20
-OCR_SPACE_ENGINES = ("2", "3")
+OCR_SPACE_ENGINES = ("3",)
 OCR_SPACE_UPSCALE_FACTOR = 3
+TYPE1_TEST_VARIANTS = (
+    ("before contrast", "قبل تحسين التباين"),
+    ("after contrast", "بعد تحسين التباين"),
+    ("upscaled binary", "بعد التكبير والأبيض والأسود"),
+)
+TYPE1_TEST_LOCK = asyncio.Lock()
 TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 IMAGE_MIME_BY_EXTENSION = {
@@ -253,7 +261,7 @@ async def extract_numbers_with_ocr_space_variants(
     *,
     api_key: str,
 ) -> dict[tuple[str, str], str | None]:
-    """Test both OCR.Space engines independently on all three PNG variants."""
+    """Test the configured OCR.Space engine on all three PNG variants."""
     original_png, enhanced_png, binary_png = prepare_ocr_space_variants(image_bytes)
     variants = (
         ("before contrast", original_png),
@@ -280,6 +288,122 @@ async def extract_numbers_with_ocr_space_variants(
     if not any(results.values()):
         raise RuntimeError(f"OCR.Space failed for all image variants: {'; '.join(failures)}")
     return results
+
+
+def load_type1_test_samples(samples_dir: Path) -> list[dict[str, str]]:
+    """Load and validate type1 image labels from a captcha_samples directory."""
+    label_path = samples_dir / "label.csv"
+    with label_path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        required = {"filename", "type", "answer"}
+        if not required.issubset(reader.fieldnames or []):
+            raise ValueError("label.csv must contain filename,type,answer columns")
+        rows = [row for row in reader if row.get("type") == "type1"]
+
+    if not rows:
+        raise ValueError("label.csv contains no type1 samples")
+
+    seen: set[str] = set()
+    for row in rows:
+        filename = row["filename"].strip()
+        answer = row["answer"].strip()
+        if not filename or Path(filename).name != filename:
+            raise ValueError(f"Invalid type1 sample filename: {filename!r}")
+        if filename in seen:
+            raise ValueError(f"Duplicate type1 sample filename: {filename}")
+        if not re.fullmatch(r"[0-9]{5}", answer):
+            raise ValueError(f"Expected five ASCII digits for {filename}: {answer!r}")
+        if not (samples_dir / filename).is_file():
+            raise FileNotFoundError(samples_dir / filename)
+        row["filename"] = filename
+        row["answer"] = answer
+        seen.add(filename)
+    return rows
+
+
+def compare_five_digit_answer(expected: str, predicted: str | None) -> tuple[int | None, list[tuple[int, str, str]]]:
+    """Return mismatch count and one-based (position, expected, predicted) tuples."""
+    if not predicted or not re.fullmatch(r"[0-9]{5}", predicted):
+        return None, []
+    mismatches = [
+        (position, expected_digit, predicted_digit)
+        for position, (expected_digit, predicted_digit) in enumerate(zip(expected, predicted), start=1)
+        if expected_digit != predicted_digit
+    ]
+    return len(mismatches), mismatches
+
+
+def build_type1_test_report(records: list[dict[str, object]]) -> tuple[str, bytes]:
+    """Build per-variant accuracy summaries and an Excel-friendly CSV report."""
+    summaries: list[str] = []
+    values_by_variant: dict[str, list[list[str]]] = {}
+    total = len(records)
+    for variant, arabic_label in TYPE1_TEST_VARIANTS:
+        counts: Counter[str] = Counter()
+        confusions: Counter[tuple[str, str]] = Counter()
+        variant_rows: list[list[str]] = []
+        correct = 0
+        tested = 0
+
+        for record in records:
+            expected = str(record["expected"])
+            predictions = record["predictions"]
+            if not isinstance(predictions, dict) or variant not in predictions:
+                counts["not_tested"] += 1
+                variant_rows.append(["", "لم تُختبر", ""])
+                continue
+            predicted = predictions.get(variant) if isinstance(predictions, dict) else None
+            tested += 1
+            predicted = str(predicted) if predicted else None
+            error_count, mismatches = compare_five_digit_answer(expected, predicted)
+            if error_count is None:
+                counts["unreadable"] += 1
+                variant_rows.append(["", "غير مقروء", ""])
+                continue
+
+            variant_rows.append([
+                predicted or "",
+                str(error_count),
+                "; ".join(f"{position}:{truth}>{guess}" for position, truth, guess in mismatches),
+            ])
+            if error_count == 0:
+                counts["correct"] += 1
+                correct += 1
+            elif error_count <= 3:
+                counts[f"{error_count}_error"] += 1
+            else:
+                counts["4plus_error"] += 1
+            confusions.update((truth, guess) for _, truth, guess in mismatches)
+
+        rate = correct / tested * 100 if tested else 0.0
+        summaries.append(
+            f"{arabic_label}: صحيح بالكامل {correct}/{tested} من المختبر ({rate:.1f}%)، "
+            f"خطأ برقم واحد {counts['1_error']}، برقمين {counts['2_error']}، "
+            f"بثلاثة {counts['3_error']}، بأربعة أو خمسة {counts['4plus_error']}، "
+            f"غير مقروء {counts['unreadable']}، لم تُختبر {counts['not_tested']}"
+        )
+        top_confusions = confusions.most_common(5)
+        if top_confusions:
+            confusion_text = "، ".join(f"{truth}→{guess} ({count})" for (truth, guess), count in top_confusions)
+            summaries.append(f"أكثر الالتباسات (الرقم الصحيح→المقروء): {confusion_text}")
+        values_by_variant[variant] = variant_rows
+
+    buffer = StringIO(newline="")
+    writer = csv.writer(buffer)
+    writer.writerow([
+        "filename", "expected",
+        "before_contrast_prediction", "before_contrast_error_count", "before_contrast_wrong_digits",
+        "after_contrast_prediction", "after_contrast_error_count", "after_contrast_wrong_digits",
+        "upscaled_binary_prediction", "upscaled_binary_error_count", "upscaled_binary_wrong_digits",
+    ])
+    for row_index, record in enumerate(records):
+        row = [record["filename"], record["expected"]]
+        for variant, _ in TYPE1_TEST_VARIANTS:
+            row.extend(values_by_variant[variant][row_index])
+        writer.writerow(row)
+
+    summary = f"تقرير اختبار OCR.Space Engine 3 — عدد الصور المقيمة: {total}\n" + "\n".join(summaries)
+    return summary, buffer.getvalue().encode("utf-8-sig")
 
 
 def attachment_image_mime_type(attachment) -> str | None:
@@ -843,6 +967,107 @@ async def numbers(ctx: commands.Context) -> None:
 
     result = "\n".join(f"{index}. `{value}`" for index, value in enumerate(numbers_found, start=1))
     await ctx.send(f"الأرقام المستخرجة:\n{result}", allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name="testall")
+@commands.check(check_control_owner)
+async def testall(ctx: commands.Context) -> None:
+    """Evaluate OCR.Space Engine 3 against all labeled type1 samples."""
+    api_key = os.getenv("OCR_SPACE_API_KEY", "").strip()
+    if not api_key:
+        await send_notice(ctx, "لم يُضبط OCR_SPACE_API_KEY في ملف إعدادات البوت.")
+        return
+    if TYPE1_TEST_LOCK.locked():
+        await send_notice(ctx, "يوجد اختبار شامل قيد التشغيل بالفعل.")
+        return
+
+    async with TYPE1_TEST_LOCK:
+        samples_dir = BASE_DIR.parent / "captcha_samples"
+        try:
+            samples = load_type1_test_samples(samples_dir)
+        except (OSError, ValueError, csv.Error) as exc:
+            await send_notice(ctx, f"تعذر تحميل عينات النوع الأول: {exc}")
+            return
+
+        estimated_requests = len(samples) * len(TYPE1_TEST_VARIANTS)
+        progress_message = await ctx.send(
+            f"بدأ اختبار {len(samples)} صورة من النوع الأول باستخدام OCR.Space Engine 3 فقط. "
+            f"الحد الأقصى المتوقع {estimated_requests} طلبًا (ثلاث معالجات لكل صورة)."
+        )
+        records: list[dict[str, object]] = []
+        request_count = 0
+        stop_reason: str | None = None
+
+        for image_index, sample in enumerate(samples, start=1):
+            predictions: dict[str, str | None] = {}
+            image_path = samples_dir / sample["filename"]
+            try:
+                image_bytes = image_path.read_bytes()
+                prepared_variants = prepare_ocr_space_variants(image_bytes)
+            except (OSError, ValueError) as exc:
+                logger.warning("Could not prepare test image %s: %s", image_path.name, exc)
+                predictions = {variant: None for variant, _ in TYPE1_TEST_VARIANTS}
+                records.append({
+                    "filename": sample["filename"],
+                    "expected": sample["answer"],
+                    "predictions": predictions,
+                })
+                continue
+
+            for (variant, _), payload in zip(TYPE1_TEST_VARIANTS, prepared_variants):
+                request_count += 1
+                try:
+                    result = await extract_numbers_with_ocr_space(
+                        payload,
+                        "image/png",
+                        api_key=api_key,
+                        engine="3",
+                    )
+                    predictions[variant] = result[0] if result else None
+                except RuntimeError as exc:
+                    logger.warning("Engine 3 test failed for %s/%s: %s", image_path.name, variant, exc)
+                    predictions[variant] = None
+                    error_text = str(exc).lower()
+                    if "api error 429" in error_text or "quota" in error_text or "limit reached" in error_text:
+                        stop_reason = "توقف الاختبار مبكرًا بسبب حد الطلبات أو الحصة لدى OCR.Space."
+                        break
+                    if "api error" in error_text:
+                        stop_reason = "توقف الاختبار مبكرًا بعد خطأ HTTP من OCR.Space لتفادي إرسال طلبات أخرى."
+                        break
+                await asyncio.sleep(0.2)
+
+            records.append({
+                "filename": sample["filename"],
+                "expected": sample["answer"],
+                "predictions": predictions,
+            })
+            if stop_reason:
+                break
+            if image_index % 10 == 0 or image_index == len(samples):
+                try:
+                    await progress_message.edit(
+                        content=f"اختبار Engine 3 جارٍ: اكتملت {image_index}/{len(samples)} صورة "
+                        f"({request_count} طلب OCR.Space)."
+                    )
+                except discord.HTTPException:
+                    logger.info("Could not update testall progress message.")
+
+        summary, report_csv = build_type1_test_report(records)
+        summary += f"\nالطلبات المنفذة: {request_count} من {estimated_requests}."
+        if len(records) < len(samples):
+            summary += f"\nتم تقييم {len(records)} من أصل {len(samples)} صورة."
+        if stop_reason:
+            summary += f"\n{stop_reason}"
+
+        try:
+            await progress_message.edit(content="اكتمل اختبار الصور؛ أرفقت التقرير التفصيلي.")
+        except discord.HTTPException:
+            logger.info("Could not update final testall progress message.")
+        await ctx.send(
+            summary,
+            file=discord.File(BytesIO(report_csv), filename="testall_engine3_report.csv"),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 @bot.event
