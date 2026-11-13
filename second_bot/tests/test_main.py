@@ -310,6 +310,27 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.first_five_digit_result(["not useful", "12 880"]), "12880")
         self.assertIsNone(main.first_five_digit_result(["1288", "abcdef"]))
 
+    def test_select_ocr_consensus_requires_two_matching_variants(self):
+        self.assertEqual(
+            main.select_ocr_consensus({("a", "3"): "12880", ("b", "3"): "12880"}),
+            "12880",
+        )
+        self.assertIsNone(
+            main.select_ocr_consensus({
+                ("a", "3"): "12880",
+                ("b", "3"): "12881",
+                ("c", "3"): None,
+            })
+        )
+        self.assertIsNone(
+            main.select_ocr_consensus({
+                ("a", "3"): "12880",
+                ("b", "3"): "12880",
+                ("c", "3"): "12881",
+                ("d", "3"): "12881",
+            })
+        )
+
     def test_prepare_ocr_space_variants_converts_to_png(self):
         image_bytes = (Path(__file__).resolve().parents[2] / "captcha_samples" / "type1_01.webp").read_bytes()
         original_png, enhanced_png, otsu_png, adaptive_png = main.prepare_ocr_space_variants(image_bytes)
@@ -765,6 +786,34 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, ({}, "12880", None))
         gemini.assert_awaited_once_with(b"type1-image", "image/png", model="vision-test")
         openrouter.assert_not_awaited()
+
+    async def test_type1_uses_gemini_when_ocr_space_variants_conflict(self):
+        with patch.dict(os.environ, {
+            "GEMINI_API_KEY": "gemini-test-key",
+            "GEMINI_VISION_MODEL": "vision-test",
+            "OPENROUTER_API_KEY": "",
+        }), patch.object(
+            main,
+            "extract_numbers_with_ocr_space_variants",
+            new=AsyncMock(return_value={
+                ("before contrast", "3"): "12880",
+                ("after contrast", "3"): "12881",
+                ("upscaled otsu", "3"): "12882",
+                ("adaptive threshold", "3"): "12883",
+            }),
+        ), patch.object(
+            main,
+            "extract_numbers_from_image",
+            new=AsyncMock(return_value=["45 454"]),
+        ) as gemini:
+            result = await main.extract_type1_with_fallback(
+                b"type1-image",
+                "image/png",
+                ocr_space_key="ocr-test-key",
+            )
+
+        self.assertEqual(result[1], "45454")
+        gemini.assert_awaited_once_with(b"type1-image", "image/png", model="vision-test")
 
 
 if __name__ == "__main__":

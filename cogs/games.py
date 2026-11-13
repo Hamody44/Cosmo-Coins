@@ -1048,6 +1048,7 @@ class Games(commands.Cog):
         description="السماح للمشتركين بالدخول التلقائي في جيف محدد",
     )
     async def allow_join_giveaway(self, ctx: commands.Context, message_id: int):
+        """Allow auto-join for one giveaway, silently ignoring invalid prefix input."""
         if not ctx.guild:
             return await ctx.send("❌ استخدم الأمر داخل السيرفر فقط.")
         if not auto_join_available(ctx):
@@ -1056,9 +1057,13 @@ class Games(commands.Cog):
             return await ctx.send("⛔ هذا الأمر متاح لمالك السيرفر أو لمسؤول البوت المخوّل.")
         result = await asyncio.to_thread(_allow_auto_join_for_giveaway, ctx.guild.id, message_id)
         if not result:
-            return await ctx.send("❌ لم أجد جيفًا نشطًا بهذا المعرّف.")
+            if ctx.interaction is not None:
+                raise ValueError("لم أجد جيفًا نشطًا بهذا المعرّف.")
+            return
         if result.get("expired"):
-            return await ctx.send("❌ انتهى وقت هذا الجيف؛ لا يمكن فتح الدخول التلقائي له.")
+            if ctx.interaction is not None:
+                raise ValueError("انتهى وقت هذا الجيف؛ لا يمكن فتح الدخول التلقائي له.")
+            return
         channel = await self._giveaway_channel(ctx.guild, result["channel_id"])
         if channel:
             await self._refresh_giveaway_participant_count(ctx.guild, channel, message_id)

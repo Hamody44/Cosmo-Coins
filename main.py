@@ -356,6 +356,20 @@ async def on_app_command_error(interaction: discord.Interaction, error):
     original = getattr(error, "original", error)
     command_name = getattr(interaction.command, "name", "unknown") if interaction.command else "unknown"
     print(f"Slash command error command={command_name} type={type(original).__name__}: {original}")
+    auto_join_commands = {"allow_join_giveaway", "allow_auto_join"}
+    if command_name in auto_join_commands:
+        if isinstance(original, (discord.app_commands.TransformerError, ValueError, TypeError)):
+            message = "❌ أدخل message_id رقميًا صحيحًا لجيف نشط."
+        else:
+            message = f"❌ تعذر تنفيذ الأمر: {original}"
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception:
+            pass
+        return
     if command_name not in {"8ball", "8ball_guess_reward", "8ball_claim"}:
         return
     message = f"❌ تعذر تنفيذ الأمر: {original}"

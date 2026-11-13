@@ -64,7 +64,7 @@ OCR_SPACE_TIMEOUT_SECONDS = 20
 OCR_SPACE_ENGINES = ("3",)
 OCR_SPACE_UPSCALE_FACTOR = 3
 OCR_ADAPTIVE_THRESHOLD_DELTA = 20
-OCR_PREPROCESSING_VERSION = 2
+OCR_PREPROCESSING_VERSION = 3
 try:
     OCR_SPACE_MIN_INTERVAL_SECONDS = max(0.0, float(os.getenv("OCR_SPACE_MIN_INTERVAL_SECONDS", "2")))
 except ValueError:
@@ -342,6 +342,22 @@ def _encode_png(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
+def select_ocr_consensus(results: dict[tuple[str, str], str | None]) -> str | None:
+    """Return a result only when at least two OCR variants agree exactly."""
+    candidates = [
+        str(value)
+        for value in results.values()
+        if value and re.fullmatch(r"[0-9]{5}", str(value))
+    ]
+    if not candidates:
+        return None
+    counts = Counter(candidates)
+    candidate, votes = counts.most_common(1)[0]
+    if len(counts) > 1 and counts.most_common(2)[1][1] == votes:
+        return None
+    return candidate if votes >= 2 else None
+
+
 def otsu_threshold(image: Image.Image) -> int:
     """Choose a global grayscale threshold by minimizing within-class variance."""
     histogram = image.convert("L").histogram()
@@ -372,15 +388,16 @@ def otsu_threshold(image: Image.Image) -> int:
 
 
 def prepare_ocr_space_variants(image_bytes: bytes) -> tuple[bytes, bytes, bytes, bytes]:
-    """Return original, contrast, enlarged Otsu, and local-adaptive PNG variants."""
+    """Return complementary variants while preserving the four-request budget."""
     with Image.open(BytesIO(image_bytes)) as source:
         image = ImageOps.exif_transpose(source).convert("RGB")
-
-    enhanced = ImageEnhance.Contrast(image).enhance(2.0)
     enlarged = image.resize(
         (image.width * OCR_SPACE_UPSCALE_FACTOR, image.height * OCR_SPACE_UPSCALE_FACTOR),
         Image.Resampling.LANCZOS,
     )
+    enhanced = ImageOps.autocontrast(enlarged)
+    enhanced = ImageEnhance.Contrast(enhanced).enhance(2.2)
+    enhanced = enhanced.filter(ImageFilter.UnsharpMask(radius=1.2, percent=160, threshold=3))
     grayscale = ImageOps.autocontrast(ImageOps.grayscale(enlarged))
     grayscale = grayscale.filter(ImageFilter.MedianFilter(size=3))
     threshold = otsu_threshold(grayscale)
@@ -866,8 +883,10 @@ async def extract_type1_with_fallback(
                 image_bytes,
                 api_key=ocr_space_key,
             )
-            if any(ocr_results):
+            if select_ocr_consensus(ocr_results):
                 return ocr_results, None, None
+            if any(ocr_results.values()):
+                failure_details.append("OCR.Space returned conflicting five-digit results")
         except RuntimeError as exc:
             logger.warning("OCR.Space failed for type1; trying vision fallbacks: %s", exc)
             failure_details.append(f"OCR.Space: {exc}")
@@ -904,6 +923,11 @@ async def extract_type1_with_fallback(
             failure_details.append(f"OpenRouter: {exc}")
     else:
         logger.info("OPENROUTER_API_KEY is not configured; skipping OpenRouter type1 fallback.")
+
+    # If no vision fallback is configured, preserve provider output for
+    # diagnostics instead of hiding usable readings behind an exception.
+    if ocr_results and any(ocr_results.values()):
+        return ocr_results, None, None
 
     details = "; ".join(failure_details)
     suffix = f" Details: {details}" if details else ""
