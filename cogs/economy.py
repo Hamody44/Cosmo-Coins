@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-import random
+import secrets
 import asyncio
 from datetime import datetime
 from types import SimpleNamespace
@@ -235,17 +235,21 @@ class Economy(commands.Cog):
         if get_balance(ctx.author.id) < parsed_amount:
             return await ctx.send(f"❌ رصيدك من {currency_label} لا يكفي.")
 
-        captcha_code = str(random.randint(1000, 9999))
+        captcha_code = f"{secrets.randbelow(1_000_000):06d}"
         captcha_img = generate_captcha_image(captcha_code)
         file = discord.File(captcha_img, filename="captcha.png")
 
-        msg = await ctx.send(f"⚠️ {ctx.author.mention} لتأكيد تحويل `{parsed_amount:,}` {currency_label}، اكتب الكود خلال **20 ثانية**:", file=file)
+        msg = await ctx.send(
+            f"⚠️ {ctx.author.mention} لتأكيد تحويل `{parsed_amount:,}` {currency_label} إلى {member.mention}، "
+            "اكتب الرمز ذي الستة أرقام الظاهر في الصورة خلال **30 ثانية**:",
+            file=file,
+        )
 
         def check(m):
             return m.author == ctx.author and m.channel == ctx.channel
 
         try:
-            reply = await self.bot.wait_for("message", timeout=20.0, check=check)
+            reply = await self.bot.wait_for("message", timeout=30.0, check=check)
             if reply.content.strip() == captcha_code:
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 if not transfer_balance(ctx.author.id, member.id, parsed_amount, now):

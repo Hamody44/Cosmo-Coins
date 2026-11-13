@@ -4,7 +4,7 @@ import shutil
 import time
 import re
 import math
-import random
+import secrets
 import io
 import glob
 import threading
@@ -1984,19 +1984,56 @@ def get_unicode_font(size: int):
             return ImageFont.truetype(p, size)
         except:
             continue
-    return ImageFont.load_default()
+    return ImageFont.load_default(size=size)
 
 def generate_captcha_image(text):
-    base_img = Image.new('RGB', (120, 40), color=(25, 25, 30))
-    draw = ImageDraw.Draw(base_img)
-    spaced_text = " ".join(text)
-    draw.text((20, 12), spaced_text, fill=(255, 255, 255))
-    big_img = base_img.resize((300, 100), resample=Image.NEAREST)
-    draw_big = ImageDraw.Draw(big_img)
-    for _ in range(5):
-        draw_big.line([random.randint(0, 300), random.randint(0, 100), random.randint(0, 300), random.randint(0, 100)], fill=(90, 90, 110), width=2)
+    """Render a legible, high-contrast one-time transfer challenge image."""
+    width, height = 300, 110
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    rng = secrets.SystemRandom()
+
+    # Keep decoration pale and behind the characters so it does not reduce readability.
+    for _ in range(38):
+        x = rng.randint(8, width - 8)
+        y = rng.randint(8, height - 8)
+        color = rng.choice(((230, 237, 245), (237, 232, 242), (231, 240, 234)))
+        draw.ellipse((x, y, x + 2, y + 2), fill=color)
+
+    for color in ((235, 240, 247), (242, 236, 243), (236, 243, 238)):
+        x1, y1 = rng.randint(0, width), rng.randint(12, height - 12)
+        x2, y2 = rng.randint(0, width), rng.randint(12, height - 12)
+        draw.line((x1, y1, x2, y2), fill=color, width=1)
+
+    font = get_unicode_font(52)
+    cell_width, cell_height = 44, 76
+    start_x = (width - len(text) * cell_width) // 2
+    for index, character in enumerate(text):
+        glyph = Image.new("RGBA", (cell_width, cell_height), (0, 0, 0, 0))
+        glyph_draw = ImageDraw.Draw(glyph)
+        bounds = glyph_draw.textbbox((0, 0), character, font=font)
+        text_width = bounds[2] - bounds[0]
+        text_height = bounds[3] - bounds[1]
+        glyph_draw.text(
+            ((cell_width - text_width) / 2 - bounds[0],
+             (cell_height - text_height) / 2 - bounds[1]),
+            character,
+            font=font,
+            fill=(20, 28, 40, 255),
+        )
+        glyph = glyph.rotate(
+            rng.randint(-3, 3),
+            resample=Image.Resampling.BICUBIC,
+        )
+        image.paste(
+            glyph,
+            (start_x + index * cell_width + rng.randint(-1, 1),
+             (height - cell_height) // 2 + rng.randint(-2, 2)),
+            glyph,
+        )
+
     buf = io.BytesIO()
-    big_img.save(buf, format='PNG')
+    image.save(buf, format="PNG")
     buf.seek(0)
     return buf
 
