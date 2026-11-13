@@ -24,7 +24,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 from google.genai import types
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
 from local_ocr import detect_style, load_image, load_model, recognize
 
@@ -63,6 +63,8 @@ OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
 OCR_SPACE_TIMEOUT_SECONDS = 20
 OCR_SPACE_ENGINES = ("3",)
 OCR_SPACE_UPSCALE_FACTOR = 3
+OCR_ADAPTIVE_THRESHOLD_DELTA = 20
+OCR_PREPROCESSING_VERSION = 2
 try:
     OCR_SPACE_MIN_INTERVAL_SECONDS = max(0.0, float(os.getenv("OCR_SPACE_MIN_INTERVAL_SECONDS", "2")))
 except ValueError:
@@ -78,7 +80,8 @@ except ValueError:
 TYPE1_TEST_VARIANTS = (
     ("before contrast", "قبل تحسين التباين"),
     ("after contrast", "بعد تحسين التباين"),
-    ("upscaled binary", "بعد التكبير والأبيض والأسود"),
+    ("upscaled otsu", "بعد التكبير وعتبة Otsu"),
+    ("adaptive threshold", "بعد العتبة المحلية التكيفية"),
 )
 TYPE1_TEST_LOCK = asyncio.Lock()
 OCR_SPACE_RATE_LOCK = asyncio.Lock()
@@ -339,10 +342,39 @@ def _encode_png(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
-def prepare_ocr_space_variants(image_bytes: bytes) -> tuple[bytes, bytes, bytes]:
-    """Return original, contrast-enhanced, and enlarged binary PNG variants."""
+def otsu_threshold(image: Image.Image) -> int:
+    """Choose a global grayscale threshold by minimizing within-class variance."""
+    histogram = image.convert("L").histogram()
+    total = sum(histogram)
+    if total == 0:
+        return 127
+
+    weighted_total = sum(level * count for level, count in enumerate(histogram))
+    background_weight = 0
+    background_sum = 0
+    best_variance = -1.0
+    best_threshold = 127
+    for threshold, count in enumerate(histogram):
+        background_weight += count
+        background_sum += threshold * count
+        foreground_weight = total - background_weight
+        if not background_weight or not foreground_weight:
+            continue
+        background_mean = background_sum / background_weight
+        foreground_mean = (weighted_total - background_sum) / foreground_weight
+        between_class_variance = (
+            background_weight * foreground_weight * (background_mean - foreground_mean) ** 2
+        )
+        if between_class_variance > best_variance:
+            best_variance = between_class_variance
+            best_threshold = threshold
+    return best_threshold
+
+
+def prepare_ocr_space_variants(image_bytes: bytes) -> tuple[bytes, bytes, bytes, bytes]:
+    """Return original, contrast, enlarged Otsu, and local-adaptive PNG variants."""
     with Image.open(BytesIO(image_bytes)) as source:
-        image = source.convert("RGB")
+        image = ImageOps.exif_transpose(source).convert("RGB")
 
     enhanced = ImageEnhance.Contrast(image).enhance(2.0)
     enlarged = image.resize(
@@ -351,9 +383,27 @@ def prepare_ocr_space_variants(image_bytes: bytes) -> tuple[bytes, bytes, bytes]
     )
     grayscale = ImageOps.autocontrast(ImageOps.grayscale(enlarged))
     grayscale = grayscale.filter(ImageFilter.MedianFilter(size=3))
-    binary = grayscale.point(lambda pixel: 255 if pixel >= 150 else 0, mode="1")
+    threshold = otsu_threshold(grayscale)
+    otsu_binary = grayscale.point(
+        lambda pixel: 0 if pixel <= threshold else 255,
+        mode="L",
+    )
 
-    return _encode_png(image), _encode_png(enhanced), _encode_png(binary)
+    adaptive_grayscale = ImageOps.grayscale(enlarged).filter(ImageFilter.MedianFilter(size=3))
+    blur_radius = max(2, round(min(adaptive_grayscale.size) / 24))
+    local_background = adaptive_grayscale.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    local_darkness = ImageChops.subtract(local_background, adaptive_grayscale)
+    adaptive_binary = local_darkness.point(
+        lambda difference: 0 if difference >= OCR_ADAPTIVE_THRESHOLD_DELTA else 255,
+        mode="L",
+    )
+
+    return (
+        _encode_png(image),
+        _encode_png(enhanced),
+        _encode_png(otsu_binary),
+        _encode_png(adaptive_binary),
+    )
 
 
 async def extract_numbers_with_ocr_space(
@@ -435,12 +485,13 @@ async def extract_numbers_with_ocr_space_variants(
     *,
     api_key: str,
 ) -> dict[tuple[str, str], str | None]:
-    """Test the configured OCR.Space engine on all three PNG variants."""
-    original_png, enhanced_png, binary_png = prepare_ocr_space_variants(image_bytes)
+    """Test the configured OCR.Space engine on each prepared PNG variant."""
+    original_png, enhanced_png, otsu_png, adaptive_png = prepare_ocr_space_variants(image_bytes)
     variants = (
         ("before contrast", original_png),
         ("after contrast", enhanced_png),
-        ("upscaled binary", binary_png),
+        ("upscaled otsu", otsu_png),
+        ("adaptive threshold", adaptive_png),
     )
     results: dict[tuple[str, str], str | None] = {}
     failures: list[str] = []
@@ -505,6 +556,10 @@ def load_type1_test_samples(samples_dir: Path) -> list[dict[str, str]]:
 def fingerprint_type1_dataset(samples_dir: Path, samples: list[dict[str, str]]) -> str:
     """Hash labels and image contents so stale progress is never applied to new data."""
     digest = hashlib.sha256()
+    digest.update(f"ocr-preprocessing-v{OCR_PREPROCESSING_VERSION}\0".encode("ascii"))
+    for variant, _ in TYPE1_TEST_VARIANTS:
+        digest.update(variant.encode("utf-8"))
+        digest.update(b"\0")
     for sample in samples:
         digest.update(sample["filename"].encode("utf-8"))
         digest.update(b"\0")
@@ -518,7 +573,7 @@ def fingerprint_type1_dataset(samples_dir: Path, samples: list[dict[str, str]]) 
 
 def new_testall_checkpoint(dataset_fingerprint: str) -> dict[str, object]:
     return {
-        "version": 1,
+        "version": OCR_PREPROCESSING_VERSION,
         "dataset_fingerprint": dataset_fingerprint,
         "records": {},
         "in_progress": None,
@@ -531,7 +586,7 @@ def load_testall_checkpoint(path: Path, dataset_fingerprint: str) -> tuple[dict[
     checkpoint = read_runtime_json(path)
     if (
         checkpoint
-        and checkpoint.get("version") == 1
+        and checkpoint.get("version") == OCR_PREPROCESSING_VERSION
         and checkpoint.get("dataset_fingerprint") == dataset_fingerprint
         and isinstance(checkpoint.get("records"), dict)
     ):
@@ -677,12 +732,14 @@ def build_type1_test_report(records: list[dict[str, object]]) -> tuple[str, byte
 
     buffer = StringIO(newline="")
     writer = csv.writer(buffer)
-    writer.writerow([
-        "filename", "expected",
-        "before_contrast_prediction", "before_contrast_error_count", "before_contrast_wrong_digits", "before_contrast_api_error",
-        "after_contrast_prediction", "after_contrast_error_count", "after_contrast_wrong_digits", "after_contrast_api_error",
-        "upscaled_binary_prediction", "upscaled_binary_error_count", "upscaled_binary_wrong_digits", "upscaled_binary_api_error",
-    ])
+    headers = ["filename", "expected"]
+    for variant, _ in TYPE1_TEST_VARIANTS:
+        prefix = variant.replace(" ", "_")
+        headers.extend(
+            f"{prefix}_{suffix}"
+            for suffix in ("prediction", "error_count", "wrong_digits", "api_error")
+        )
+    writer.writerow(headers)
     for row_index, record in enumerate(records):
         row = [record["filename"], record["expected"]]
         for variant, _ in TYPE1_TEST_VARIANTS:
@@ -1239,7 +1296,8 @@ async def numbers(ctx: commands.Context) -> None:
             variant_labels = (
                 ("before contrast", "قبل تحسين التباين"),
                 ("after contrast", "بعد تحسين التباين"),
-                ("upscaled binary", "بعد التكبير والأبيض والأسود"),
+                ("upscaled otsu", "بعد التكبير وعتبة Otsu"),
+                ("adaptive threshold", "بعد العتبة المحلية التكيفية"),
             )
             result_lines = [
                 f"{label} (المحرك {engine}): `{ocr_results.get((variant, engine)) or 'لم تُقرأ خمسة أرقام'}`"

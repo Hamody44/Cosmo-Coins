@@ -312,38 +312,52 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_prepare_ocr_space_variants_converts_to_png(self):
         image_bytes = (Path(__file__).resolve().parents[2] / "captcha_samples" / "type1_01.webp").read_bytes()
-        original_png, enhanced_png, binary_png = main.prepare_ocr_space_variants(image_bytes)
+        original_png, enhanced_png, otsu_png, adaptive_png = main.prepare_ocr_space_variants(image_bytes)
         self.assertTrue(original_png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(enhanced_png.startswith(b"\x89PNG\r\n\x1a\n"))
-        self.assertTrue(binary_png.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertTrue(otsu_png.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertTrue(adaptive_png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertNotEqual(original_png, enhanced_png)
-        self.assertNotEqual(original_png, binary_png)
+        self.assertNotEqual(original_png, otsu_png)
+        self.assertNotEqual(original_png, adaptive_png)
+
+    def test_otsu_threshold_separates_two_grayscale_modes(self):
+        image = main.Image.new("L", (100, 10), 240)
+        for x in range(40):
+            for y in range(10):
+                image.putpixel((x, y), 20)
+
+        threshold = main.otsu_threshold(image)
+
+        self.assertGreaterEqual(threshold, 20)
+        self.assertLess(threshold, 240)
 
     async def test_ocr_space_variants_checks_only_engine_three_for_each_variant(self):
         responses = AsyncMock(side_effect=lambda payload, mime_type, *, api_key, engine: [f"{payload.decode()}-{engine}"])
         with patch.object(
             main,
             "prepare_ocr_space_variants",
-            return_value=(b"original", b"enhanced", b"binary"),
+            return_value=(b"original", b"enhanced", b"otsu", b"adaptive"),
         ), patch.object(main, "extract_numbers_with_ocr_space", new=responses):
             result = await main.extract_numbers_with_ocr_space_variants(
                 b"source-image", api_key="ocr-test-key"
             )
 
-        self.assertEqual(responses.await_count, 3)
+        self.assertEqual(responses.await_count, 4)
         self.assertEqual(
             [call.kwargs["engine"] for call in responses.await_args_list],
-            ["3", "3", "3"],
+            ["3", "3", "3", "3"],
         )
         self.assertEqual(result[("before contrast", "3")], "original-3")
-        self.assertEqual(result[("upscaled binary", "3")], "binary-3")
+        self.assertEqual(result[("upscaled otsu", "3")], "otsu-3")
+        self.assertEqual(result[("adaptive threshold", "3")], "adaptive-3")
 
     async def test_ocr_space_rate_limit_stops_remaining_variants(self):
         response = AsyncMock(side_effect=main.OCRSpaceRateLimitError("OCR.Space API error 429: HTTP 429"))
         with patch.object(
             main,
             "prepare_ocr_space_variants",
-            return_value=(b"original", b"enhanced", b"binary"),
+            return_value=(b"original", b"enhanced", b"otsu", b"adaptive"),
         ), patch.object(main, "extract_numbers_with_ocr_space", new=response):
             with self.assertRaisesRegex(RuntimeError, "429"):
                 await main.extract_numbers_with_ocr_space_variants(
@@ -428,8 +442,23 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
     def test_type1_dataset_reader_loads_only_labeled_type1_images(self):
         sample_dir = Path(__file__).resolve().parents[2] / "captcha_samples"
         samples = main.load_type1_test_samples(sample_dir)
-        self.assertEqual(len(samples), 50)
+        self.assertEqual(len(samples), 100)
         self.assertTrue(all(row["type"] == "type1" for row in samples))
+
+    def test_preprocessing_update_invalidates_old_testall_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint_path = Path(tmp) / "checkpoint.json"
+            checkpoint_path.write_text(json.dumps({
+                "version": 1,
+                "dataset_fingerprint": "same-dataset",
+                "records": {"old.webp": {"predictions": {"upscaled binary": "12345"}}},
+            }), encoding="utf-8")
+
+            checkpoint, resumed = main.load_testall_checkpoint(checkpoint_path, "same-dataset")
+
+        self.assertFalse(resumed)
+        self.assertEqual(checkpoint["version"], main.OCR_PREPROCESSING_VERSION)
+        self.assertEqual(checkpoint["records"], {})
 
     def test_five_digit_comparison_reports_positions_and_confusions(self):
         count, mismatches = main.compare_five_digit_answer("92824", "91482")
@@ -448,7 +477,8 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
                 "predictions": {
                     "before contrast": "12345",
                     "after contrast": "12344",
-                    "upscaled binary": None,
+                    "upscaled otsu": None,
+                    "adaptive threshold": "12345",
                 },
             },
             {
@@ -457,6 +487,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
                 "predictions": {
                     "before contrast": "54321",
                     "after contrast": None,
+                    "upscaled otsu": "54321",
                 },
             },
         ]
@@ -467,6 +498,8 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("غير مقروء 1", summary)
         self.assertIn("5:5>4", report_text)
         self.assertIn("لم تُختبر", report_text)  # Missing attempts are not counted as unreadable.
+        self.assertIn("upscaled_otsu_prediction", report_text)
+        self.assertIn("adaptive_threshold_prediction", report_text)
 
     def test_report_keeps_api_errors_out_of_ocr_unreadable_counts(self):
         records = [{
@@ -494,18 +527,18 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
             ctx = make_context()
-            results = [
-                ["12345"], ["12345"], ["12345"],
-                ["54321"], ["54320"], [],
-            ]
+            results = [[answer] for answer in (
+                "12345", "12345", "12345", "12345",
+                "54321", "54321", "54321", "54321",
+            )]
             ocr_space = AsyncMock(side_effect=results)
             with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
                     patch.object(main, "BASE_DIR", root / "second_bot"), \
-                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c")), \
+                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c", b"d")), \
                     patch.object(main, "extract_numbers_with_ocr_space", new=ocr_space):
                 await main.testall.callback(ctx)
 
-        self.assertEqual(ocr_space.await_count, 6)
+        self.assertEqual(ocr_space.await_count, 8)
         self.assertTrue(all(call.kwargs["engine"] == "3" for call in ocr_space.await_args_list))
         final_call = ctx.send.await_args
         self.assertIn("صحيح بالكامل 2/2 من المختبر", final_call.args[0])
@@ -527,7 +560,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
             )
             with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
                     patch.object(main, "BASE_DIR", root / "second_bot"), \
-                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c")), \
+                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c", b"d")), \
                     patch.object(main, "extract_numbers_with_ocr_space", new=ocr_space):
                 await main.testall.callback(ctx)
 
@@ -552,12 +585,12 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
             first_context = make_context()
             first_run = AsyncMock(side_effect=[
-                ["12345"], ["12345"], ["12345"],
+                ["12345"], ["12345"], ["12345"], ["12345"],
                 main.OCRSpaceRateLimitError("OCR.Space API error 429: HTTP 429"),
             ])
             with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
                     patch.object(main, "BASE_DIR", bot_dir), \
-                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c")), \
+                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c", b"d")), \
                     patch.object(main, "extract_numbers_with_ocr_space", new=first_run):
                 await main.testall.callback(first_context)
                 self.assertTrue(checkpoint_path.is_file())
@@ -571,30 +604,30 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
                     set(checkpoint["records"]["one.webp"]["predictions"]),
                     {variant for variant, _ in main.TYPE1_TEST_VARIANTS},
                 )
-                self.assertEqual(main.testall_remaining_request_count(samples, checkpoint), 3)
+                self.assertEqual(main.testall_remaining_request_count(samples, checkpoint), 4)
 
             resume_context = make_context()
-            resumed_run = AsyncMock(side_effect=[["54321"], ["54321"], ["54321"]])
+            resumed_run = AsyncMock(side_effect=[["54321"]] * 4)
             with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
                     patch.object(main, "BASE_DIR", bot_dir), \
-                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c")), \
+                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c", b"d")), \
                     patch.object(main, "extract_numbers_with_ocr_space", new=resumed_run):
                 await main.testall.callback(resume_context)
                 self.assertFalse(checkpoint_path.exists())
 
-            self.assertEqual(first_run.await_count, 4)
-            self.assertEqual(resumed_run.await_count, 3)
+            self.assertEqual(first_run.await_count, 5)
+            self.assertEqual(resumed_run.await_count, 4)
             self.assertIn("صحيح بالكامل 2/2 من المختبر", resume_context.send.await_args.args[0])
 
             fresh_context = make_context()
-            fresh_run = AsyncMock(side_effect=[["12345"]] * 3 + [["54321"]] * 3)
+            fresh_run = AsyncMock(side_effect=[["12345"]] * 4 + [["54321"]] * 4)
             with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
                     patch.object(main, "BASE_DIR", bot_dir), \
-                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c")), \
+                    patch.object(main, "prepare_ocr_space_variants", return_value=(b"a", b"b", b"c", b"d")), \
                     patch.object(main, "extract_numbers_with_ocr_space", new=fresh_run):
                 await main.testall.callback(fresh_context)
 
-            self.assertEqual(fresh_run.await_count, 6)
+            self.assertEqual(fresh_run.await_count, 8)
 
     def test_attachment_image_type_uses_filename_when_content_type_is_missing(self):
         attachment = SimpleNamespace(content_type=None, filename="receipt.JPG")
@@ -693,7 +726,8 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock(return_value={
                     ("before contrast", "3"): "12880",
                     ("after contrast", "3"): "12880",
-                    ("upscaled binary", "3"): "12880",
+                    ("upscaled otsu", "3"): "12880",
+                    ("adaptive threshold", "3"): "12880",
                 })) as ocr_space, \
                 patch.object(main, "extract_numbers_locally", return_value=["wrong"] ) as local_ocr:
             await main.numbers.callback(ctx)
@@ -705,7 +739,8 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("قبل تحسين التباين (المحرك 3)", output)
         self.assertNotIn("المحرك 2", output)
         self.assertIn("بعد تحسين التباين (المحرك 3)", output)
-        self.assertIn("بعد التكبير والأبيض والأسود (المحرك 3)", output)
+        self.assertIn("بعد التكبير وعتبة Otsu (المحرك 3)", output)
+        self.assertIn("بعد العتبة المحلية التكيفية (المحرك 3)", output)
 
     async def test_type1_uses_gemini_when_ocr_space_fails(self):
         with patch.dict(os.environ, {
