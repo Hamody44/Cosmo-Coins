@@ -983,7 +983,7 @@ class Games(commands.Cog):
         await ctx.send(
             "اضغط الزر لتأكيد اشتراكك في الدخول التلقائي.\n"
             "لن يتم إدخالك في أي جيف إلا بعد أن تسمح الإدارة للجيف تحديدًا باستخدام "
-            "`/allow_join_giveaway`.\n"
+            "`/allow_auto_join`.\n"
             "يمكنك الإلغاء لاحقًا عبر `/stop_auto_join_giveaway`.",
             view=AutoJoinGiveawayConfirmView(self, ctx.author.id),
         )
@@ -1043,8 +1043,8 @@ class Games(commands.Cog):
             await ctx.send(text[start:start + 1900])
 
     @commands.hybrid_command(
-        name="allow_join_giveaway",
-        aliases=["السماح_بدخول_جيف"],
+        name="allow_auto_join",
+        aliases=["allow_join_giveaway", "السماح_بدخول_جيف"],
         description="السماح للمشتركين بالدخول التلقائي في جيف محدد",
     )
     async def allow_join_giveaway(self, ctx: commands.Context, message_id: int):

@@ -12,6 +12,12 @@ from cogs.games import Games
 
 
 class GiveawayControlTests(unittest.IsolatedAsyncioTestCase):
+    def test_allow_auto_join_is_the_registered_slash_name(self):
+        command = Games.allow_join_giveaway
+
+        self.assertEqual(command.app_command.name, "allow_auto_join")
+        self.assertIn("allow_join_giveaway", command.aliases)
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.guild_path = os.path.join(self.temp_dir.name, "guild.db")
