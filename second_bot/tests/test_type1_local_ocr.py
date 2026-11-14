@@ -14,6 +14,7 @@ from type1_local_ocr import (
     make_masks,
     normalize_mask,
     otsu_threshold,
+    remove_chromatic_noise,
 )
 
 
@@ -30,6 +31,21 @@ class Type1LocalOCRTests(unittest.TestCase):
         weights = _position_class_weights(templates, 0.25)
         self.assertGreater(weights["1"], weights["0"])
         self.assertEqual(_position_class_weights(templates, 0.0), {})
+
+    def test_chromatic_noise_is_replaced_by_dominant_background(self):
+        light = Image.new("RGB", (300, 110), "white")
+        light.putpixel((10, 10), (0, 0, 0))
+        light.putpixel((20, 20), (255, 0, 0))
+        cleaned_light = remove_chromatic_noise(light, chroma_threshold=60)
+        self.assertEqual(cleaned_light.getpixel((10, 10)), 0)
+        self.assertEqual(cleaned_light.getpixel((20, 20)), 255)
+
+        dark = Image.new("RGB", (300, 110), "black")
+        dark.putpixel((10, 10), (255, 255, 255))
+        dark.putpixel((20, 20), (0, 255, 0))
+        cleaned_dark = remove_chromatic_noise(dark, chroma_threshold=60)
+        self.assertEqual(cleaned_dark.getpixel((10, 10)), 255)
+        self.assertEqual(cleaned_dark.getpixel((20, 20)), 0)
 
     def test_otsu_threshold_is_bounded(self):
         image = Image.new("L", (20, 20), 255)

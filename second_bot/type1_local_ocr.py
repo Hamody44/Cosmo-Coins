@@ -24,6 +24,7 @@ PREPROCESSING_VARIANTS = ("contrast", "otsu", "adaptive", "raw")
 DEFAULT_MIN_SIMILARITY = 0.62
 DEFAULT_MIN_MARGIN = 0.035
 DEFAULT_MIN_AVERAGE_CONFIDENCE = 0.70
+MIN_CHROMATIC_SATURATION = 0.20
 
 
 def load_image(source: bytes | str | Path | Image.Image) -> Image.Image:
@@ -37,6 +38,46 @@ def load_image(source: bytes | str | Path | Image.Image) -> Image.Image:
     return ImageOps.exif_transpose(image).convert("RGB").resize(
         IMAGE_SIZE, Image.Resampling.LANCZOS
     )
+
+
+def remove_chromatic_noise(
+    image: Image.Image,
+    *,
+    chroma_threshold: int,
+    min_saturation: float = MIN_CHROMATIC_SATURATION,
+) -> Image.Image:
+    """Replace strongly colored speckles with the image's dominant background."""
+    if not 0 <= chroma_threshold <= 255:
+        raise ValueError("chroma_threshold must be between 0 and 255")
+    if not 0.0 <= min_saturation <= 1.0:
+        raise ValueError("min_saturation must be between 0 and 1")
+    gray = ImageOps.grayscale(image)
+    if chroma_threshold == 0:
+        return gray
+
+    histogram = gray.histogram()
+    midpoint = sum(histogram) // 2
+    accumulated = 0
+    median = 255
+    for value, count in enumerate(histogram):
+        accumulated += count
+        if accumulated > midpoint:
+            median = value
+            break
+    background = 255 if median >= 127 else 0
+
+    rgb_pixels = image.convert("RGB").load()
+    gray_pixels = gray.load()
+    width, height = image.size
+    for y in range(height):
+        for x in range(width):
+            red, green, blue = rgb_pixels[x, y]
+            maximum = max(red, green, blue)
+            chroma = maximum - min(red, green, blue)
+            saturation = chroma / max(1, maximum)
+            if chroma >= chroma_threshold and saturation >= min_saturation:
+                gray_pixels[x, y] = background
+    return gray
 
 
 def otsu_threshold(image: Image.Image) -> int:
@@ -170,8 +211,14 @@ def digit_feature(mask: Image.Image) -> list[float]:
     return hog_feature(normalized) + pixels + [dark_ratio] + geometry
 
 
-def extract_features(source: bytes | str | Path | Image.Image) -> dict[str, list[list[float]]]:
+def extract_features(
+    source: bytes | str | Path | Image.Image,
+    *,
+    chroma_threshold: int = 0,
+) -> dict[str, list[list[float]]]:
     image = load_image(source)
+    if chroma_threshold:
+        image = remove_chromatic_noise(image, chroma_threshold=chroma_threshold)
     masks = make_masks(image)
     return {
         variant: [digit_feature(_crop_cell(mask, position)) for position in range(CELL_COUNT)]
@@ -290,7 +337,10 @@ def recognize(
     *,
     exclude_filename: str | None = None,
 ) -> dict[str, Any]:
-    features = extract_features(source)
+    features = extract_features(
+        source,
+        chroma_threshold=int(model.get("chroma_threshold", 0)),
+    )
     templates = model.get("templates", [])
     result = predict_features(
         features,
