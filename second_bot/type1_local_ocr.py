@@ -6,6 +6,7 @@ pixel/HOG features, position-aware KNN templates, and confidence thresholds.
 """
 from __future__ import annotations
 
+from collections import Counter
 import math
 from io import BytesIO
 from pathlib import Path
@@ -194,12 +195,36 @@ def _rank_digit_candidates(
     return ranked[: max(1, k)]
 
 
+def _position_class_weights(
+    templates: list[dict[str, Any]], alpha: float
+) -> dict[str, float]:
+    """Return smoothed-by-observation inverse-frequency weights for one position."""
+    if not math.isfinite(alpha) or alpha < 0:
+        raise ValueError("class weight alpha must be a finite, non-negative number")
+    if alpha == 0:
+        return {}
+    counts = Counter(
+        str(template["digit"])
+        for template in templates
+        if template.get("variant") == PREPROCESSING_VARIANTS[0]
+    )
+    sample_count = sum(counts.values())
+    class_count = len(counts)
+    if not sample_count or not class_count:
+        return {}
+    return {
+        digit: (sample_count / (class_count * count)) ** alpha
+        for digit, count in counts.items()
+    }
+
+
 def predict_features(
     features: dict[str, list[list[float]]],
     templates: list[dict[str, Any]],
     *,
     exclude_filename: str | None = None,
     k: int = 5,
+    class_weight_alpha: float = 0.0,
 ) -> dict[str, Any]:
     digits: list[str] = []
     confidence: list[dict[str, float | str]] = []
@@ -209,6 +234,7 @@ def predict_features(
             if template.get("position") == position
             and (exclude_filename is None or template.get("filename") != exclude_filename)
         ]
+        class_weights = _position_class_weights(candidates, class_weight_alpha)
         ranked_all: list[tuple[float, str]] = []
         for variant in PREPROCESSING_VARIANTS:
             variant_features = features.get(variant)
@@ -225,7 +251,7 @@ def predict_features(
         votes: dict[str, float] = {}
         best_by_digit: dict[str, float] = {}
         for similarity, digit in ranked_all:
-            weight = max(0.0, similarity)
+            weight = max(0.0, similarity) * class_weights.get(digit, 1.0)
             votes[digit] = votes.get(digit, 0.0) + weight
             best_by_digit[digit] = max(similarity, best_by_digit.get(digit, -1.0))
         ordered = sorted(votes.items(), key=lambda item: item[1], reverse=True)
@@ -266,7 +292,12 @@ def recognize(
 ) -> dict[str, Any]:
     features = extract_features(source)
     templates = model.get("templates", [])
-    result = predict_features(features, templates, exclude_filename=exclude_filename)
+    result = predict_features(
+        features,
+        templates,
+        exclude_filename=exclude_filename,
+        class_weight_alpha=float(model.get("class_weight_alpha", 0.0)),
+    )
     result["type"] = "type1"
     result["model_name"] = model.get("model_name", "type1-local")
     return result

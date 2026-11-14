@@ -9,6 +9,7 @@ from type1_local_ocr import (
     CELL_COUNT,
     FEATURE_SIZE,
     PREPROCESSING_VARIANTS,
+    _position_class_weights,
     extract_features,
     make_masks,
     normalize_mask,
@@ -17,6 +18,19 @@ from type1_local_ocr import (
 
 
 class Type1LocalOCRTests(unittest.TestCase):
+    def test_position_class_weights_raise_rare_class_weight(self):
+        templates = [
+            {"digit": "0", "variant": variant, "filename": filename}
+            for filename in ("a.webp", "b.webp")
+            for variant in PREPROCESSING_VARIANTS
+        ] + [
+            {"digit": "1", "variant": variant, "filename": "c.webp"}
+            for variant in PREPROCESSING_VARIANTS
+        ]
+        weights = _position_class_weights(templates, 0.25)
+        self.assertGreater(weights["1"], weights["0"])
+        self.assertEqual(_position_class_weights(templates, 0.0), {})
+
     def test_otsu_threshold_is_bounded(self):
         image = Image.new("L", (20, 20), 255)
         self.assertGreaterEqual(otsu_threshold(image), 0)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -71,14 +72,21 @@ def make_templates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return templates
 
 
-def evaluate(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def evaluate(
+    rows: list[dict[str, Any]], *, class_weight_alpha: float = 0.0
+) -> dict[str, Any]:
     correct_digits = 0
     total_digits = len(rows) * 5
     correct_sequences = 0
     errors = []
     for row in rows:
         templates = make_templates([other for other in rows if other["filename"] != row["filename"]])
-        result = predict_features(row["features"], templates, exclude_filename=row["filename"])
+        result = predict_features(
+            row["features"],
+            templates,
+            exclude_filename=row["filename"],
+            class_weight_alpha=class_weight_alpha,
+        )
         guess = result.get("text", "")
         correct_digits += sum(left == right for left, right in zip(guess, row["answer"]))
         if guess == row["answer"]:
@@ -91,7 +99,10 @@ def evaluate(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "reliable": result.get("reliable", False),
             })
     return {
-        "method": "position-aware multi-mask KNN with leave-one-image-out validation",
+        "method": (
+            "position-aware multi-mask KNN with leave-one-image-out validation; "
+            f"class_weight_alpha={class_weight_alpha}"
+        ),
         "digit_accuracy": correct_digits / max(1, total_digits),
         "exact_sequence_accuracy": correct_sequences / max(1, len(rows)),
         "correct_sequences": correct_sequences,
@@ -100,13 +111,19 @@ def evaluate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def build_model(rows: list[dict[str, Any]], validation: dict[str, Any]) -> dict[str, Any]:
+def build_model(
+    rows: list[dict[str, Any]],
+    validation: dict[str, Any],
+    *,
+    class_weight_alpha: float = 0.0,
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "model_name": "cosmo-local-type1-multimask-knn",
         "input_size": [300, 110],
         "preprocessing_variants": list(PREPROCESSING_VARIANTS),
         "training_count": len(rows),
+        "class_weight_alpha": class_weight_alpha,
         "validation": validation,
         "templates": make_templates(rows),
     }
@@ -157,6 +174,12 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent / "models" / "type1_local_ocr_model.json")
     parser.add_argument("--evaluate-only", action="store_true")
     parser.add_argument(
+        "--class-weight-alpha",
+        type=float,
+        default=0.0,
+        help="Apply position-wise inverse-frequency class weights (default: 0, disabled)",
+    )
+    parser.add_argument(
         "--debug-dir",
         type=Path,
         help="Save source/mask/crop diagnostics for a limited number of type1 images",
@@ -168,6 +191,8 @@ def main() -> int:
         help="Maximum number of images to export with --debug-dir (default: 10)",
     )
     args = parser.parse_args()
+    if not math.isfinite(args.class_weight_alpha) or args.class_weight_alpha < 0:
+        parser.error("--class-weight-alpha must be a finite, non-negative number")
     try:
         rows = read_dataset(args.data)
         prepared = prepare_rows(rows, args.data)
@@ -177,13 +202,21 @@ def main() -> int:
     if args.debug_dir is not None:
         count = save_debug_images(rows, args.data, args.debug_dir, limit=args.debug_limit)
         print(f"Saved preprocessing diagnostics for {count} image(s) to {args.debug_dir}")
-    validation = evaluate(prepared)
+    validation = evaluate(prepared, class_weight_alpha=args.class_weight_alpha)
     print(json.dumps(validation, ensure_ascii=False, indent=2))
     if args.evaluate_only:
         return 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
-        json.dumps(build_model(prepared, validation), ensure_ascii=False, separators=(",", ":")),
+        json.dumps(
+            build_model(
+                prepared,
+                validation,
+                class_weight_alpha=args.class_weight_alpha,
+            ),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
         encoding="utf-8",
     )
     print(f"Model written to {args.output}")
