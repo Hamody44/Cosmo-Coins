@@ -406,6 +406,25 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(main.OCRSpaceDailyBudgetError):
                     await main.reserve_ocr_space_request_slot()
 
+    def test_parse_veryfi_response_accepts_one_unambiguous_candidate(self):
+        self.assertEqual(
+            main.parse_veryfi_response({"ocr_text": "captcha code: 12880"}),
+            "12880",
+        )
+        self.assertIsNone(main.parse_veryfi_response({"ocr_text": "no valid code"}))
+        with self.assertRaisesRegex(RuntimeError, "multiple"):
+            main.parse_veryfi_response({"ocr_text": "12880 45454"})
+
+    async def test_veryfi_monthly_budget_persists_and_blocks_next_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(main, "BASE_DIR", Path(tmp) / "second_bot"), \
+                    patch.object(main, "VERYFI_MONTHLY_REQUEST_BUDGET", 1):
+                await main.reserve_veryfi_request_slot()
+                state = main.load_veryfi_rate_state()
+                self.assertEqual(state["requests"], 1)
+                with self.assertRaises(main.VeryfiMonthlyBudgetError):
+                    await main.reserve_veryfi_request_slot()
+
     async def test_ocr_space_http_429_saves_retry_after_without_another_call(self):
         class FakeResponse:
             status = 429
@@ -814,6 +833,40 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result[1], "45454")
         gemini.assert_awaited_once_with(b"type1-image", "image/png", model="vision-test")
+
+    async def test_type1_uses_veryfi_only_after_conflict_and_accepts_agreement(self):
+        with patch.dict(os.environ, {
+            "VERYFI_CLIENT_ID": "client-test",
+            "VERYFI_USERNAME": "user-test",
+            "VERYFI_API_KEY": "key-test",
+            "GEMINI_API_KEY": "",
+            "OPENROUTER_API_KEY": "",
+        }), patch.object(
+            main,
+            "extract_numbers_with_ocr_space_variants",
+            new=AsyncMock(return_value={
+                ("before contrast", "3"): "12880",
+                ("after contrast", "3"): "12881",
+                ("upscaled otsu", "3"): "12882",
+                ("adaptive threshold", "3"): "12883",
+            }),
+        ), patch.object(
+            main,
+            "prepare_ocr_space_variants",
+            return_value=(b"original", b"enhanced", b"otsu", b"adaptive"),
+        ), patch.object(
+            main,
+            "extract_numbers_with_veryfi",
+            new=AsyncMock(return_value="12880"),
+        ) as veryfi:
+            result = await main.extract_type1_with_fallback(
+                b"type1-image",
+                "image/png",
+                ocr_space_key="ocr-test-key",
+            )
+
+        self.assertEqual(result[0][("Veryfi", "api")], "12880")
+        veryfi.assert_awaited_once_with(b"enhanced", "image/png")
 
 
 if __name__ == "__main__":

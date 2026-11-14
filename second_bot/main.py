@@ -12,6 +12,7 @@ import asyncio
 import math
 import re
 import hashlib
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -65,6 +66,8 @@ OCR_SPACE_ENGINES = ("3",)
 OCR_SPACE_UPSCALE_FACTOR = 3
 OCR_ADAPTIVE_THRESHOLD_DELTA = 20
 OCR_PREPROCESSING_VERSION = 3
+VERYFI_ENDPOINT = "https://api.veryfi.com/api/v8/partner/documents"
+VERYFI_TIMEOUT_SECONDS = 20
 try:
     OCR_SPACE_MIN_INTERVAL_SECONDS = max(0.0, float(os.getenv("OCR_SPACE_MIN_INTERVAL_SECONDS", "2")))
 except ValueError:
@@ -77,6 +80,10 @@ try:
     OCR_SPACE_429_COOLDOWN_SECONDS = max(60.0, float(os.getenv("OCR_SPACE_429_COOLDOWN_SECONDS", "3600")))
 except ValueError:
     OCR_SPACE_429_COOLDOWN_SECONDS = 3600.0
+try:
+    VERYFI_MONTHLY_REQUEST_BUDGET = max(1, int(os.getenv("VERYFI_MONTHLY_REQUEST_BUDGET", "80")))
+except ValueError:
+    VERYFI_MONTHLY_REQUEST_BUDGET = 80
 TYPE1_TEST_VARIANTS = (
     ("before contrast", "قبل تحسين التباين"),
     ("after contrast", "بعد تحسين التباين"),
@@ -85,6 +92,7 @@ TYPE1_TEST_VARIANTS = (
 )
 TYPE1_TEST_LOCK = asyncio.Lock()
 OCR_SPACE_RATE_LOCK = asyncio.Lock()
+VERYFI_RATE_LOCK = asyncio.Lock()
 TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
@@ -102,6 +110,10 @@ class OCRSpaceCooldownError(RuntimeError):
 
 class OCRSpaceDailyBudgetError(RuntimeError):
     """The local daily safety budget prevented an OCR.Space request."""
+
+
+class VeryfiMonthlyBudgetError(RuntimeError):
+    """The local monthly safety budget prevented a Veryfi request."""
 
 
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -160,6 +172,36 @@ def load_ocr_space_rate_state(*, now: float | None = None) -> dict[str, object]:
         "last_request_at": last_request_at,
         "cooldown_until": cooldown_until,
     }
+
+
+def load_veryfi_rate_state(*, now: float | None = None) -> dict[str, object]:
+    """Load Veryfi's monthly local request counter, resetting at each UTC month."""
+    state_path = runtime_state_path("veryfi_rate_state.json")
+    state = read_runtime_json(state_path) or {}
+    current = datetime.now(timezone.utc) if now is None else datetime.fromtimestamp(now, timezone.utc)
+    utc_month = current.strftime("%Y-%m")
+    if state.get("utc_month") != utc_month:
+        return {"utc_month": utc_month, "requests": 0}
+    try:
+        requests = max(0, int(state.get("requests", 0)))
+    except (TypeError, ValueError):
+        requests = 0
+    return {"utc_month": utc_month, "requests": requests}
+
+
+async def reserve_veryfi_request_slot() -> None:
+    """Reserve one Veryfi request before sending it, safely across concurrent commands."""
+    async with VERYFI_RATE_LOCK:
+        current_time = time.time()
+        state = load_veryfi_rate_state(now=current_time)
+        requests = int(state["requests"])
+        if requests >= VERYFI_MONTHLY_REQUEST_BUDGET:
+            raise VeryfiMonthlyBudgetError(
+                "Veryfi local monthly request budget reached "
+                f"({requests}/{VERYFI_MONTHLY_REQUEST_BUDGET}); no request was sent"
+            )
+        state["requests"] = requests + 1
+        write_runtime_json(runtime_state_path("veryfi_rate_state.json"), state)
 
 
 async def reserve_ocr_space_request_slot() -> None:
@@ -868,13 +910,85 @@ async def extract_numbers_with_openrouter(
     return parse_openrouter_numbers_response(content or "")
 
 
+def _veryfi_ocr_text(payload: object) -> str:
+    """Find Veryfi's raw OCR text without treating unrelated JSON fields as OCR."""
+    if isinstance(payload, dict):
+        value = payload.get("ocr_text")
+        if isinstance(value, str):
+            return value
+        for child in payload.values():
+            text = _veryfi_ocr_text(child)
+            if text:
+                return text
+    elif isinstance(payload, list):
+        for child in payload:
+            text = _veryfi_ocr_text(child)
+            if text:
+                return text
+    return ""
+
+
+def parse_veryfi_response(response_data: dict) -> str | None:
+    """Return one unambiguous five-digit value from Veryfi's raw OCR text."""
+    text = _veryfi_ocr_text(response_data)
+    candidates = list(dict.fromkeys(re.findall(r"(?<!\d)\d{5}(?!\d)", text)))
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise RuntimeError("Veryfi returned multiple five-digit candidates")
+    return None
+
+
+async def extract_numbers_with_veryfi(image_bytes: bytes, mime_type: str) -> str | None:
+    """Send one preprocessed image to Veryfi without installing its SDK."""
+    client_id = os.getenv("VERYFI_CLIENT_ID", "").strip()
+    username = os.getenv("VERYFI_USERNAME", "").strip()
+    api_key = os.getenv("VERYFI_API_KEY", "").strip()
+    if not all((client_id, username, api_key)):
+        raise RuntimeError("VERYFI_CLIENT_ID, VERYFI_USERNAME, and VERYFI_API_KEY are required")
+
+    await reserve_veryfi_request_slot()
+    content_type = mime_type if mime_type in SUPPORTED_IMAGE_TYPES else "image/png"
+    form = aiohttp.FormData()
+    form.add_field(
+        "file",
+        image_bytes,
+        filename="captcha.png",
+        content_type=content_type,
+    )
+    form.add_field("confidence_details", "true")
+    headers = {
+        "CLIENT-ID": client_id,
+        "AUTHORIZATION": f"apikey {username}:{api_key}",
+        "Idempotency-Key": str(uuid.uuid4()),
+    }
+    timeout = aiohttp.ClientTimeout(total=VERYFI_TIMEOUT_SECONDS)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(VERYFI_ENDPOINT, headers=headers, data=form) as result:
+                response_data = await result.json(content_type=None)
+                if result.status >= 400:
+                    message = response_data.get("message", f"HTTP {result.status}")
+                    raise RuntimeError(f"Veryfi API error {result.status}: {message}")
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            f"Veryfi request timed out after {VERYFI_TIMEOUT_SECONDS} seconds"
+        ) from exc
+    except aiohttp.ClientError as exc:
+        raise RuntimeError(f"Veryfi request failed: {exc}") from exc
+
+    result = parse_veryfi_response(response_data)
+    logger.info("Veryfi OCR result: %s", result or "no unambiguous five-digit result")
+    return result
+
+
 async def extract_type1_with_fallback(
     image_bytes: bytes,
     mime_type: str,
     *,
     ocr_space_key: str,
 ) -> tuple[dict[tuple[str, str], str | None], str | None, str | None]:
-    """Try OCR.Space, then Gemini and OpenRouter when OCR.Space cannot read type1."""
+    """Use OCR.Space consensus, Veryfi on disagreement, then vision fallbacks."""
     ocr_results: dict[tuple[str, str], str | None] = {}
     failure_details: list[str] = []
     if ocr_space_key:
@@ -893,6 +1007,32 @@ async def extract_type1_with_fallback(
     else:
         logger.warning("OCR_SPACE_API_KEY is missing; skipping OCR.Space for type1 fallback path.")
         failure_details.append("OCR_SPACE_API_KEY is missing")
+
+    veryfi_credentials = all(
+        os.getenv(name, "").strip()
+        for name in ("VERYFI_CLIENT_ID", "VERYFI_USERNAME", "VERYFI_API_KEY")
+    )
+    if veryfi_credentials:
+        try:
+            # Send one enhanced PNG only; Veryfi is deliberately reserved for
+            # disagreement/no-consensus cases to protect its monthly quota.
+            enhanced_png = prepare_ocr_space_variants(image_bytes)[1]
+            veryfi_result = await extract_numbers_with_veryfi(enhanced_png, "image/png")
+            ocr_results[("Veryfi", "api")] = veryfi_result
+            space_candidates = {
+                value for (variant, _engine), value in ocr_results.items()
+                if variant != "Veryfi" and value
+            }
+            if veryfi_result and (not space_candidates or veryfi_result in space_candidates):
+                logger.info("Using Veryfi type1 result: %s", veryfi_result)
+                return ocr_results, None, None
+            if veryfi_result:
+                failure_details.append("Veryfi returned a result conflicting with OCR.Space")
+        except RuntimeError as exc:
+            logger.warning("Veryfi type1 fallback failed: %s", exc)
+            failure_details.append(f"Veryfi: {exc}")
+    else:
+        logger.info("Veryfi credentials are not configured; skipping Veryfi type1 fallback.")
 
     gemini_key, gemini_model = load_vision_config()
     if gemini_key:
@@ -1328,6 +1468,8 @@ async def numbers(ctx: commands.Context) -> None:
                 for variant, label in variant_labels
                 for engine in OCR_SPACE_ENGINES
             ]
+            if (veryfi_result := ocr_results.get(("Veryfi", "api"))) is not None:
+                result_lines.append(f"نتيجة Veryfi عند التعارض: `{veryfi_result}`")
             if gemini_result:
                 result_lines.append(f"نتيجة Gemini الاحتياطية: `{gemini_result}`")
             if openrouter_result:
