@@ -1,6 +1,6 @@
 """Lightweight, experimental, character-wise CAPTCHA OCR using Pillow only.
 
-The model is trained from captcha_samples/label.csv by train_local_ocr.py.
+The model is trained from samples/label.csv by train_local_ocr.py.
 It classifies digits independently, so it can form sequences not seen during
 training. The full-number baseline is evaluated by the trainer but is not used
 for inference because it can only retrieve stored answers.

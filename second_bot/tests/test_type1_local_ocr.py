@@ -65,9 +65,9 @@ class Type1LocalOCRTests(unittest.TestCase):
             self.assertTrue(all(features[variant]))
 
     def test_real_dataset_images_can_be_featured(self):
-        sample = Path(__file__).resolve().parents[2] / "captcha_samples" / "type1_01.webp"
+        sample = Path(__file__).resolve().parents[2] / "samples" / "type1_01.webp"
         if not sample.is_file():
-            self.skipTest("captcha_samples are not available")
+            self.skipTest("samples directory is not available")
         features = extract_features(sample)
         self.assertEqual(len(features["contrast"]), CELL_COUNT)
 

@@ -187,7 +187,7 @@ def save_debug_images(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", type=Path, default=Path(__file__).resolve().parent.parent / "captcha_samples")
+    parser.add_argument("--data", type=Path, default=Path(__file__).resolve().parent.parent / "samples")
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent / "models" / "type1_local_ocr_model.json")
     parser.add_argument("--evaluate-only", action="store_true")
     parser.add_argument(

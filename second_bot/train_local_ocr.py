@@ -201,7 +201,7 @@ def build_model(prepared: list[dict[str, Any]], validation: dict[str, Any]) -> d
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", type=Path, default=Path(__file__).resolve().parent.parent / "captcha_samples")
+    parser.add_argument("--data", type=Path, default=Path(__file__).resolve().parent.parent / "samples")
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent / "models" / "local_ocr_model.json")
     parser.add_argument("--evaluate-only", action="store_true", help="Run both evaluations without writing a model")
     args = parser.parse_args()

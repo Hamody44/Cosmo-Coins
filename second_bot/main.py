@@ -582,7 +582,7 @@ async def extract_numbers_with_ocr_space_variants(
 
 
 def load_type1_test_samples(samples_dir: Path) -> list[dict[str, str]]:
-    """Load and validate type1 image labels from a captcha_samples directory."""
+    """Load and validate type1 image labels from the samples directory."""
     label_path = samples_dir / "label.csv"
     with label_path.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -1531,7 +1531,7 @@ async def testall(ctx: commands.Context) -> None:
         return
 
     async with TYPE1_TEST_LOCK:
-        samples_dir = BASE_DIR.parent / "captcha_samples"
+        samples_dir = BASE_DIR.parent / "samples"
         try:
             samples = load_type1_test_samples(samples_dir)
             dataset_fingerprint = fingerprint_type1_dataset(samples_dir, samples)

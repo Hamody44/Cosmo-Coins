@@ -332,7 +332,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_prepare_ocr_space_variants_converts_to_png(self):
-        image_bytes = (Path(__file__).resolve().parents[2] / "captcha_samples" / "type1_01.webp").read_bytes()
+        image_bytes = (Path(__file__).resolve().parents[2] / "samples" / "type1_01.webp").read_bytes()
         original_png, enhanced_png, otsu_png, adaptive_png = main.prepare_ocr_space_variants(image_bytes)
         self.assertTrue(original_png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(enhanced_png.startswith(b"\x89PNG\r\n\x1a\n"))
@@ -480,9 +480,9 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
             main.parse_openrouter_numbers_response("Maybe 12345 or 54321")
 
     def test_type1_dataset_reader_loads_only_labeled_type1_images(self):
-        sample_dir = Path(__file__).resolve().parents[2] / "captcha_samples"
+        sample_dir = Path(__file__).resolve().parents[2] / "samples"
         samples = main.load_type1_test_samples(sample_dir)
-        self.assertEqual(len(samples), 100)
+        self.assertEqual(len(samples), 170)
         self.assertTrue(all(row["type"] == "type1" for row in samples))
 
     def test_preprocessing_update_invalidates_old_testall_checkpoint(self):
@@ -558,7 +558,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_testall_uses_engine_three_and_sends_csv_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            sample_dir = root / "captcha_samples"
+            sample_dir = root / "samples"
             sample_dir.mkdir()
             (sample_dir / "one.webp").write_bytes(b"first")
             (sample_dir / "two.webp").write_bytes(b"second")
@@ -587,7 +587,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_testall_stops_on_429_and_reports_provider_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            sample_dir = root / "captcha_samples"
+            sample_dir = root / "samples"
             sample_dir.mkdir()
             (sample_dir / "one.webp").write_bytes(b"first")
             (sample_dir / "label.csv").write_text(
@@ -612,7 +612,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_testall_resumes_at_failed_variant_and_restarts_after_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            sample_dir = root / "captcha_samples"
+            sample_dir = root / "samples"
             sample_dir.mkdir()
             (sample_dir / "one.webp").write_bytes(b"first")
             (sample_dir / "two.webp").write_bytes(b"second")

@@ -13,7 +13,7 @@ from local_ocr import (
 from train_local_ocr import make_templates, prepare_rows, read_dataset
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = ROOT / "captcha_samples"
+DATA_DIR = ROOT / "samples"
 MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "local_ocr_model.json"
 
 
