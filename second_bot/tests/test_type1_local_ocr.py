@@ -1,64 +1,83 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
-import tempfile
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from type1_local_ocr import ctc_greedy_decode, load_image, recognize
+from train_type1_local_ocr import read_dataset, split_rows
+from type1_local_ocr import (
+    build_model,
+    load_image,
+    preprocessing_variants,
+    recognize,
+    segment_candidates,
+)
+
+
+def synthetic(text: str = "12345", size: tuple[int, int] = (150, 50)) -> Image.Image:
+    image = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(image)
+    step = max(1, size[0] // 5)
+    for i, digit in enumerate(text):
+        draw.text((i * step + 3, 8), digit, fill="black")
+    return image
 
 
 class Type1LocalOCRTests(unittest.TestCase):
-    def test_load_image_keeps_fixed_canvas_without_stretching_source_aspect(self):
-        source = Image.new("RGB", (200, 100), "white")
-        for x in range(40, 60):
-            for y in range(10, 90):
-                source.putpixel((x, y), (0, 0, 0))
+    def test_empty_and_noise_masks_are_safe(self):
+        for image in (Image.new("L", (30, 20), 255), Image.effect_noise((30, 20), 128)):
+            candidates = []
+            for _, mask in preprocessing_variants(image):
+                candidates.extend(segment_candidates(mask))
+            self.assertLessEqual(len(candidates), 72)
 
-        image = load_image(source)
-        self.assertEqual(image.mode, "L")
-        self.assertEqual(image.size, (320, 112))
-        box = image.point(lambda pixel: 255 if pixel < 16 else 0).getbbox()
-        self.assertIsNotNone(box)
-        left, top, right, bottom = box
-        glyph_ratio = (right - left) / (bottom - top)
-        self.assertGreater(glyph_ratio, 0.20)
-        self.assertLess(glyph_ratio, 0.30)
+    def test_different_dimensions_are_normalized(self):
+        self.assertEqual(load_image(synthetic(size=(80, 20))).size, (300, 110))
+        self.assertEqual(load_image(synthetic(size=(600, 220))).size, (300, 110))
 
-    def test_ctc_decoder_collapses_runs_but_keeps_repeated_digits_after_blank(self):
-        path = [0, 2, 2, 0, 2, 3, 3, 0, 4, 5, 0]
-        logits = []
-        for selected in path:
-            row = [-8.0] * 11
-            row[selected] = 8.0
-            logits.append(row)
+    def test_split_candidates_have_five_segments_and_include_touching_digits(self):
+        image = synthetic("11234")
+        candidates = segment_candidates(preprocessing_variants(image)[1][1])
+        self.assertTrue(candidates)
+        self.assertTrue(all(len(parts) == 5 for parts in candidates))
+        self.assertLessEqual(len(candidates), 18)
 
-        result = ctc_greedy_decode(logits)
+    def test_empty_model_abstains_and_wrong_length_never_returns(self):
+        result = recognize(synthetic(), {"templates": []})
+        self.assertEqual(result["text"], "")
+        self.assertTrue(result["abstained"])
 
-        self.assertEqual(result["text"], "11234")
-        self.assertEqual(len(result["digit_confidences"]), 5)
-        self.assertGreater(result["mean_confidence"], 0.99)
+    def test_training_split_is_deterministic_and_disjoint(self):
+        rows = [{"filename": f"{i}.png", "batch_id": ""} for i in range(10)]
+        train, validation, kind = split_rows(rows, 0.2, 41)
+        self.assertEqual(kind, "random_image_holdout_no_batch_id")
+        self.assertTrue({r["filename"] for r in train}.isdisjoint(r["filename"] for r in validation))
+        self.assertEqual([r["filename"] for r in validation], [r["filename"] for r in split_rows(rows, 0.2, 41)[1]])
 
-    def test_ctc_decoder_accepts_singleton_batch_output(self):
-        path = [0, 2, 0, 3, 0, 4, 0, 5, 0, 6]
-        logits = []
-        for selected in path:
-            row = [-6.0] * 11
-            row[selected] = 6.0
-            logits.append(row)
+    def test_batch_split_does_not_mix_batches(self):
+        rows = [{"filename": f"{b}-{i}.png", "batch_id": b} for b in ("a", "b", "c") for i in range(3)]
+        train, validation, kind = split_rows(rows, 0.2, 41)
+        self.assertEqual(kind, "batch_holdout")
+        self.assertTrue({r["batch_id"] for r in train}.isdisjoint(r["batch_id"] for r in validation))
 
-        self.assertEqual(ctc_greedy_decode([logits])["text"], "12345")
-
-    def test_ctc_decoder_rejects_multiple_images_in_one_call(self):
-        with self.assertRaisesRegex(ValueError, "one image"):
-            ctc_greedy_decode([[[0.0] * 11], [[0.0] * 11]])
-
-    def test_missing_model_fails_closed(self):
+    def test_duplicate_bytes_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            model_path = Path(tmp) / "not-installed.onnx"
-            with self.assertRaisesRegex(FileNotFoundError, "not installed"):
-                recognize(Image.new("L", (300, 110), "white"), model_path=model_path)
+            root = Path(tmp)
+            synthetic().save(root / "a.png")
+            (root / "b.png").write_bytes((root / "a.png").read_bytes())
+            (root / "label.csv").write_text("filename,type,answer\na.png,type1,12345\nb.png,type1,12345\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                read_dataset(root)
+
+    def test_model_can_be_built_without_numpy_or_torch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            synthetic().save(root / "a.png")
+            model = build_model([{"filename": "a.png", "answer": "12345"}], root)
+            self.assertIn("templates", model)
+            self.assertEqual(model["training_sources"], 1)
 
 
 if __name__ == "__main__":

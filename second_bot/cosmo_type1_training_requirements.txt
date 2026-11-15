@@ -1,8 +1,0 @@
-# Optional dependencies for type1 sequence OCR training/export only.
-# They are intentionally separate from the Discord bot's runtime lock file.
-numpy>=1.26,<3
-Pillow>=10.0,<13.0
-torch>=2.5,<3.0
-onnx>=1.16,<2.0
-onnxscript>=0.3,<1.0
-onnxruntime>=1.18,<2.0
