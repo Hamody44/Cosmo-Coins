@@ -892,15 +892,36 @@ def attachment_image_mime_type(attachment) -> str | None:
 
 
 def parse_numbers_response(content: str) -> list[str]:
-    """Parse Gemini JSON, tolerating Markdown code fences around the JSON."""
-    cleaned = content.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE).strip()
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Gemini returned invalid JSON for the image") from exc
+    """Parse Gemini JSON while tolerating fences and surrounding text."""
+    cleaned = (content or "").strip()
+    cleaned = re.sub(
+        r"```(?:json)?\s*|\s*```",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    candidates = [cleaned]
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(cleaned[start:end + 1])
+
+    payload = None
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+            break
+        except json.JSONDecodeError:
+            continue
+
     if not isinstance(payload, dict):
-        raise RuntimeError("Gemini returned an invalid response object")
+        five_digit_values = list(
+            dict.fromkeys(re.findall(r"(?<!\d)[0-9]{5}(?!\d)", cleaned))
+        )
+        if len(five_digit_values) == 1:
+            return five_digit_values
+        raise RuntimeError("Gemini returned invalid JSON for the image")
     numbers = payload.get("numbers", [])
     if not isinstance(numbers, list):
         raise RuntimeError("Gemini returned an invalid numbers list")
@@ -1236,9 +1257,11 @@ async def extract_numbers_from_image(
     api_key, configured_model = load_vision_config()
     selected_model = model or configured_model
     prompt = (
-        "استخرج كل الأرقام الظاهرة في الصورة. أعد JSON صالحًا فقط بهذا الشكل: "
-        '{"numbers":["..."]}. ضع كل رقم أو قيمة رقمية في عنصر مستقل، وحافظ على ترتيب الظهور. '
-        "لا تخمّن أرقامًا غير واضحة، ولا تضع أي نص آخر داخل JSON."
+        "اقرأ رمز CAPTCHA المكوّن من خمسة أرقام فقط. "
+        "أعد كائن JSON صالحًا فقط، دون Markdown أو شرح، بهذا الشكل بالضبط: "
+        '{"numbers":["12345"]}. '
+        "يجب أن تحتوي numbers على عنصر واحد فقط. "
+        "إذا لم تكن متأكدًا، أعد numbers كمصفوفة فارغة."
     )
 
     if client is not None:
