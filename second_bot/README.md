@@ -104,9 +104,40 @@ PYTHONPATH=second_bot python3 second_bot/evaluate_type1_rgb.py \
 
 إذا لم تتوفر `batch_id`، يكون التقسيم عشوائيًا ثابتًا وليس اختبارًا مستقلًا حسب دفعات الجمع. لا تُضاف تبعيات خاصة بالتجربة؛ Pillow موجودة ضمن قفل متطلبات المشروع.
 
+## مكتبة OCR المحلية المستقلة لـType1
+
+أعيد تنظيم OCR المحلي للنوع الأول في `type1_ocr/` بواجهة Python قابلة للاختبار وإعادة الاستخدام. تعتمد المكتبة على Pillow والمكتبة القياسية فقط، وتدعم PNG وWebP، وتفصل التحميل والمعالجة الأولية والتقطيع والسمات والقوالب والثقة. لا تحتوي المكتبة على OCR.Space أو Gemini؛ تظل مزودات OCR الاحتياطية ضمن `main.py`. بقيت الملفات `type1_local_ocr.py` و`train_type1_local_ocr.py` و`evaluate_type1_rgb.py` كواجهات توافق لأن البوت والاختبارات والوثائق الحالية تستوردها.
+
+اقرأ مجموعة البيانات أو درّب مرشحًا محليًا بأوامر مستقلة:
+
+```bash
+python3 second_bot/tools/inspect_type1_dataset.py --data samples
+python3 second_bot/tools/train_type1.py --data samples
+python3 second_bot/tools/evaluate_type1.py --data samples
+python3 second_bot/tools/evaluate_type1_rgb.py --data samples --variants blue --max-candidates 6
+```
+
+يقبل قارئ البيانات صفوف `type1` فقط (309 عينة في البيانات الحالية)، ويستبعد صفوف `type2`، ولا يكتب التدريب إلى `models/type1_local_ocr.json` المستخدم اختياريًا في البوت. يوضع المرشح افتراضيًا في `models/candidates/type1_local_ocr_candidate.json` ويظل `production_enabled: false`؛ لا توجد آلية ترقية أو تفعيل تلقائي. التقسيم العشوائي لصورة داخل المجموعة لا يثبت التكافؤ مع OCR.Space/Gemini أو التعميم على دفعة مستقلة، لذا يجب إبقاء مسار البوت الحالي كما هو حتى ينجح تقييم مستقل موثق. واجهة `safe_consensus` ترفض النتائج المنفردة أو منخفضة الثقة أو المتعارضة كي يستطيع التطبيق مواصلة fallback القائم.
+
+في تقييم seed `41` الحالي دُرّبت القوالب على 247 صورة واختُبرت على 62 صورة من تقسيم عشوائي بلا `batch_id`: كانت دقة التسلسل الكامل `0/62`، ودقة المحارف `23.87%`، مع 4 حالات امتناع. هذا أقل من خط الأساس التاريخي المذكور أعلاه (`27.5%` على 170 صورة)، مع اختلاف التقسيم والحجم فلا تُعد مقارنة مباشرة؛ لكنه لا يثبت تحسنًا، ولذلك تبقى بوابة التفعيل مغلقة.
+
+تشغيل اختبارات second_bot:
+
+```bash
+cd second_bot
+python3 -m unittest discover -s tests -v
+```
+
 ## تنظيف الملفات غير المستخدمة
 
 لا يمكن تحديد أن ملف Python غير مستخدم بشكل موثوق من خلال الاسم فقط، خصوصًا لأن `cogs/` تُحمّل ديناميكيًا. لذلك يوجد `cleanup_unused_files.py` في جذر المشروع بوضع معاينة افتراضي، ولا يلمس قواعد البيانات أو ملفات `.env` أو `.runtime` أو النسخ الاحتياطية أو البيئات الافتراضية أو المكتبات المثبتة داخلها.
+
+توجد أيضًا أداة تدقيق محدودة بـ`second_bot/`؛ تعرض مراجع ملفات التوافق ولا تحذف أي مصدر أو نموذج أو صورة أو اختبار. في حال استخدام `--apply` تحفظ التقرير المحدد أولًا، ثم تزيل فقط `__pycache__` وملفات `.pyc`/`.pyo`:
+
+```bash
+python3 second_bot/tools/cleanup_unused.py --report /tmp/second-bot-cleanup.json
+python3 second_bot/tools/cleanup_unused.py --apply --report /tmp/second-bot-cleanup.json
+```
 
 اعرض المخلفات القابلة للحذف والملفات المصدر التي تبدو غير مرتبطة دون حذف أي شيء:
 
