@@ -28,6 +28,8 @@ from google.genai import types
 from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
 from local_ocr import detect_style, load_image, load_model, recognize
+from evaluate_type1_rgb import channel_variants, mask_variants
+from type1_local_ocr import _feature, segment_candidates
 
 BASE_DIR = Path(__file__).resolve().parent
 RUN_BOTS_SCRIPT = BASE_DIR.parent / "run_bots.sh"
@@ -60,6 +62,8 @@ LEGACY_GEMINI_MODEL_REPLACEMENTS = {
 }
 DEFAULT_OPENROUTER_MODEL = "openrouter/free"
 VISION_REQUEST_TIMEOUT_SECONDS = 20
+TYPE1_AI_TIMEOUT_SECONDS = 8
+TYPE1_LOCAL_MODEL_PATH = BASE_DIR / "models" / "type1_local_ocr.json"
 OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
 OCR_SPACE_TIMEOUT_SECONDS = 20
 OCR_SPACE_ENGINES = ("3",)
@@ -353,6 +357,75 @@ def extract_numbers_locally(image_bytes: bytes) -> list[str] | None:
         return None
     logger.info("Using local OCR for type2 image: %s", text)
     return [text]
+
+
+def _type1_local_model() -> dict:
+    """Load the optional type1 template model without affecting type2."""
+    model_path = Path(os.getenv("TYPE1_LOCAL_OCR_MODEL", str(TYPE1_LOCAL_MODEL_PATH))).expanduser()
+    if not model_path.is_file():
+        raise FileNotFoundError(f"Type1 local OCR model is not installed: {model_path}")
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("templates"), list):
+        raise ValueError(f"Invalid type1 local OCR model: {model_path}")
+    return payload
+
+
+def _predict_type1_features(features: list[list[float]], model: dict) -> tuple[str, float] | None:
+    if len(features) != 5:
+        return None
+    templates = model.get("templates", [])
+    output: list[str] = []
+    costs: list[float] = []
+    for position, feature in enumerate(features):
+        ranked: list[tuple[float, str]] = []
+        for digit in "0123456789":
+            candidates = [
+                item for item in templates
+                if item.get("position") == position and str(item.get("digit")) == digit
+            ]
+            distances = []
+            for item in candidates:
+                reference = item.get("feature")
+                if isinstance(reference, list) and len(reference) == len(feature):
+                    distances.append(math.sqrt(sum((a - b) ** 2 for a, b in zip(feature, reference)) / len(feature)))
+            if distances:
+                ranked.append((min(distances), digit))
+        if not ranked:
+            return None
+        ranked.sort(key=lambda item: (item[0], item[1]))
+        costs.append(ranked[0][0])
+        output.append(ranked[0][1])
+    return "".join(output), sum(costs) / len(costs)
+
+
+def extract_type1_local_candidates(image_bytes: bytes) -> dict[str, str | None]:
+    """Read type1 through independent red and blue RGB candidates.
+
+    The model is optional because deployments may not have trained templates yet;
+    an unavailable/invalid model becomes an abstention rather than a bot error.
+    """
+    try:
+        model = _type1_local_model()
+        image = load_image(image_bytes)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.info("Type1 local OCR unavailable: %s", exc)
+        return {"red": None, "blue": None}
+    results: dict[str, str | None] = {}
+    for name in ("red", "blue"):
+        best: tuple[float, str] | None = None
+        try:
+            channels = [gray for variant, gray in channel_variants(image) if variant == name]
+            for channel in channels:
+                for _, mask in mask_variants(channel, thresholds=(105, 135, 165)):
+                    for segments in segment_candidates(mask, max_candidates=6):
+                        prediction = _predict_type1_features([_feature(part) for part in segments], model)
+                        if prediction and (best is None or prediction[1] < best[0]):
+                            best = (prediction[1], prediction[0])
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("Type1 local %s OCR failed: %s", name, exc)
+        results[name] = best[1] if best and re.fullmatch(r"[0-9]{5}", best[1]) else None
+    logger.info("Type1 local candidates: red=%s blue=%s", results["red"], results["blue"])
+    return results
 
 
 def detect_image_style(image_bytes: bytes) -> str:
@@ -1076,6 +1149,82 @@ async def extract_type1_with_fallback(
     )
 
 
+def _type1_ai_timeout() -> float:
+    try:
+        return max(1.0, float(os.getenv("TYPE1_AI_TIMEOUT_SECONDS", str(TYPE1_AI_TIMEOUT_SECONDS))))
+    except ValueError:
+        return float(TYPE1_AI_TIMEOUT_SECONDS)
+
+
+async def extract_type1_hybrid(
+    image_bytes: bytes,
+    mime_type: str,
+    *,
+    ocr_space_key: str,
+) -> dict[str, object]:
+    """Resolve type1 using local RGB consensus, OCR.Space agreement, then AI.
+
+    OCR.Space is never accepted as an independent answer: it must equal the
+    red or blue local candidate.  AI is called only after that evidence fails.
+    """
+    local = extract_type1_local_candidates(image_bytes)
+    red, blue = local.get("red"), local.get("blue")
+    if red and blue and red == blue:
+        return {"result": red, "source": "local consensus", "local": local, "ocr": {}}
+
+    ocr_results: dict[tuple[str, str], str | None] = {}
+    ocr_failure: str | None = None
+    if ocr_space_key:
+        try:
+            ocr_results = await extract_numbers_with_ocr_space_variants(
+                image_bytes, api_key=ocr_space_key
+            )
+            local_values = {value for value in (red, blue) if value}
+            matching = [value for value in ocr_results.values() if value and value in local_values]
+            if matching:
+                return {
+                    "result": matching[0], "source": "OCR.Space matched local",
+                    "local": local, "ocr": ocr_results,
+                }
+            ocr_failure = "OCR.Space did not match red or blue local OCR"
+        except (RuntimeError, asyncio.TimeoutError) as exc:
+            ocr_failure = str(exc)
+            logger.warning("OCR.Space failed in type1 hybrid path: %s", exc)
+    else:
+        ocr_failure = "OCR_SPACE_API_KEY is missing"
+
+    gemini_key, gemini_model = load_vision_config()
+    if gemini_key:
+        try:
+            ai_values = await asyncio.wait_for(
+                extract_numbers_from_image(image_bytes, mime_type, model=gemini_model),
+                timeout=_type1_ai_timeout(),
+            )
+            ai_result = first_five_digit_result(ai_values)
+            if ai_result and re.fullmatch(r"[0-9]{5}", ai_result):
+                return {
+                    "result": ai_result, "source": "Gemini AI",
+                    "local": local, "ocr": ocr_results,
+                }
+            ai_failure = "Gemini returned no valid ASCII five-digit result"
+        except asyncio.TimeoutError:
+            ai_failure = f"Gemini timed out after {_type1_ai_timeout():g} seconds"
+        except RuntimeError as exc:
+            ai_failure = str(exc)
+        logger.warning("Type1 AI fallback unavailable: %s", ai_failure)
+    else:
+        ai_failure = "GEMINI_API_KEY is missing"
+
+    fallback = next((value for value in (red, blue) if value and re.fullmatch(r"[0-9]{5}", value)), None)
+    return {
+        "result": fallback,
+        "source": "local unverified" if fallback else "none",
+        "local": local,
+        "ocr": ocr_results,
+        "failure": "; ".join(item for item in (ocr_failure, ai_failure) if item),
+    }
+
+
 async def extract_numbers_from_image(
     image_bytes: bytes,
     mime_type: str,
@@ -1452,32 +1601,25 @@ async def numbers(ctx: commands.Context) -> None:
                 return
         else:
             ocr_space_key = os.getenv("OCR_SPACE_API_KEY", "").strip()
-            ocr_results, gemini_result, openrouter_result = await extract_type1_with_fallback(
+            hybrid = await extract_type1_hybrid(
                 image_bytes,
                 mime_type,
                 ocr_space_key=ocr_space_key,
             )
-            variant_labels = (
-                ("before contrast", "قبل تحسين التباين"),
-                ("after contrast", "بعد تحسين التباين"),
-                ("upscaled otsu", "بعد التكبير وعتبة Otsu"),
-                ("adaptive threshold", "بعد العتبة المحلية التكيفية"),
-            )
-            result_lines = [
-                f"{label} (المحرك {engine}): `{ocr_results.get((variant, engine)) or 'لم تُقرأ خمسة أرقام'}`"
-                for variant, label in variant_labels
-                for engine in OCR_SPACE_ENGINES
-            ]
-            if (veryfi_result := ocr_results.get(("Veryfi", "api"))) is not None:
-                result_lines.append(f"نتيجة Veryfi عند التعارض: `{veryfi_result}`")
-            if gemini_result:
-                result_lines.append(f"نتيجة Gemini الاحتياطية: `{gemini_result}`")
-            if openrouter_result:
-                result_lines.append(f"نتيجة OpenRouter الاحتياطية: `{openrouter_result}`")
-            await ctx.send(
-                "نتيجة قراءة النوع الأول:\n" + "\n".join(result_lines),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            result = hybrid.get("result")
+            if result:
+                local = hybrid.get("local", {})
+                red_result = local.get("red") if isinstance(local, dict) else None
+                blue_result = local.get("blue") if isinstance(local, dict) else None
+                await ctx.send(
+                    f"نتيجة قراءة النوع الأول: `{result}`\n"
+                    f"المصدر: {hybrid.get('source', 'غير معروف')}\n"
+                    f"المحلي — الأحمر: `{red_result or 'غير موثوق'}`، "
+                    f"الأزرق: `{blue_result or 'غير موثوق'}`",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                await send_notice(ctx, "تعذر قراءة خمسة أرقام للنوع الأول ضمن المهلة المحددة.")
             return
     except RuntimeError as exc:
         logger.warning("Image number extraction failed: %s", exc)
