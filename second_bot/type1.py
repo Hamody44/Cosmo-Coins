@@ -197,6 +197,54 @@ def extract_fixed_digits(
             for i in range(count)]
 
 
+def extract_shifted_digits(
+    gray: np.ndarray,
+    thresholds: Sequence[int],
+    templates: Sequence[Mapping[str | int, Sequence[np.ndarray]]],
+    *,
+    margin: float = 0.10,
+    local_shift: int = 6,
+) -> list[np.ndarray]:
+    """Choose locally shifted cell bounds by minimum template distance.
+
+    Each nominal cell boundary is searched independently within ``local_shift``
+    pixels.  The best crop is selected against the corresponding position's
+    template bank, which corrects small glyph drift without running a costly
+    global segmentation search.
+    """
+    image = np.asarray(gray)
+    if image.ndim != 2 or len(thresholds) != 5 or len(templates) != 5:
+        raise ValueError("gray image, thresholds, and templates must have five positions")
+    if local_shift < 0:
+        raise ValueError("local_shift must be non-negative")
+    height, width = image.shape
+    left, right = round(width * margin), round(width * (1.0 - margin))
+    nominal = [left + (right - left) * i // 5 for i in range(6)]
+    output: list[np.ndarray] = []
+    for position in range(5):
+        start0, end0 = nominal[position], nominal[position + 1]
+        best: tuple[float, np.ndarray] | None = None
+        # Translate the whole nominal cell together. This evaluates only
+        # ``2 * local_shift + 1`` candidates instead of a quadratic boundary
+        # grid, while correcting the dominant per-cell alignment drift.
+        for delta in range(-local_shift, local_shift + 1):
+            start, end = start0 + delta, end0 + delta
+            if start < left or end > right or end - start < 2:
+                continue
+            crop = image[:, start:end] <= int(thresholds[position])
+            distance = min(
+                hamming_distance(normalize_glyph(crop), template)
+                for values in templates[position].values()
+                for template in values
+            )
+            if best is None or distance < best[0]:
+                best = (distance, crop.copy())
+        if best is None:
+            raise ValueError(f"could not find a crop for position {position}")
+        output.append(best[1])
+    return output
+
+
 def _trim_ink(mask: np.ndarray) -> np.ndarray:
     """Remove empty border rows/columns before comparing glyph geometry."""
     array = np.asarray(mask, dtype=bool)
@@ -322,11 +370,19 @@ def recognize_bmp(
     threshold: int = DEFAULT_THRESHOLD,
     templates: Mapping[str | int, np.ndarray] | Sequence[Mapping[str | int, Sequence[np.ndarray]]] | None = None,
     min_pixels: int = 1,
+    position_thresholds: Sequence[int] | None = None,
+    local_shift: int = 0,
 ) -> tuple[str, list[float]]:
     """Read a BMP, segment its digits, and return text plus per-digit scores."""
-    _, binary = read_bmp(source, threshold=threshold)
+    gray, binary = read_bmp(source, threshold=threshold)
     if templates is not None and isinstance(templates, Sequence) and not isinstance(templates, (str, bytes, bytearray, np.ndarray)):
-        glyphs = extract_fixed_digits(binary, count=len(templates))
+        if position_thresholds is not None or local_shift:
+            thresholds = tuple(position_thresholds or (threshold,) * 5)
+            if len(thresholds) != 5:
+                raise ValueError("position_thresholds must contain five values")
+            glyphs = extract_shifted_digits(gray, thresholds, templates, local_shift=local_shift)
+        else:
+            glyphs = extract_fixed_digits(binary, count=len(templates))
         matches = [match_position(glyph, templates[index]) for index, glyph in enumerate(glyphs)]
     else:
         glyphs = extract_digits(binary, min_pixels=min_pixels)
@@ -346,6 +402,7 @@ __all__ = [
     "build_template_bank",
     "extract_digits",
     "extract_fixed_digits",
+    "extract_shifted_digits",
     "hamming_distance",
     "load_template_bank",
     "match_digit",

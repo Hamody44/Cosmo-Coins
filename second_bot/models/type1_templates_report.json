@@ -2,16 +2,158 @@
   "sources": 309,
   "training_sources": 247,
   "validation_sources": 62,
-  "threshold": 192,
+  "inner_training_sources": 198,
+  "inner_validation_sources": 49,
+  "position_thresholds": [
+    224,
+    160,
+    192,
+    192,
+    224
+  ],
   "margin": 0.1,
+  "local_shift": 0,
   "template_shape": [
     32,
     24
   ],
-  "templates_per_position_and_digit": "variable bank from real labelled glyphs",
-  "validation_exact_accuracy": 0.1774193548387097,
-  "validation_digit_accuracy": 0.6483870967741936,
+  "validation_exact_accuracy": 0.22580645161290322,
+  "validation_digit_accuracy": 0.6548387096774193,
   "full_dataset_exact_accuracy": 1.0,
   "full_dataset_digit_accuracy": 1.0,
+  "threshold_tuning": [
+    {
+      "position": 0,
+      "candidates": [
+        {
+          "threshold": 160,
+          "exact": 0,
+          "correct": 64
+        },
+        {
+          "threshold": 192,
+          "exact": 0,
+          "correct": 65
+        },
+        {
+          "threshold": 224,
+          "exact": 0,
+          "correct": 68
+        }
+      ],
+      "selected": 224
+    },
+    {
+      "position": 1,
+      "candidates": [
+        {
+          "threshold": 160,
+          "exact": 0,
+          "correct": 70
+        },
+        {
+          "threshold": 192,
+          "exact": 0,
+          "correct": 68
+        },
+        {
+          "threshold": 224,
+          "exact": 0,
+          "correct": 68
+        }
+      ],
+      "selected": 160
+    },
+    {
+      "position": 2,
+      "candidates": [
+        {
+          "threshold": 160,
+          "exact": 0,
+          "correct": 68
+        },
+        {
+          "threshold": 192,
+          "exact": 0,
+          "correct": 70
+        },
+        {
+          "threshold": 224,
+          "exact": 0,
+          "correct": 69
+        }
+      ],
+      "selected": 192
+    },
+    {
+      "position": 3,
+      "candidates": [
+        {
+          "threshold": 160,
+          "exact": 0,
+          "correct": 66
+        },
+        {
+          "threshold": 192,
+          "exact": 0,
+          "correct": 70
+        },
+        {
+          "threshold": 224,
+          "exact": 0,
+          "correct": 66
+        }
+      ],
+      "selected": 192
+    },
+    {
+      "position": 4,
+      "candidates": [
+        {
+          "threshold": 160,
+          "exact": 0,
+          "correct": 68
+        },
+        {
+          "threshold": 192,
+          "exact": 0,
+          "correct": 70
+        },
+        {
+          "threshold": 224,
+          "exact": 0,
+          "correct": 72
+        }
+      ],
+      "selected": 224
+    }
+  ],
+  "shift_tuning": [
+    {
+      "local_shift": 0,
+      "exact": 0,
+      "correct": 72
+    },
+    {
+      "local_shift": 2,
+      "exact": 0,
+      "correct": 69
+    },
+    {
+      "local_shift": 4,
+      "exact": 0,
+      "correct": 66
+    },
+    {
+      "local_shift": 6,
+      "exact": 0,
+      "correct": 63
+    },
+    {
+      "local_shift": 8,
+      "exact": 0,
+      "correct": 62
+    }
+  ],
   "model": "/home/ubuntu/Cosmo-Coins/second_bot/models/type1_templates.npz"
 }
