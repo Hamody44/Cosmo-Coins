@@ -120,6 +120,7 @@ def main() -> int:
     parser.add_argument("--report", type=Path, default=Path(__file__).resolve().parents[1] / "models" / "type1_templates_report.json")
     parser.add_argument("--margin", type=float, default=0.10)
     parser.add_argument("--seed", type=int, default=41)
+    parser.add_argument("--position3-threshold", type=int, default=None)
     args = parser.parse_args()
 
     rows = read_rows(args.data)
@@ -134,6 +135,10 @@ def main() -> int:
     thresholds, inner_training, inner_validation, threshold_trace = tune_thresholds(
         training, images, args.margin, (160, 192, 224), args.seed + 1
     )
+    if args.position3_threshold is not None:
+        if not 0 <= args.position3_threshold <= 255:
+            raise SystemExit("--position3-threshold must be between 0 and 255")
+        thresholds = tuple(list(thresholds[:3]) + [args.position3_threshold] + list(thresholds[4:]))
     local_shift, shift_trace = tune_shift(
         inner_training, inner_validation, images, thresholds, args.margin, (0, 2, 4, 6, 8)
     )

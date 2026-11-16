@@ -244,6 +244,24 @@ def extract_shifted_digits(
         output.append(best[1])
     return output
 
+def local_boundary_candidates(left: int, right: int, *, shifts: Sequence[int] = (-6, -4, -2, 0, 2, 4, 6), minimum_width: int = 2, maximum_width: int | None = None, lower_bound: int = 0, upper_bound: int | None = None) -> list[tuple[int, int]]:
+    """Return bounded independent ``(left, right)`` crop-boundary candidates."""
+    if left < lower_bound or right <= left or minimum_width < 1:
+        raise ValueError("invalid boundary or minimum width")
+    if upper_bound is not None and right > upper_bound:
+        raise ValueError("right boundary exceeds upper bound")
+    result = []
+    for left_shift in shifts:
+        for right_shift in shifts:
+            candidate_left, candidate_right = left + int(left_shift), right + int(right_shift)
+            width = candidate_right - candidate_left
+            if candidate_left < lower_bound or (upper_bound is not None and candidate_right > upper_bound):
+                continue
+            if width < minimum_width or (maximum_width is not None and width > maximum_width):
+                continue
+            result.append((candidate_left, candidate_right))
+    return result
+
 
 def _trim_ink(mask: np.ndarray) -> np.ndarray:
     """Remove empty border rows/columns before comparing glyph geometry."""
@@ -279,6 +297,25 @@ def hamming_distance(glyph: np.ndarray, template: np.ndarray) -> float:
 def normalize_glyph(glyph: np.ndarray, shape: tuple[int, int] = (32, 24)) -> np.ndarray:
     """Trim empty borders and resize one glyph to a template shape."""
     return _resize_nearest(_trim_ink(np.asarray(glyph, dtype=bool)), shape)
+
+def composite_distance(glyph: np.ndarray, template: np.ndarray, *, hamming_weight: float = 0.50, row_weight: float = 0.20, column_weight: float = 0.20, geometry_weight: float = 0.10) -> float:
+    """Compare normalized glyphs using Hamming, projections, and geometry."""
+    weights = (hamming_weight, row_weight, column_weight, geometry_weight)
+    if any(weight < 0 for weight in weights) or not np.isclose(sum(weights), 1.0):
+        raise ValueError("distance weights must be non-negative and sum to one")
+    source, target = normalize_glyph(glyph), normalize_glyph(template)
+    row_source, column_source = projection_profiles(source)
+    row_target, column_target = projection_profiles(target)
+    row_distance = float(np.mean((row_source / source.shape[1] - row_target / target.shape[1]) ** 2))
+    column_distance = float(np.mean((column_source / source.shape[0] - column_target / target.shape[0]) ** 2))
+    geometry = abs(glyph.shape[1] - template.shape[1]) / max(glyph.shape[1], template.shape[1], 1)
+    return float(weights[0] * np.mean(source != target) + weights[1] * row_distance + weights[2] * column_distance + weights[3] * geometry)
+
+def choose_retry_candidate(primary: tuple[str, float], candidates: Sequence[tuple[str, float]], *, margin: float, retry_margin: float = 0.02) -> tuple[str, float]:
+    """Keep the primary match unless its margin is low; then choose the best score."""
+    if margin >= retry_margin or not candidates:
+        return primary
+    return min((primary, *candidates), key=lambda item: (item[1], item[0]))
 
 
 def build_template_bank(
@@ -403,12 +440,15 @@ __all__ = [
     "extract_digits",
     "extract_fixed_digits",
     "extract_shifted_digits",
+    "choose_retry_candidate",
+    "composite_distance",
     "hamming_distance",
     "load_template_bank",
     "match_digit",
     "match_position",
     "normalize_glyph",
     "projection_profiles",
+    "local_boundary_candidates",
     "read_bmp",
     "read_bmp_raw",
     "recognize",

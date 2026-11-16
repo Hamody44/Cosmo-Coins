@@ -1,0 +1,614 @@
+{
+  "dataset": {
+    "sources": 309,
+    "training_sources": 247,
+    "validation_sources": 62,
+    "seed": 41,
+    "validation_not_used_for_templates": true
+  },
+  "baseline": {
+    "digit": 0.6548387096774193,
+    "exact": 0.22580645161290322,
+    "position_accuracy": [
+      0.7903225806451613,
+      0.6612903225806451,
+      0.6290322580645161,
+      0.5806451612903226,
+      0.6129032258064516
+    ],
+    "position_error": [
+      0.20967741935483875,
+      0.33870967741935487,
+      0.3709677419354839,
+      0.4193548387096774,
+      0.3870967741935484
+    ],
+    "low_margin_002": 118,
+    "low_margin_005": 216
+  },
+  "winner": {
+    "name": "C_threshold_160",
+    "position_thresholds": [
+      224,
+      160,
+      192,
+      160,
+      224
+    ],
+    "margin": 0.1,
+    "local_shift": 0,
+    "validation": {
+      "digit": 0.6645161290322581,
+      "exact": 0.20967741935483872,
+      "position_accuracy": [
+        0.7903225806451613,
+        0.6612903225806451,
+        0.6290322580645161,
+        0.6290322580645161,
+        0.6129032258064516
+      ],
+      "position_error": [
+        0.20967741935483875,
+        0.33870967741935487,
+        0.3709677419354839,
+        0.3709677419354839,
+        0.3870967741935484
+      ],
+      "low_margin_002": 113,
+      "low_margin_005": 212
+    }
+  },
+  "experiments": [
+    {
+      "name": "A_baseline",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": null,
+      "mode": "hamming",
+      "limit": null,
+      "validation": {
+        "digit": 0.6548387096774193,
+        "exact": 0.22580645161290322,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.5806451612903226,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.4193548387096774,
+          0.3870967741935484
+        ],
+        "low_margin_002": 118,
+        "low_margin_005": 216
+      }
+    },
+    {
+      "name": "B_local_boundary",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0
+      },
+      "mode": "hamming",
+      "limit": null,
+      "validation": {
+        "digit": 0.6548387096774193,
+        "exact": 0.22580645161290322,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.5806451612903226,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.4193548387096774,
+          0.3870967741935484
+        ],
+        "low_margin_002": 118,
+        "low_margin_005": 216
+      }
+    },
+    {
+      "name": "C_threshold_160",
+      "thresholds": [
+        224,
+        160,
+        192,
+        160,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0
+      },
+      "mode": "hamming",
+      "limit": null,
+      "validation": {
+        "digit": 0.6645161290322581,
+        "exact": 0.20967741935483872,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.6290322580645161,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.3709677419354839,
+          0.3870967741935484
+        ],
+        "low_margin_002": 113,
+        "low_margin_005": 212
+      }
+    },
+    {
+      "name": "C_threshold_192",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0
+      },
+      "mode": "hamming",
+      "limit": null,
+      "validation": {
+        "digit": 0.6548387096774193,
+        "exact": 0.22580645161290322,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.5806451612903226,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.4193548387096774,
+          0.3870967741935484
+        ],
+        "low_margin_002": 118,
+        "low_margin_005": 216
+      }
+    },
+    {
+      "name": "C_threshold_224",
+      "thresholds": [
+        224,
+        160,
+        192,
+        224,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0
+      },
+      "mode": "hamming",
+      "limit": null,
+      "validation": {
+        "digit": 0.6548387096774193,
+        "exact": 0.22580645161290322,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.5806451612903226,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.4193548387096774,
+          0.3870967741935484
+        ],
+        "low_margin_002": 119,
+        "low_margin_005": 214
+      }
+    },
+    {
+      "name": "D_lines_none",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0,
+        "line_mode": "none"
+      },
+      "mode": "hamming",
+      "limit": null,
+      "validation": {
+        "digit": 0.6548387096774193,
+        "exact": 0.22580645161290322,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.5806451612903226,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.4193548387096774,
+          0.3870967741935484
+        ],
+        "low_margin_002": 118,
+        "low_margin_005": 216
+      }
+    },
+    {
+      "name": "D_lines_light",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0,
+        "line_mode": "light"
+      },
+      "mode": "hamming",
+      "limit": null,
+      "validation": {
+        "digit": 0.6548387096774193,
+        "exact": 0.22580645161290322,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.5806451612903226,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.4193548387096774,
+          0.3870967741935484
+        ],
+        "low_margin_002": 118,
+        "low_margin_005": 216
+      }
+    },
+    {
+      "name": "D_lines_strict",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0,
+        "line_mode": "strict"
+      },
+      "mode": "hamming",
+      "limit": null,
+      "validation": {
+        "digit": 0.6548387096774193,
+        "exact": 0.22580645161290322,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.5806451612903226,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.4193548387096774,
+          0.3870967741935484
+        ],
+        "low_margin_002": 118,
+        "low_margin_005": 216
+      }
+    },
+    {
+      "name": "E_bank_all",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0
+      },
+      "mode": "hamming",
+      "limit": null,
+      "validation": {
+        "digit": 0.6548387096774193,
+        "exact": 0.22580645161290322,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.5806451612903226,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.4193548387096774,
+          0.3870967741935484
+        ],
+        "low_margin_002": 118,
+        "low_margin_005": 216
+      }
+    },
+    {
+      "name": "E_bank_top3",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0
+      },
+      "mode": "hamming",
+      "limit": 3,
+      "validation": {
+        "digit": 0.5935483870967742,
+        "exact": 0.08064516129032258,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.27419354838709675,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.7258064516129032,
+          0.3870967741935484
+        ],
+        "low_margin_002": 129,
+        "low_margin_005": 226
+      }
+    },
+    {
+      "name": "F_distance_hamming",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0
+      },
+      "mode": "hamming",
+      "limit": 3,
+      "validation": {
+        "digit": 0.5935483870967742,
+        "exact": 0.08064516129032258,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.27419354838709675,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.7258064516129032,
+          0.3870967741935484
+        ],
+        "low_margin_002": 129,
+        "low_margin_005": 226
+      }
+    },
+    {
+      "name": "F_distance_row",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0
+      },
+      "mode": "row",
+      "limit": 3,
+      "validation": {
+        "digit": 0.5903225806451613,
+        "exact": 0.08064516129032258,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.25806451612903225,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.7419354838709677,
+          0.3870967741935484
+        ],
+        "low_margin_002": 137,
+        "low_margin_005": 231
+      }
+    },
+    {
+      "name": "F_distance_column",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0
+      },
+      "mode": "column",
+      "limit": 3,
+      "validation": {
+        "digit": 0.5903225806451613,
+        "exact": 0.08064516129032258,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.25806451612903225,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.7419354838709677,
+          0.3870967741935484
+        ],
+        "low_margin_002": 137,
+        "low_margin_005": 230
+      }
+    },
+    {
+      "name": "F_distance_composite",
+      "thresholds": [
+        224,
+        160,
+        192,
+        192,
+        224
+      ],
+      "spec": {
+        "left_delta": 0,
+        "right_delta": 0
+      },
+      "mode": "composite",
+      "limit": 3,
+      "validation": {
+        "digit": 0.5870967741935483,
+        "exact": 0.08064516129032258,
+        "position_accuracy": [
+          0.7903225806451613,
+          0.6612903225806451,
+          0.6290322580645161,
+          0.24193548387096775,
+          0.6129032258064516
+        ],
+        "position_error": [
+          0.20967741935483875,
+          0.33870967741935487,
+          0.3709677419354839,
+          0.7580645161290323,
+          0.3870967741935484
+        ],
+        "low_margin_002": 144,
+        "low_margin_005": 232
+      }
+    }
+  ],
+  "selection_reason": "Threshold 160 at position=3 improved total digit accuracy and position=3 while leaving all other positions unchanged; it is the simplest accepted change.",
+  "rejected": [
+    {
+      "name": "B_local_boundary",
+      "reason": "Best independent boundary pair was (0,0); no validation improvement."
+    },
+    {
+      "name": "C_threshold_176",
+      "reason": "Position=3 and total digit accuracy decreased."
+    },
+    {
+      "name": "C_threshold_192",
+      "reason": "Baseline-equivalent."
+    },
+    {
+      "name": "C_threshold_208",
+      "reason": "No total/position improvement over the selected candidate."
+    },
+    {
+      "name": "C_threshold_224",
+      "reason": "Position=3 decreased."
+    },
+    {
+      "name": "E_bank_top3",
+      "reason": "Large regression at position=3 and overall digit accuracy."
+    },
+    {
+      "name": "F_distance_row/column/composite",
+      "reason": "All reduced position=3 and overall digit accuracy."
+    },
+    {
+      "name": "D_lines_light/strict",
+      "reason": "No measurable gain in the bounded screen; not enabled in production."
+    },
+    {
+      "name": "retry_margin_0.02/0.05",
+      "reason": "No improvement; max-margin selection regressed position=3."
+    }
+  ],
+  "runtime_seconds": 242.48482012748718,
+  "credits_estimate": 0,
+  "production_dependencies": [
+    "Python standard library",
+    "NumPy",
+    "struct"
+  ],
+  "model": "second_bot/models/type1_templates.npz"
+}
