@@ -1,0 +1,17 @@
+{
+  "sources": 309,
+  "training_sources": 247,
+  "validation_sources": 62,
+  "threshold": 192,
+  "margin": 0.1,
+  "template_shape": [
+    32,
+    24
+  ],
+  "templates_per_position_and_digit": "variable bank from real labelled glyphs",
+  "validation_exact_accuracy": 0.1774193548387097,
+  "validation_digit_accuracy": 0.6483870967741936,
+  "full_dataset_exact_accuracy": 1.0,
+  "full_dataset_digit_accuracy": 1.0,
+  "model": "/home/ubuntu/Cosmo-Coins/second_bot/models/type1_templates.npz"
+}

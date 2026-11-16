@@ -175,6 +175,28 @@ def extract_digits(
     return result
 
 
+def extract_fixed_digits(
+    binary: np.ndarray,
+    *,
+    count: int = 5,
+    margin: float = 0.10,
+) -> list[np.ndarray]:
+    """Split a fixed-width Type1 image into equally spaced digit regions.
+
+    Type1 images contain crossing lines that can join adjacent digits, making
+    gap-based projection segmentation unreliable.  The labelled dataset uses
+    a stable five-cell layout, so this fallback intentionally preserves each
+    cell's geometry instead of looking for empty columns.
+    """
+    mask = np.asarray(binary, dtype=bool)
+    if mask.ndim != 2 or count < 1 or not 0 <= margin < 0.5:
+        raise ValueError("invalid binary image, count, or margin")
+    width = mask.shape[1]
+    left, right = round(width * margin), round(width * (1.0 - margin))
+    return [mask[:, left + (right - left) * i // count : left + (right - left) * (i + 1) // count].copy()
+            for i in range(count)]
+
+
 def _trim_ink(mask: np.ndarray) -> np.ndarray:
     """Remove empty border rows/columns before comparing glyph geometry."""
     array = np.asarray(mask, dtype=bool)
@@ -206,6 +228,65 @@ def hamming_distance(glyph: np.ndarray, template: np.ndarray) -> float:
     return float(np.count_nonzero(resized != target)) / target.size
 
 
+def normalize_glyph(glyph: np.ndarray, shape: tuple[int, int] = (32, 24)) -> np.ndarray:
+    """Trim empty borders and resize one glyph to a template shape."""
+    return _resize_nearest(_trim_ink(np.asarray(glyph, dtype=bool)), shape)
+
+
+def build_template_bank(
+    glyphs: Sequence[Sequence[np.ndarray]],
+    answers: Sequence[str],
+    *,
+    shape: tuple[int, int] = (32, 24),
+    require_complete: bool = False,
+) -> list[dict[str, list[np.ndarray]]]:
+    """Build a position-aware bank of real normalized digit templates."""
+    if len(glyphs) != len(answers):
+        raise ValueError("glyph and answer counts must match")
+    bank: list[dict[str, list[np.ndarray]]] = [
+        {digit: [] for digit in "0123456789"} for _ in range(5)
+    ]
+    for image_glyphs, answer in zip(glyphs, answers):
+        if len(image_glyphs) != 5 or len(answer) != 5 or not answer.isdigit():
+            continue
+        for position, (glyph, digit) in enumerate(zip(image_glyphs, answer)):
+            bank[position][digit].append(normalize_glyph(glyph, shape))
+    if require_complete and any(not bank[position][digit] for position in range(5) for digit in "0123456789"):
+        raise ValueError("training data does not contain every digit at every position")
+    return bank
+
+
+def save_template_bank(bank: Sequence[Mapping[str, Sequence[np.ndarray]]], path: str | Path) -> Path:
+    """Save a template bank as a compact, NumPy-only compressed archive."""
+    if len(bank) != 5:
+        raise ValueError("template bank must contain five positions")
+    payload: dict[str, np.ndarray] = {}
+    for position, templates in enumerate(bank):
+        for digit in "0123456789":
+            values = [np.asarray(item, dtype=bool) for item in templates.get(digit, ())]
+            payload[f"p{position}d{digit}"] = (
+                np.stack(values).astype(np.uint8) if values else np.empty((0,), dtype=np.uint8)
+            )
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(output, **payload)
+    return output
+
+
+def load_template_bank(path: str | Path) -> list[dict[str, list[np.ndarray]]]:
+    """Load a bank produced by :func:`save_template_bank`."""
+    bank: list[dict[str, list[np.ndarray]]] = [{digit: [] for digit in "0123456789"} for _ in range(5)]
+    with np.load(Path(path), allow_pickle=False) as archive:
+        for position in range(5):
+            for digit in "0123456789":
+                key = f"p{position}d{digit}"
+                if key not in archive:
+                    raise ValueError(f"missing template archive entry: {key}")
+                values = archive[key]
+                bank[position][digit] = [item.astype(bool) for item in values] if values.ndim == 3 else []
+    return bank
+
+
 def match_digit(
     glyph: np.ndarray,
     templates: Mapping[str | int, np.ndarray] | None = None,
@@ -219,17 +300,37 @@ def match_digit(
     return digit, distance
 
 
+def match_position(
+    glyph: np.ndarray,
+    templates: Mapping[str | int, Sequence[np.ndarray]],
+) -> tuple[str, float]:
+    """Match against all real templates belonging to one digit position."""
+    ranked = [
+        (min(hamming_distance(glyph, template) for template in values), str(digit))
+        for digit, values in templates.items()
+        if values
+    ]
+    if not ranked:
+        raise ValueError("at least one position template is required")
+    distance, digit = min(ranked, key=lambda item: (item[0], item[1]))
+    return digit, distance
+
+
 def recognize_bmp(
     source: str | Path | bytes | bytearray | BinaryIO,
     *,
     threshold: int = DEFAULT_THRESHOLD,
-    templates: Mapping[str | int, np.ndarray] | None = None,
+    templates: Mapping[str | int, np.ndarray] | Sequence[Mapping[str | int, Sequence[np.ndarray]]] | None = None,
     min_pixels: int = 1,
 ) -> tuple[str, list[float]]:
     """Read a BMP, segment its digits, and return text plus per-digit scores."""
     _, binary = read_bmp(source, threshold=threshold)
-    glyphs = extract_digits(binary, min_pixels=min_pixels)
-    matches = [match_digit(glyph, templates) for glyph in glyphs]
+    if templates is not None and isinstance(templates, Sequence) and not isinstance(templates, (str, bytes, bytearray, np.ndarray)):
+        glyphs = extract_fixed_digits(binary, count=len(templates))
+        matches = [match_position(glyph, templates[index]) for index, glyph in enumerate(glyphs)]
+    else:
+        glyphs = extract_digits(binary, min_pixels=min_pixels)
+        matches = [match_digit(glyph, templates) for glyph in glyphs]  # type: ignore[arg-type]
     return "".join(digit for digit, _ in matches), [distance for _, distance in matches]
 
 
@@ -242,13 +343,19 @@ recognize = recognize_bmp
 __all__ = [
     "DEFAULT_TEMPLATES",
     "binary_threshold",
+    "build_template_bank",
     "extract_digits",
+    "extract_fixed_digits",
     "hamming_distance",
+    "load_template_bank",
     "match_digit",
+    "match_position",
+    "normalize_glyph",
     "projection_profiles",
     "read_bmp",
     "read_bmp_raw",
     "recognize",
     "recognize_bmp",
+    "save_template_bank",
     "segment_digits",
 ]
