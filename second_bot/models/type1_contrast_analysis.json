@@ -27,5 +27,5 @@
     "low Hamming-distance margins between visually similar classes",
     "sparse position-specific examples for some digit classes"
   ],
-  "decision": "contrast_normalization_is_opt_in_and_not_enabled_by_default"
+  "decision": "contrast_normalization_removed_after_no_holdout_gain"
 }

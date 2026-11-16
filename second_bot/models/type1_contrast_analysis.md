@@ -42,4 +42,4 @@ Each candidate was retrained on the training subset and evaluated on the same un
 
 Global percentile stretching produced an identical binary decision pattern in this dataset. This is expected: percentile stretching is monotonic, so with a correspondingly fixed threshold it does not remove the crossing lines or repair crop boundaries. Aggressive per-cell stretching amplified background and line pixels and reduced accuracy by 6.13 percentage points.
 
-Therefore contrast normalization is implemented as an **opt-in NumPy function**, but it is not enabled in the production path because the holdout experiment did not improve recognition. The next high-value changes are line suppression, local boundary selection constrained by glyph geometry, and a richer distance combining Hamming with row/column projections.
+Therefore the contrast-normalization experiment was rejected and its production function was removed because it did not improve recognition. The next high-value changes are line suppression, local boundary selection constrained by glyph geometry, and a richer distance combining Hamming with row/column projections.
