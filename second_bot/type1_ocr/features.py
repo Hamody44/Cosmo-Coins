@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import math
 
-from PIL import Image
+try:
+    import numpy as np
+except ImportError:  # Keep the OCR package usable in minimal environments.
+    np = None
 
+from PIL import Image
 from .types import FEATURE_SIZE
 
 
@@ -18,6 +22,14 @@ def extract_feature(segment: Image.Image) -> list[float]:
         size = (max(1, round(crop.width * scale)), max(1, round(crop.height * scale)))
         crop = crop.resize(size, Image.Resampling.BILINEAR)
         canvas.paste(crop, ((FEATURE_SIZE[0] - size[0]) // 2, (FEATURE_SIZE[1] - size[1]) // 2))
+    if np is not None:
+        pixels = np.asarray(canvas, dtype=np.uint8)
+        normalized_pixels = pixels.astype(np.float64).ravel() / 255.0
+        row_projection = pixels.sum(axis=1, dtype=np.uint64) / (255.0 * FEATURE_SIZE[0])
+        column_projection = pixels.sum(axis=0, dtype=np.uint64) / (255.0 * FEATURE_SIZE[1])
+        return np.concatenate((normalized_pixels, row_projection, column_projection)).tolist()
+
+    # Pure-Pillow fallback for environments that do not install NumPy.
     values = [pixel / 255.0 for pixel in canvas.tobytes()]
     pixels = canvas.load()
     for y in range(FEATURE_SIZE[1]):
