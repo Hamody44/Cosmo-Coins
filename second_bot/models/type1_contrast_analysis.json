@@ -1,0 +1,31 @@
+{
+  "dataset": {
+    "training_sources": 247,
+    "validation_sources": 62,
+    "validation_digits": 310
+  },
+  "baseline": {
+    "position_thresholds": [224, 160, 192, 192, 224],
+    "local_shift": 0,
+    "correct_digits": 203,
+    "errors": 107,
+    "digit_accuracy": 0.6548387096774193,
+    "error_rate": 0.34516129032258064,
+    "position_errors": [13, 21, 23, 26, 24]
+  },
+  "contrast_variants": [
+    {"name": "raw", "errors": 107, "digit_accuracy": 0.6548387096774193},
+    {"name": "global_percentile_2_98", "errors": 107, "digit_accuracy": 0.6548387096774193},
+    {"name": "per_cell_percentile_2_98", "errors": 107, "digit_accuracy": 0.6548387096774193},
+    {"name": "global_percentile_5_95", "errors": 108, "digit_accuracy": 0.6516129032258065},
+    {"name": "global_zscore_like", "errors": 109, "digit_accuracy": 0.6483870967741936},
+    {"name": "per_cell_percentile_10_90_threshold_128", "errors": 126, "digit_accuracy": 0.5935483870967742}
+  ],
+  "root_causes": [
+    "fixed equal-width cell geometry and alignment drift",
+    "crossing lines contaminating loops and strokes",
+    "low Hamming-distance margins between visually similar classes",
+    "sparse position-specific examples for some digit classes"
+  ],
+  "decision": "contrast_normalization_is_opt_in_and_not_enabled_by_default"
+}

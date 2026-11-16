@@ -129,6 +129,30 @@ def binary_threshold(gray: np.ndarray, threshold: int = DEFAULT_THRESHOLD) -> np
     return array <= threshold
 
 
+def contrast_normalize(
+    gray: np.ndarray,
+    *,
+    lower_percentile: float = 2.0,
+    upper_percentile: float = 98.0,
+) -> np.ndarray:
+    """Stretch grayscale contrast with percentile clipping using NumPy only.
+
+    The operation is opt-in because it is monotonic and therefore does not
+    automatically improve a fixed threshold; callers should retrain or tune
+    thresholds on the normalized images before enabling it.
+    """
+    array = np.asarray(gray)
+    if array.ndim != 2:
+        raise ValueError("gray image must be a 2-D array")
+    if not 0 <= lower_percentile < upper_percentile <= 100:
+        raise ValueError("percentiles must satisfy 0 <= lower < upper <= 100")
+    values = array.astype(np.float32)
+    low, high = np.percentile(values, (lower_percentile, upper_percentile))
+    if high <= low:
+        return np.clip(values, 0, 255).astype(np.uint8)
+    return np.clip((values - low) * 255.0 / (high - low), 0, 255).astype(np.uint8)
+
+
 def projection_profiles(binary: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return row and column foreground counts using NumPy reductions."""
     mask = np.asarray(binary, dtype=bool)
@@ -400,6 +424,7 @@ __all__ = [
     "DEFAULT_TEMPLATES",
     "binary_threshold",
     "build_template_bank",
+    "contrast_normalize",
     "extract_digits",
     "extract_fixed_digits",
     "extract_shifted_digits",
