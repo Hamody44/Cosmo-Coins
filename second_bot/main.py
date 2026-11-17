@@ -61,7 +61,7 @@ DISCORD_INVITE_PATTERN = re.compile(
     r"^https://(?:www\.)?(?:discord\.gg/|discord\.com/invite/)([A-Za-z0-9-]+)(?:[/?#].*)?$",
     re.IGNORECASE,
 )
-ADMIN_COMMAND_NAMES = {"guilds", "join_guild", "leave_guild"}
+ADMIN_COMMAND_NAMES = {"guilds", "invite_link", "join_guild", "leave_guild"}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # The configured model is intentionally not replaced here; set GEMINI_VISION_MODEL in second_bot/.env.
 DEFAULT_VISION_MODEL = "gemini-3.8-flash"
@@ -1558,15 +1558,11 @@ def _member_count(guild: object) -> str:
     return f"{count:,}" if isinstance(count, int) else "غير متاح"
 
 
-def format_guild_line(guild: discord.Guild, invite_url: str | None) -> str:
-    """Format one cached guild for the owner report."""
-    invite_text = invite_url or "غير متاح (لا توجد صلاحية لإنشاء دعوة)"
+def format_guild_line(guild: discord.Guild) -> str:
+    """Format one cached guild for the owner report without making API calls."""
     return (
         f"**{getattr(guild, 'name', 'بدون اسم')}**\n"
-        f"• Guild ID: `{guild.id}`\n"
-        f"• الأعضاء: `{_member_count(guild)}`\n"
-        f"• المالك: {_owner_label(guild)}\n"
-        f"• الدعوة: {invite_text}"
+        f"• Guild ID: `{guild.id}`"
     )
 
 
@@ -1582,7 +1578,11 @@ async def create_usable_guild_invite(guild: discord.Guild) -> str | None:
                     continue
             invite = await channel.create_invite(max_age=0, max_uses=0, unique=False)
             return getattr(invite, "url", str(invite))
-        except (discord.Forbidden, discord.HTTPException, OSError) as exc:
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                raise
+            logger.warning("Could not create an invite for guild %s in channel %s: %s", guild.id, getattr(channel, "id", "unknown"), exc)
+        except (discord.Forbidden, OSError) as exc:
             logger.warning("Could not create an invite for guild %s in channel %s: %s", guild.id, getattr(channel, "id", "unknown"), exc)
         except Exception:
             logger.exception("Unexpected error while creating an invite for guild %s.", guild.id)
@@ -1690,11 +1690,41 @@ async def guilds(ctx: commands.Context) -> None:
         await send_notice(ctx, "ℹ️ البوت الثاني غير موجود حاليًا في أي سيرفر.")
         return
 
-    entries: list[str] = []
-    for guild in visible_guilds:
-        invite_url = await create_usable_guild_invite(guild)
-        entries.append(format_guild_line(guild, invite_url))
+    entries = [format_guild_line(guild) for guild in visible_guilds]
     await send_notice_chunks(ctx, f"📋 **السيرفرات التي يوجد فيها البوت الثاني ({len(entries)}):**\n\n" + "\n\n".join(entries))
+
+
+@bot.command(name="invite_link")
+@commands.check(check_admin_owner)
+async def invite_link(ctx: commands.Context, target: str) -> None:
+    """Create an invite only for the requested cached guild."""
+    try:
+        guild_id = int(target.strip())
+        if guild_id <= 0:
+            raise ValueError
+    except (AttributeError, TypeError, ValueError):
+        await send_notice(ctx, f"❌ الاستخدام: `{COMMAND_PREFIX}invite_link <Guild ID>`." )
+        return
+
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        await send_notice(ctx, f"❌ البوت غير موجود في السيرفر `{guild_id}` أو لا يستطيع الوصول إليه.")
+        return
+
+    try:
+        invite_url = await create_usable_guild_invite(guild)
+    except discord.HTTPException as exc:
+        if exc.status == 429:
+            await send_notice(ctx, "⚠️ وصل Discord إلى حد الطلبات أثناء إنشاء الرابط. انتظر قليلًا ثم حاول مرة أخرى.")
+        else:
+            logger.exception("Discord rejected invite creation for guild %s.", guild_id)
+            await send_notice(ctx, "⚠️ رفض Discord إنشاء رابط الدعوة لهذا السيرفر.")
+        return
+
+    if invite_url is None:
+        await send_notice(ctx, "❌ تعذر إنشاء رابط دعوة لهذا السيرفر؛ لا توجد قناة متاحة أو صلاحية Create Invite.")
+        return
+    await send_notice(ctx, f"🔗 رابط دعوة **{guild.name}** (`{guild.id}`):\n{invite_url}")
 
 
 @bot.command(name="join_guild")
@@ -2221,6 +2251,9 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
 
     if isinstance(error, commands.MissingRequiredArgument) and ctx.command and ctx.command.name == "join_guild":
         await send_notice(ctx, f"الاستخدام: `{COMMAND_PREFIX}join_guild <رابط دعوة Discord>`.")
+        return
+    if isinstance(error, commands.MissingRequiredArgument) and ctx.command and ctx.command.name == "invite_link":
+        await send_notice(ctx, f"الاستخدام: `{COMMAND_PREFIX}invite_link <Guild ID>`." )
         return
     if isinstance(error, commands.MissingRequiredArgument) and ctx.command and ctx.command.name == "leave_guild":
         await send_notice(ctx, f"الاستخدام: `{COMMAND_PREFIX}leave_guild <Guild ID أو رابط دعوة>`.")

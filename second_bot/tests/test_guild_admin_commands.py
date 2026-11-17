@@ -58,7 +58,7 @@ class GuildAdministrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await main.check_admin_owner(ctx))
         fake_bot.is_owner.assert_not_awaited()
 
-    async def test_guilds_reports_sorted_guilds_and_unavailable_invite(self):
+    async def test_guilds_reports_sorted_guilds_without_creating_invites(self):
         first = SimpleNamespace(
             id=2,
             name="Alpha",
@@ -85,14 +85,48 @@ class GuildAdministrationTests(unittest.IsolatedAsyncioTestCase):
         sent = "\n".join(call.args[0] for call in ctx.send.await_args_list)
         self.assertLess(sent.index("Alpha"), sent.index("Zulu"))
         self.assertIn("`2`", sent)
-        self.assertIn("Owner", sent)
-        self.assertIn("غير متاح", sent)
+        self.assertNotIn("Owner", sent)
+        self.assertNotIn("الأعضاء", sent)
+        self.assertNotIn("المالك", sent)
+        self.assertNotIn("الدعوة", sent)
 
     async def test_guilds_reports_empty_account(self):
         ctx = make_context()
         with patch.object(main, "bot", SimpleNamespace(guilds=[])):
             await main.guilds.callback(ctx)
         self.assertIn("غير موجود", ctx.send.await_args.args[0])
+
+    async def test_invite_link_creates_one_link_for_requested_guild(self):
+        ctx = make_context()
+        guild = SimpleNamespace(id=123, name="Target Guild")
+        fake_bot = SimpleNamespace(get_guild=Mock(return_value=guild))
+        with patch.object(main, "bot", fake_bot), patch.object(
+            main, "create_usable_guild_invite", AsyncMock(return_value="https://discord.gg/generated")
+        ) as create_invite:
+            await main.invite_link.callback(ctx, target="123")
+        create_invite.assert_awaited_once_with(guild)
+        self.assertIn("https://discord.gg/generated", ctx.send.await_args.args[0])
+
+    async def test_invite_link_does_not_call_discord_for_unknown_guild(self):
+        ctx = make_context()
+        fake_bot = SimpleNamespace(get_guild=Mock(return_value=None))
+        with patch.object(main, "bot", fake_bot), patch.object(
+            main, "create_usable_guild_invite", AsyncMock()
+        ) as create_invite:
+            await main.invite_link.callback(ctx, target="999")
+        create_invite.assert_not_awaited()
+        self.assertIn("غير موجود", ctx.send.await_args.args[0])
+
+    async def test_invite_link_reports_rate_limit(self):
+        ctx = make_context()
+        guild = SimpleNamespace(id=123, name="Target Guild")
+        response = SimpleNamespace(status=429, reason="Too Many Requests")
+        fake_bot = SimpleNamespace(get_guild=Mock(return_value=guild))
+        with patch.object(main, "bot", fake_bot), patch.object(
+            main, "create_usable_guild_invite", AsyncMock(side_effect=discord.HTTPException(response, "rate limited"))
+        ):
+            await main.invite_link.callback(ctx, target="123")
+        self.assertIn("حد الطلبات", ctx.send.await_args.args[0])
 
     async def test_join_guild_rejects_invalid_url_without_api_call(self):
         ctx = make_context()
