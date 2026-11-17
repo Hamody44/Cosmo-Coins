@@ -482,7 +482,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
     def test_type1_dataset_reader_loads_only_labeled_type1_images(self):
         sample_dir = Path(__file__).resolve().parents[2] / "samples"
         samples = main.load_type1_test_samples(sample_dir)
-        self.assertEqual(len(samples), 170)
+        self.assertEqual(len(samples), 309)
         self.assertTrue(all(row["type"] == "type1" for row in samples))
 
     def test_preprocessing_update_invalidates_old_testall_checkpoint(self):
@@ -725,7 +725,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "detect_image_style", return_value="type1"), \
                 patch.object(
                     main,
-                    "extract_type1_with_fallback",
+                    "extract_type1_hybrid",
                     new=AsyncMock(side_effect=RuntimeError("OCR.Space API error 429: HTTP 429")),
                 ):
             await main.numbers.callback(ctx)
@@ -744,12 +744,28 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(os.environ, {"GEMINI_API_KEY": "", "OPENROUTER_API_KEY": "", "OCR_SPACE_API_KEY": ""}), \
                 patch.object(main, "detect_image_style", return_value="type2"), \
+                patch.object(main, "extract_type1_template_candidate", return_value="wrong") as type1_library, \
                 patch.object(main, "extract_numbers_locally", return_value=["99598"]), \
                 patch.object(main, "extract_numbers_from_image", new=AsyncMock()) as remote_ocr:
             await main.numbers.callback(ctx)
 
         remote_ocr.assert_not_awaited()
+        type1_library.assert_not_called()
         self.assertIn("99598", ctx.send.await_args.args[0])
+
+    async def test_numbers_uses_numpy_template_library_for_type1_only(self):
+        with patch.object(main, "extract_type1_template_candidate", return_value="12345") as template_library, \
+                patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock()) as ocr_space:
+            result = await main.extract_type1_hybrid(
+                b"type1-image",
+                "image/png",
+                ocr_space_key="ocr-test-key",
+            )
+
+        self.assertEqual(result["result"], "12345")
+        self.assertEqual(result["source"], "NumPy Type1 template library")
+        template_library.assert_called_once_with(b"type1-image")
+        ocr_space.assert_not_awaited()
 
     async def test_numbers_uses_ocr_space_for_type1_only(self):
         ctx = make_context()
@@ -763,6 +779,8 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
                 patch.object(main, "detect_image_style", return_value="type1"), \
+                patch.object(main, "extract_type1_template_candidate", return_value=None), \
+                patch.object(main, "extract_type1_local_candidates", return_value={"red": "12880", "blue": None}), \
                 patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock(return_value={
                     ("before contrast", "3"): "12880",
                     ("after contrast", "3"): "12880",
@@ -776,11 +794,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         local_ocr.assert_not_called()
         self.assertIn("12880", ctx.send.await_args.args[0])
         output = ctx.send.await_args.args[0]
-        self.assertIn("قبل تحسين التباين (المحرك 3)", output)
-        self.assertNotIn("المحرك 2", output)
-        self.assertIn("بعد تحسين التباين (المحرك 3)", output)
-        self.assertIn("بعد التكبير وعتبة Otsu (المحرك 3)", output)
-        self.assertIn("بعد العتبة المحلية التكيفية (المحرك 3)", output)
+        self.assertIn("OCR.Space matched local", output)
 
     async def test_type1_uses_gemini_when_ocr_space_fails(self):
         with patch.dict(os.environ, {

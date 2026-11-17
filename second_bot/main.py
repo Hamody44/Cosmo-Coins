@@ -30,6 +30,7 @@ from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 from local_ocr import detect_style, load_image, load_model, recognize
 from evaluate_type1_rgb import channel_variants, mask_variants
 from type1_local_ocr import _feature, segment_candidates
+from type1 import load_template_bank, recognize_bmp
 
 BASE_DIR = Path(__file__).resolve().parent
 RUN_BOTS_SCRIPT = BASE_DIR.parent / "run_bots.sh"
@@ -64,6 +65,8 @@ DEFAULT_OPENROUTER_MODEL = "openrouter/free"
 VISION_REQUEST_TIMEOUT_SECONDS = 20
 TYPE1_AI_TIMEOUT_SECONDS = 8
 TYPE1_LOCAL_MODEL_PATH = BASE_DIR / "models" / "type1_local_ocr.json"
+TYPE1_TEMPLATE_MODEL_PATH = BASE_DIR / "models" / "type1_templates.npz"
+TYPE1_TEMPLATE_THRESHOLDS = (224, 160, 192, 192, 224)
 OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
 OCR_SPACE_TIMEOUT_SECONDS = 20
 OCR_SPACE_ENGINES = ("3",)
@@ -357,6 +360,32 @@ def extract_numbers_locally(image_bytes: bytes) -> list[str] | None:
         return None
     logger.info("Using local OCR for type2 image: %s", text)
     return [text]
+
+
+@lru_cache(maxsize=1)
+def load_type1_template_bank() -> list[dict[str, list[object]]]:
+    """Load the NumPy/struct Type1 template bank once per process."""
+    return load_template_bank(TYPE1_TEMPLATE_MODEL_PATH)
+
+
+def extract_type1_template_candidate(image_bytes: bytes) -> str | None:
+    """Run the lightweight template library for Type1 images only."""
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            bitmap = BytesIO()
+            image.convert("L").save(bitmap, format="BMP")
+        text, _scores = recognize_bmp(
+            bitmap.getvalue(),
+            templates=load_type1_template_bank(),
+            position_thresholds=TYPE1_TEMPLATE_THRESHOLDS,
+        )
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        logger.info("NumPy Type1 template OCR unavailable: %s", exc)
+        return None
+    if not re.fullmatch(r"[0-9]{5}", text):
+        return None
+    logger.info("NumPy Type1 template OCR result: %s", text)
+    return text
 
 
 def _type1_local_model() -> dict:
@@ -1188,6 +1217,14 @@ async def extract_type1_hybrid(
     OCR.Space is never accepted as an independent answer: it must equal the
     red or blue local candidate.  AI is called only after that evidence fails.
     """
+    template_result = extract_type1_template_candidate(image_bytes)
+    if template_result:
+        return {
+            "result": template_result,
+            "source": "NumPy Type1 template library",
+            "local": {"template": template_result, "red": None, "blue": None},
+            "ocr": {},
+        }
     local = extract_type1_local_candidates(image_bytes)
     red, blue = local.get("red"), local.get("blue")
     if red and blue and red == blue:
