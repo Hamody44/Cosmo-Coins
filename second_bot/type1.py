@@ -400,6 +400,38 @@ def match_position(
     distance, digit = min(ranked, key=lambda item: (item[0], item[1]))
     return digit, distance
 
+def rank_position_candidates(
+    glyph: np.ndarray,
+    templates: Mapping[str | int, Sequence[np.ndarray]],
+    *,
+    limit: int = 3,
+) -> list[tuple[str, float]]:
+    """Return the best digit candidates for one position, ordered by distance."""
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    ranked = [
+        (str(digit), min(hamming_distance(glyph, template) for template in values))
+        for digit, values in templates.items()
+        if values
+    ]
+    return sorted(ranked, key=lambda item: (item[1], item[0]))[:limit]
+
+def beam_decode(
+    candidates: Sequence[Sequence[tuple[str, float]]],
+    *,
+    beam_width: int = 10,
+) -> list[tuple[str, float]]:
+    """Decode per-position candidates into the lowest-distance digit strings."""
+    if beam_width < 1 or not candidates:
+        raise ValueError("beam_width and candidates must be positive")
+    beams = [("", 0.0)]
+    for position in candidates:
+        if not position:
+            raise ValueError("each position needs at least one candidate")
+        expanded = [(text + digit, score + distance) for text, score in beams for digit, distance in position]
+        beams = sorted(expanded, key=lambda item: (item[1], item[0]))[:beam_width]
+    return beams
+
 
 def recognize_bmp(
     source: str | Path | bytes | bytearray | BinaryIO,
@@ -409,6 +441,8 @@ def recognize_bmp(
     min_pixels: int = 1,
     position_thresholds: Sequence[int] | None = None,
     local_shift: int = 0,
+    beam_width: int = 1,
+    candidate_limit: int = 3,
 ) -> tuple[str, list[float]]:
     """Read a BMP, segment its digits, and return text plus per-digit scores."""
     gray, binary = read_bmp(source, threshold=threshold)
@@ -420,7 +454,12 @@ def recognize_bmp(
             glyphs = extract_shifted_digits(gray, thresholds, templates, local_shift=local_shift)
         else:
             glyphs = extract_fixed_digits(binary, count=len(templates))
-        matches = [match_position(glyph, templates[index]) for index, glyph in enumerate(glyphs)]
+        if beam_width == 1:
+            matches = [match_position(glyph, templates[index]) for index, glyph in enumerate(glyphs)]
+        else:
+            candidates = [rank_position_candidates(glyph, templates[index], limit=candidate_limit) for index, glyph in enumerate(glyphs)]
+            text, _ = beam_decode(candidates, beam_width=beam_width)[0]
+            matches = [(digit, distance) for digit, distance in zip(text, [items[0][1] for items in candidates])]
     else:
         glyphs = extract_digits(binary, min_pixels=min_pixels)
         matches = [match_digit(glyph, templates) for glyph in glyphs]  # type: ignore[arg-type]
@@ -436,6 +475,7 @@ recognize = recognize_bmp
 __all__ = [
     "DEFAULT_TEMPLATES",
     "binary_threshold",
+    "beam_decode",
     "build_template_bank",
     "extract_digits",
     "extract_fixed_digits",
@@ -448,6 +488,7 @@ __all__ = [
     "match_position",
     "normalize_glyph",
     "projection_profiles",
+    "rank_position_candidates",
     "local_boundary_candidates",
     "read_bmp",
     "read_bmp_raw",

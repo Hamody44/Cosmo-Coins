@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 import numpy as np
 
-from type1 import choose_retry_candidate, composite_distance, local_boundary_candidates
+from type1 import beam_decode, choose_retry_candidate, composite_distance, local_boundary_candidates, rank_position_candidates
 
 
 class Type3OptimizationTests(unittest.TestCase):
@@ -23,6 +23,15 @@ class Type3OptimizationTests(unittest.TestCase):
         primary = ("3", 0.30)
         self.assertEqual(choose_retry_candidate(primary, [("8", 0.10)], margin=0.03), primary)
         self.assertEqual(choose_retry_candidate(primary, [("8", 0.10)], margin=0.01), ("8", 0.10))
+
+    def test_beam_decode_returns_lowest_scoring_strings(self):
+        candidates = [[("1", 0.1), ("7", 0.4)], [("2", 0.1), ("8", 0.2)]]
+        self.assertEqual(beam_decode(candidates, beam_width=2)[0], ("12", 0.2))
+
+    def test_rank_position_candidates_is_bounded(self):
+        glyph = np.zeros((8, 8), dtype=bool)
+        templates = {"0": [glyph], "1": [~glyph], "2": [glyph.copy()]}
+        self.assertEqual(len(rank_position_candidates(glyph, templates, limit=2)), 2)
 
 
 if __name__ == "__main__":
