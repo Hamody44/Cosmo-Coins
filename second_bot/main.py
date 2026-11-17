@@ -54,6 +54,11 @@ COMMAND_PREFIX = "$"
 COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
 user_command_cooldowns: dict[tuple[int, int], float] = {}
+DISCORD_INVITE_PATTERN = re.compile(
+    r"^https://(?:www\.)?(?:discord\.gg/|discord\.com/invite/)([A-Za-z0-9-]+)(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
+ADMIN_COMMAND_NAMES = {"guilds", "join_guild", "leave_guild"}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # The configured model is intentionally not replaced here; set GEMINI_VISION_MODEL in second_bot/.env.
 DEFAULT_VISION_MODEL = "gemini-3.8-flash"
@@ -1470,7 +1475,7 @@ async def check_shared_guild(ctx: commands.Context) -> bool:
 @bot.check
 async def check_user_command_cooldown(ctx: commands.Context) -> bool:
     """Apply a separate 30-second cooldown to each user in each guild."""
-    if ctx.command and ctx.command.name in {"start", "restart", "shutdown", "status"}:
+    if ctx.command and ctx.command.name in {"start", "restart", "shutdown", "status"} | ADMIN_COMMAND_NAMES:
         return True
     user_id = getattr(ctx.author, "id", None)
     if user_id is None:
@@ -1498,6 +1503,118 @@ async def send_notice(ctx: commands.Context, message: str) -> None:
         )
     except discord.HTTPException:
         logger.exception("Discord rejected a notice in channel %s.", getattr(ctx.channel, "id", "unknown"))
+
+
+async def send_notice_chunks(ctx: commands.Context, message: str, *, limit: int = 1900) -> None:
+    """Send a long administrative report without exceeding Discord's message limit."""
+    chunks: list[str] = []
+    current = ""
+    for line in message.splitlines() or [message]:
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current or not chunks:
+        chunks.append(current)
+    for chunk in chunks:
+        await send_notice(ctx, chunk)
+
+
+def parse_discord_invite(value: str) -> str | None:
+    """Return a Discord invite code, rejecting non-Discord URLs."""
+    match = DISCORD_INVITE_PATTERN.fullmatch((value or "").strip())
+    return match.group(1) if match else None
+
+
+def _invite_guild_id(invite: discord.Invite) -> int | None:
+    guild = getattr(invite, "guild", None)
+    guild_id = getattr(guild, "id", None)
+    try:
+        return int(guild_id) if guild_id is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _owner_label(guild: object) -> str:
+    owner = getattr(guild, "owner", None)
+    owner_id = getattr(guild, "owner_id", None)
+    owner_name = getattr(owner, "display_name", None) or getattr(owner, "name", None)
+    if owner_name and owner_id:
+        return f"{owner_name} (`{owner_id}`)"
+    if owner_name:
+        return str(owner_name)
+    return f"Owner ID `{owner_id}`" if owner_id else "غير متاح"
+
+
+def _member_count(guild: object) -> str:
+    count = getattr(guild, "member_count", None)
+    if count is None:
+        count = getattr(guild, "approximate_member_count", None)
+    return f"{count:,}" if isinstance(count, int) else "غير متاح"
+
+
+def format_guild_line(guild: discord.Guild, invite_url: str | None) -> str:
+    """Format one cached guild for the owner report."""
+    invite_text = invite_url or "غير متاح (لا توجد صلاحية لإنشاء دعوة)"
+    return (
+        f"**{getattr(guild, 'name', 'بدون اسم')}**\n"
+        f"• Guild ID: `{guild.id}`\n"
+        f"• الأعضاء: `{_member_count(guild)}`\n"
+        f"• المالك: {_owner_label(guild)}\n"
+        f"• الدعوة: {invite_text}"
+    )
+
+
+async def create_usable_guild_invite(guild: discord.Guild) -> str | None:
+    """Try channels independently so one inaccessible guild does not abort guilds."""
+    me = getattr(guild, "me", None)
+    channels = getattr(guild, "channels", None) or getattr(guild, "text_channels", [])
+    for channel in sorted(channels, key=lambda item: str(getattr(item, "name", ""))):
+        try:
+            if me is not None:
+                permissions = channel.permissions_for(me)
+                if not getattr(permissions, "create_instant_invite", False):
+                    continue
+            invite = await channel.create_invite(max_age=0, max_uses=0, unique=False)
+            return getattr(invite, "url", str(invite))
+        except (discord.Forbidden, discord.HTTPException, OSError) as exc:
+            logger.warning("Could not create an invite for guild %s in channel %s: %s", guild.id, getattr(channel, "id", "unknown"), exc)
+        except Exception:
+            logger.exception("Unexpected error while creating an invite for guild %s.", guild.id)
+    return None
+
+
+def _invite_preview(invite: discord.Invite) -> str:
+    guild = getattr(invite, "guild", None)
+    name = getattr(guild, "name", None) or "غير متاح"
+    guild_id = _invite_guild_id(invite) or "غير متاح"
+    member_count = _member_count(invite)
+    expires_at = getattr(invite, "expires_at", None)
+    expires = expires_at.isoformat() if expires_at else "غير متاح / غير محدد"
+    return (
+        f"• اسم السيرفر: **{name}**\n"
+        f"• Guild ID: `{guild_id}`\n"
+        f"• الأعضاء التقريبي: `{member_count}`\n"
+        f"• انتهاء الدعوة: `{expires}`"
+    )
+
+
+async def check_admin_owner(ctx: commands.Context) -> bool:
+    """Allow these high-impact commands only to the account owner."""
+    if ctx.guild is None:
+        raise NotInSharedGuild("Administrative guild commands are not available in direct messages.")
+    try:
+        allowed = await bot.is_owner(ctx.author)
+    except (discord.HTTPException, AttributeError):
+        logger.exception("Could not verify owner for administrative command from user %s.", getattr(ctx.author, "id", "unknown"))
+        allowed = False
+    if not allowed and bot.user is not None:
+        allowed = getattr(ctx.author, "id", None) == bot.user.id
+    if not allowed:
+        logger.warning("Rejected administrative command from non-owner user %s.", getattr(ctx.author, "id", "unknown"))
+    return allowed
 
 
 def can_send_in(channel: discord.abc.GuildChannel, permissions: discord.Permissions) -> bool:
@@ -1544,6 +1661,159 @@ async def shutdown_primary_bot(ctx: commands.Context) -> None:
 @commands.check(check_control_owner)
 async def status_primary_bot(ctx: commands.Context) -> None:
     await send_notice(ctx, f"ℹ️ {await control_primary_bot('status')}")
+
+
+@bot.command(name="guilds")
+@commands.check(check_admin_owner)
+async def guilds(ctx: commands.Context) -> None:
+    """List every guild currently visible to the second bot."""
+    visible_guilds = sorted(bot.guilds, key=lambda guild: (str(getattr(guild, "name", "")).casefold(), guild.id))
+    if not visible_guilds:
+        await send_notice(ctx, "ℹ️ البوت الثاني غير موجود حاليًا في أي سيرفر.")
+        return
+
+    entries: list[str] = []
+    for guild in visible_guilds:
+        invite_url = await create_usable_guild_invite(guild)
+        entries.append(format_guild_line(guild, invite_url))
+    await send_notice_chunks(ctx, f"📋 **السيرفرات التي يوجد فيها البوت الثاني ({len(entries)}):**\n\n" + "\n\n".join(entries))
+
+
+@bot.command(name="join_guild")
+@commands.check(check_admin_owner)
+async def join_guild(ctx: commands.Context, invite_url: str) -> None:
+    """Preview and, after an explicit confirmation, accept a Discord invite."""
+    invite_code = parse_discord_invite(invite_url)
+    if invite_code is None:
+        await send_notice(ctx, "❌ رابط الدعوة غير صالح. استخدم رابط Discord مثل `https://discord.gg/example`.")
+        return
+
+    try:
+        invite = await bot.fetch_invite(invite_url, with_counts=True, with_expiration=True)
+    except discord.NotFound:
+        await send_notice(ctx, "❌ الدعوة غير صالحة أو منتهية، أو أن السيرفر غير متاح.")
+        return
+    except discord.Forbidden:
+        await send_notice(ctx, "⛔ لا يملك الحساب صلاحية التحقق من هذه الدعوة.")
+        return
+    except discord.HTTPException as exc:
+        if exc.status == 429:
+            await send_notice(ctx, "⚠️ وصل Discord إلى حد الطلبات أثناء التحقق من الدعوة. حاول لاحقًا.")
+        else:
+            logger.exception("Discord rejected invite lookup for %s.", invite_code)
+            await send_notice(ctx, "⚠️ تعذر التحقق من الدعوة بسبب خطأ من Discord.")
+        return
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        logger.exception("Network failure while looking up invite %s.", invite_code)
+        await send_notice(ctx, "⚠️ تعذر الوصول إلى Discord أثناء التحقق من الدعوة. حاول لاحقًا.")
+        return
+
+    guild_id = _invite_guild_id(invite)
+    if guild_id is None:
+        await send_notice(ctx, "❌ الدعوة لا تشير إلى سيرفر متاح.")
+        return
+    if bot.get_guild(guild_id) is not None:
+        await send_notice(ctx, f"ℹ️ البوت موجود أصلًا في السيرفر `{getattr(invite.guild, 'name', guild_id)}` (`{guild_id}`).")
+        return
+
+    prompt = (
+        f"🔎 **معاينة الدعوة**\n{_invite_preview(invite)}\n\n"
+        "هل تريد استخدام هذه الدعوة؟ اكتب `نعم` أو `yes` للتأكيد، أو `لا` / `no` للإلغاء خلال 60 ثانية."
+    )
+    await send_notice(ctx, prompt)
+    confirmation_channel_id = getattr(ctx.channel, "id", None)
+    confirmation_author_id = getattr(ctx.author, "id", None)
+
+    def confirmation_check(message: discord.Message) -> bool:
+        return (
+            getattr(message.author, "id", None) == confirmation_author_id
+            and getattr(message.channel, "id", None) == confirmation_channel_id
+            and (message.content or "").strip().casefold() in {"نعم", "yes", "y", "confirm", "لا", "no", "n", "cancel"}
+        )
+
+    try:
+        confirmation = await bot.wait_for("message", check=confirmation_check, timeout=60)
+    except asyncio.TimeoutError:
+        await send_notice(ctx, "⌛ انتهت مهلة تأكيد الانضمام؛ لم تُستخدم الدعوة.")
+        return
+    if (confirmation.content or "").strip().casefold() in {"لا", "no", "n", "cancel"}:
+        await send_notice(ctx, "🛑 تم إلغاء الانضمام ولم تُستخدم الدعوة.")
+        return
+
+    try:
+        accepted = await bot.accept_invite(invite)
+        accepted_guild = getattr(accepted, "guild", None) or getattr(invite, "guild", None)
+        accepted_name = getattr(accepted_guild, "name", "السيرفر")
+        accepted_id = getattr(accepted_guild, "id", guild_id)
+        await send_notice(ctx, f"✅ تم إرسال طلب الانضمام إلى **{accepted_name}** (`{accepted_id}`).")
+    except discord.NotFound:
+        await send_notice(ctx, "❌ الدعوة غير صالحة أو انتهت قبل تأكيد الانضمام.")
+    except discord.Forbidden:
+        await send_notice(ctx, "⛔ رفض Discord عملية الانضمام بسبب الصلاحيات أو إعدادات الحساب.")
+    except discord.HTTPException as exc:
+        if exc.status == 429:
+            await send_notice(ctx, "⚠️ وصل Discord إلى حد الطلبات أثناء الانضمام. حاول لاحقًا.")
+        else:
+            logger.exception("Discord rejected accepting invite %s.", invite_code)
+            await send_notice(ctx, "⚠️ فشل الانضمام بسبب خطأ من Discord.")
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        logger.exception("Network failure while accepting invite %s.", invite_code)
+        await send_notice(ctx, "⚠️ فشل الاتصال بـDiscord أثناء الانضمام. حاول لاحقًا.")
+    except ValueError as exc:
+        logger.warning("Invite %s could not be accepted: %s", invite_code, exc)
+        await send_notice(ctx, "❌ لا يمكن استخدام هذه الدعوة بهذا النوع من حساب Discord.")
+
+
+@bot.command(name="leave_guild")
+@commands.check(check_admin_owner)
+async def leave_guild(ctx: commands.Context, target: str) -> None:
+    """Leave a cached guild selected by ID or by a Discord invite URL."""
+    guild_id: int | None
+    invite_code = parse_discord_invite(target)
+    if invite_code is not None:
+        try:
+            invite = await bot.fetch_invite(target, with_counts=False, with_expiration=False)
+        except discord.NotFound:
+            await send_notice(ctx, "❌ رابط الدعوة غير صالح أو منتهٍ، ولا يمكن تحديد السيرفر.")
+            return
+        except discord.Forbidden:
+            await send_notice(ctx, "⛔ لا يملك الحساب صلاحية قراءة رابط الدعوة.")
+            return
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                await send_notice(ctx, "⚠️ وصل Discord إلى حد الطلبات أثناء قراءة الدعوة. حاول لاحقًا.")
+            else:
+                logger.exception("Discord rejected leave invite lookup for %s.", invite_code)
+                await send_notice(ctx, "⚠️ تعذر قراءة رابط الدعوة بسبب خطأ من Discord.")
+            return
+        guild_id = _invite_guild_id(invite)
+    else:
+        try:
+            guild_id = int(target.strip())
+            if guild_id <= 0:
+                raise ValueError
+        except (AttributeError, TypeError, ValueError):
+            await send_notice(ctx, "❌ أدخل Guild ID رقميًا صحيحًا أو رابط دعوة Discord صالحًا.")
+            return
+
+    guild = bot.get_guild(guild_id) if guild_id is not None else None
+    if guild is None:
+        await send_notice(ctx, f"ℹ️ البوت غير موجود في السيرفر `{guild_id}`.")
+        return
+    try:
+        await bot.leave_guild(guild)
+        await send_notice(ctx, f"✅ غادر البوت السيرفر **{guild.name}** (`{guild.id}`).")
+    except discord.Forbidden:
+        await send_notice(ctx, "⛔ رفض Discord إخراج الحساب من السيرفر.")
+    except discord.HTTPException as exc:
+        if exc.status == 429:
+            await send_notice(ctx, "⚠️ وصل Discord إلى حد الطلبات أثناء مغادرة السيرفر. حاول لاحقًا.")
+        else:
+            logger.exception("Discord rejected leaving guild %s.", guild.id)
+            await send_notice(ctx, "⚠️ فشل مغادرة السيرفر بسبب خطأ من Discord.")
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        logger.exception("Network failure while leaving guild %s.", guild.id)
+        await send_notice(ctx, "⚠️ فشل الاتصال بـDiscord أثناء مغادرة السيرفر. حاول لاحقًا.")
 
 
 @bot.command(name="say")
@@ -1919,6 +2189,17 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
         )
         return
     if isinstance(error, commands.CommandNotFound):
+        return
+
+    if isinstance(error, commands.CheckFailure) and ctx.command and ctx.command.name in ADMIN_COMMAND_NAMES:
+        await send_notice(ctx, "⛔ هذا الأمر متاح لمالك حساب البوت الثاني فقط.")
+        return
+
+    if isinstance(error, commands.MissingRequiredArgument) and ctx.command and ctx.command.name == "join_guild":
+        await send_notice(ctx, f"الاستخدام: `{COMMAND_PREFIX}join_guild <رابط دعوة Discord>`.")
+        return
+    if isinstance(error, commands.MissingRequiredArgument) and ctx.command and ctx.command.name == "leave_guild":
+        await send_notice(ctx, f"الاستخدام: `{COMMAND_PREFIX}leave_guild <Guild ID أو رابط دعوة>`.")
         return
 
     if isinstance(error, commands.MissingRequiredArgument) and ctx.command and ctx.command.name == "say":
