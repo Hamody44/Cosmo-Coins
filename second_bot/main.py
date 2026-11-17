@@ -1605,13 +1605,23 @@ async def check_admin_owner(ctx: commands.Context) -> bool:
     """Allow these high-impact commands only to the account owner."""
     if ctx.guild is None:
         raise NotInSharedGuild("Administrative guild commands are not available in direct messages.")
+
+    # discord.py-self does not populate owner_id for a user-authenticated
+    # account. The logged-in account is the owner of this second bot.
+    if bot.user is not None and getattr(ctx.author, "id", None) == bot.user.id:
+        return True
+
+    owner_id = getattr(bot, "owner_id", None)
+    owner_ids = getattr(bot, "owner_ids", None)
+    if owner_id is None and not owner_ids:
+        logger.warning("Rejected administrative command from non-owner user %s.", getattr(ctx.author, "id", "unknown"))
+        return False
+
     try:
         allowed = await bot.is_owner(ctx.author)
-    except (discord.HTTPException, AttributeError):
+    except discord.HTTPException:
         logger.exception("Could not verify owner for administrative command from user %s.", getattr(ctx.author, "id", "unknown"))
         allowed = False
-    if not allowed and bot.user is not None:
-        allowed = getattr(ctx.author, "id", None) == bot.user.id
     if not allowed:
         logger.warning("Rejected administrative command from non-owner user %s.", getattr(ctx.author, "id", "unknown"))
     return allowed
@@ -1635,7 +1645,7 @@ async def check_control_owner(ctx: commands.Context) -> bool:
         return True
     try:
         return await bot.is_owner(ctx.author)
-    except discord.HTTPException:
+    except (discord.HTTPException, AttributeError):
         return False
 
 
@@ -1844,6 +1854,10 @@ async def say(ctx: commands.Context, *, text: str) -> None:
                 allowed_by_owner = await bot.is_owner(ctx.author)
             except discord.HTTPException:
                 logger.exception("Could not verify whether user %s owns this account.", ctx.author.id)
+                await send_notice(ctx, "تعذر التحقق من مالك الحساب الآن. حاول مرة أخرى لاحقًا.")
+                return
+            except AttributeError:
+                logger.warning("The Discord library has no configured owner for this account.")
                 await send_notice(ctx, "تعذر التحقق من مالك الحساب الآن. حاول مرة أخرى لاحقًا.")
                 return
         if not allowed_by_owner:

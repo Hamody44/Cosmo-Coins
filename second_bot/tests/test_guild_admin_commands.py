@@ -39,9 +39,16 @@ class GuildAdministrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admin_owner_check_accepts_only_account_owner(self):
         ctx = make_context()
-        fake_bot = SimpleNamespace(user=SimpleNamespace(id=999), is_owner=AsyncMock(return_value=True))
+        fake_bot = SimpleNamespace(user=SimpleNamespace(id=999), owner_id=42, owner_ids=set(), is_owner=AsyncMock(return_value=True))
         with patch.object(main, "bot", fake_bot):
             self.assertTrue(await main.check_admin_owner(ctx))
+
+    async def test_admin_owner_check_accepts_logged_in_user_without_owner_settings(self):
+        ctx = make_context()
+        fake_bot = SimpleNamespace(user=SimpleNamespace(id=42), is_owner=AsyncMock(side_effect=AttributeError("Owners aren't set")))
+        with patch.object(main, "bot", fake_bot):
+            self.assertTrue(await main.check_admin_owner(ctx))
+        fake_bot.is_owner.assert_not_awaited()
 
     async def test_guilds_reports_sorted_guilds_and_unavailable_invite(self):
         first = SimpleNamespace(
