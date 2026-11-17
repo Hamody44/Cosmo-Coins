@@ -50,6 +50,9 @@ logger = logging.getLogger("second_bot")
 # Populated by load_config() in main(). Keeping imports side-effect free lets
 # the unit tests exercise commands without a real Discord token.
 SAY_ALLOWED_ROLE_ID: int | None = None
+# Keep owner resolution identical to the primary bot. discord.py-self does not
+# populate Bot.owner_id for a user-authenticated account.
+PRIMARY_OWNER_ID = 988840428591808584
 COMMAND_PREFIX = "$"
 COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
@@ -1606,8 +1609,11 @@ async def check_admin_owner(ctx: commands.Context) -> bool:
     if ctx.guild is None:
         raise NotInSharedGuild("Administrative guild commands are not available in direct messages.")
 
-    # discord.py-self does not populate owner_id for a user-authenticated
-    # account. The logged-in account is the owner of this second bot.
+    # Match the primary bot's explicit owner check. This works even before the
+    # self-client has populated bot.user and avoids calling is_owner() without
+    # an owner_id configured by discord.py-self.
+    if getattr(ctx.author, "id", None) == PRIMARY_OWNER_ID:
+        return True
     if bot.user is not None and getattr(ctx.author, "id", None) == bot.user.id:
         return True
 
@@ -1635,6 +1641,8 @@ def can_send_in(channel: discord.abc.GuildChannel, permissions: discord.Permissi
 
 async def check_control_owner(ctx: commands.Context) -> bool:
     """Allow only the second-bot account, its owner, or the configured role."""
+    if getattr(ctx.author, "id", None) == PRIMARY_OWNER_ID:
+        return True
     if bot.user is not None and getattr(ctx.author, "id", None) == bot.user.id:
         return True
     if (
@@ -1848,7 +1856,9 @@ async def say(ctx: commands.Context, *, text: str) -> None:
     if not allowed_by_role:
         # In self-bot mode, commands are processed only when sent by this account.
         # Keep the owner fallback for isolated tests and compatible implementations.
-        allowed_by_owner = bot.user is not None and ctx.author.id == bot.user.id
+        allowed_by_owner = ctx.author.id == PRIMARY_OWNER_ID
+        if not allowed_by_owner:
+            allowed_by_owner = bot.user is not None and ctx.author.id == bot.user.id
         if not allowed_by_owner:
             try:
                 allowed_by_owner = await bot.is_owner(ctx.author)
