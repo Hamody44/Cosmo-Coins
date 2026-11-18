@@ -1983,6 +1983,14 @@ async def numbers(ctx: commands.Context) -> None:
             if numbers_found is None:
                 await send_notice(ctx, "تعذر قراءة أرقام صورة النوع الثاني محليًا.")
                 return
+            if numbers_found:
+                await ctx.send(
+                    "\n".join(numbers_found),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                await send_notice(ctx, "لم أجد أرقامًا واضحة في الصورة.")
+            return
         else:
             ocr_space_key = os.getenv("OCR_SPACE_API_KEY", "").strip()
             hybrid = await extract_type1_hybrid(

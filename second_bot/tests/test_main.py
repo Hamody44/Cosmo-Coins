@@ -751,7 +751,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
         remote_ocr.assert_not_awaited()
         type1_library.assert_not_called()
-        self.assertIn("99598", ctx.send.await_args.args[0])
+        self.assertEqual(ctx.send.await_args.args[0], "99598")
 
     async def test_numbers_uses_numpy_template_library_for_type1_only(self):
         with patch.object(main, "extract_type1_template_candidate", return_value="12345") as template_library, \
