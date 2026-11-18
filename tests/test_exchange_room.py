@@ -117,29 +117,29 @@ class ManualExchangeInstructionTests(unittest.TestCase):
     def test_instruction_uses_provider_specific_commands_for_supported_currencies(self):
         self.assertEqual(
             manual_exchange_transfer_command("ProBot Credits", 987654, 250.0),
-            ("ProBot", "#credit 987654 250 with tax"),
+            ("ProBot", "#credit 987654 250"),
         )
         self.assertEqual(
             manual_exchange_transfer_command("AdamC", 987654, 250.0),
-            ("AdamC", "!transfer 987654 250"),
+            ("AdamC", "T 987654 250"),
         )
         self.assertEqual(
             manual_exchange_transfer_command("Rob", 987654, 250.0),
-            ("Rob", "!transfer 987654 250"),
+            ("Rob", "T 987654 250"),
         )
         self.assertEqual(
             manual_exchange_transfer_command("Robux", 987654, 250.0),
-            ("Rob", "!transfer 987654 250"),
+            ("Rob", "T 987654 250"),
         )
         self.assertIsNone(manual_exchange_transfer_command("Gems", 987654, 250.0))
         self.assertIsNone(manual_exchange_transfer_command("ProBot Credits", 987654, 250.5))
         self.assertEqual(
             manual_probot_transfer_command("ProBot Credits", 987654, 250.0),
-            "#credit 987654 250 with tax",
+            "#credit 987654 250",
         )
 
     def test_delivery_view_shows_the_button_for_the_selected_provider(self):
-        view = ManualExchangeDeliveryView(123, "AdamC", "!transfer 987654 250")
+        view = ManualExchangeDeliveryView(123, "AdamC", "T 987654 250")
         self.assertEqual(len(view.children), 1)
         self.assertEqual(view.children[0].label, "نسخ أمر AdamC")
 

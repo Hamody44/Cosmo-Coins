@@ -46,9 +46,9 @@ def manual_exchange_transfer_command(currency_name: str, recipient_id: int, amou
     if recipient_id <= 0 or amount <= 0 or not amount.is_integer():
         return None
     if provider == "ProBot":
-        command = f"#credit {recipient_id} {int(amount)} with tax"
+        command = f"#credit {recipient_id} {int(amount)}"
     else:
-        command = f"!transfer {recipient_id} {int(amount)}"
+        command = f"T {recipient_id} {int(amount)}"
     return provider, command
 
 def manual_probot_transfer_command(currency_name: str, recipient_id: int, amount: float) -> str | None:
