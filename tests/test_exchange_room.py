@@ -125,11 +125,11 @@ class ManualExchangeInstructionTests(unittest.TestCase):
         )
         self.assertEqual(
             manual_exchange_transfer_command("Rob", 987654, 250.0),
-            ("Rob", "T 987654 250"),
+            ("Rob", "!transfer 987654 250"),
         )
         self.assertEqual(
             manual_exchange_transfer_command("Robux", 987654, 250.0),
-            ("Rob", "T 987654 250"),
+            ("Rob", "!transfer 987654 250"),
         )
         self.assertIsNone(manual_exchange_transfer_command("Gems", 987654, 250.0))
         self.assertIsNone(manual_exchange_transfer_command("ProBot Credits", 987654, 250.5))
