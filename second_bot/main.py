@@ -59,11 +59,14 @@ COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
 WALLET_STATE_PATH = BASE_DIR / ".runtime" / "wallet_balances.json"
 user_command_cooldowns: dict[tuple[int, int], float] = {}
+pending_currency_confirmations: dict[int, str] = {}
 DISCORD_INVITE_PATTERN = re.compile(
     r"^https://(?:www\.)?(?:discord\.gg/|discord\.com/invite/)([A-Za-z0-9-]+)(?:[/?#].*)?$",
     re.IGNORECASE,
 )
-ADMIN_COMMAND_NAMES = {"guilds", "invite_link", "join_guild", "leave_guild"}
+ADMIN_COMMAND_NAMES = {
+    "guilds", "invite_link", "join_guild", "leave_guild", "tc", "ta", "tr",
+}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # The configured model is intentionally not replaced here; set GEMINI_VISION_MODEL in second_bot/.env.
 DEFAULT_VISION_MODEL = "gemini-3.8-flash"
@@ -2032,6 +2035,55 @@ async def say(ctx: commands.Context, *, text: str) -> None:
         await send_notice(ctx, "حُذفت رسالة الأمر، لكن تعذر إرسال النص بسبب خطأ من Discord.")
 
 
+async def send_currency_command(
+    ctx: commands.Context,
+    target: discord.Member,
+    amount: str,
+    command: str,
+    confirmation_type: str | None,
+) -> None:
+    """Send an external-currency command and optionally arm image confirmation."""
+    amount = amount.strip()
+    try:
+        parsed_amount = parse_wallet_amount(amount)
+    except (AttributeError, TypeError, ValueError):
+        await send_notice(ctx, "❌ المبلغ غير صحيح. استخدم رقمًا مثل `500` أو `50m` أو `1.5b`.")
+        return
+
+    if parsed_amount < 0:
+        await send_notice(ctx, "❌ لا يمكن أن يكون المبلغ سالبًا.")
+        return
+
+    channel_id = getattr(ctx.channel, "id", None)
+    if confirmation_type and channel_id is not None:
+        pending_currency_confirmations[channel_id] = confirmation_type
+    await ctx.send(
+        f"{command} {target.mention} {amount}",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.command(name="tc")
+@commands.check(check_control_owner)
+async def transfer_credit(ctx: commands.Context, target: discord.Member, amount: str) -> None:
+    """Send a ProBot Credit command; type1 confirmation remains available for later use."""
+    await send_currency_command(ctx, target, amount, "#credit", "type1")
+
+
+@bot.command(name="ta")
+@commands.check(check_control_owner)
+async def transfer_adamc(ctx: commands.Context, target: discord.Member, amount: str) -> None:
+    """Send an AdamC command and prepare for a type2 confirmation image."""
+    await send_currency_command(ctx, target, amount, "T", "type2")
+
+
+@bot.command(name="tr")
+@commands.check(check_control_owner)
+async def transfer_rob(ctx: commands.Context, target: discord.Member, amount: str) -> None:
+    """Send a Rob transfer command without arming an image confirmation."""
+    await send_currency_command(ctx, target, amount, "!transfer", None)
+
+
 @bot.command(name="ping")
 async def ping(ctx: commands.Context) -> None:
     """Show the bot's connected state and Discord gateway latency."""
@@ -2311,9 +2363,55 @@ async def testall(ctx: commands.Context) -> None:
             checkpoint_path.unlink(missing_ok=True)
 
 
+async def process_pending_currency_confirmation(message: discord.Message) -> None:
+    """Read a pending currency confirmation image and send only its answer."""
+    channel_id = getattr(message.channel, "id", None)
+    expected_type = pending_currency_confirmations.get(channel_id)
+    if expected_type is None:
+        return
+
+    attachment_image = next(
+        (
+            (attachment, attachment_image_mime_type(attachment))
+            for attachment in getattr(message, "attachments", [])
+            if attachment_image_mime_type(attachment) is not None
+        ),
+        None,
+    )
+    if attachment_image is None:
+        return
+
+    attachment, mime_type = attachment_image
+    try:
+        image_bytes = await attachment.read()
+        image_style = detect_image_style(image_bytes)
+        if image_style != expected_type:
+            return
+
+        if expected_type == "type2":
+            numbers_found = extract_numbers_locally(image_bytes)
+            answer = "\n".join(numbers_found) if numbers_found else None
+        else:
+            hybrid = await extract_type1_hybrid(
+                image_bytes,
+                mime_type,
+                ocr_space_key=os.getenv("OCR_SPACE_API_KEY", "").strip(),
+            )
+            answer = hybrid.get("result")
+
+        if answer:
+            await message.channel.send(
+                answer,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            pending_currency_confirmations.pop(channel_id, None)
+    except Exception:
+        logger.exception("Could not process pending %s currency confirmation.", expected_type)
+
+
 @bot.event
 async def on_message(message: discord.Message) -> None:
-    """Process self-account messages explicitly and log command-shaped input."""
+    """Process currency confirmations, then pass messages to command handling."""
     content = message.content or ""
     if content.startswith(COMMAND_PREFIX):
         logger.info(
@@ -2322,6 +2420,7 @@ async def on_message(message: discord.Message) -> None:
             getattr(message.author, "id", None),
             content,
         )
+    await process_pending_currency_confirmation(message)
     await bot.process_commands(message)
 
 
