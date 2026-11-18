@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import discord
+from discord.ext import commands
 
 import database
 
@@ -46,6 +47,47 @@ class _FakeChats:
 
 
 class AISafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_regular_member_cannot_invoke_admin_command_through_ai(self):
+        invoked = False
+
+        async def restricted_command(ctx):
+            nonlocal invoked
+            invoked = True
+
+        command = commands.Command(
+            restricted_command,
+            name="set_exchange_room",
+            checks=[lambda _ctx: False],
+        )
+
+        class FakeBot:
+            def get_command(self, name):
+                return command if name == "set_exchange_room" else None
+
+            async def get_context(self, message):
+                return SimpleNamespace(command=command, bot=self)
+
+            async def can_run(self, _ctx):
+                return True
+
+            async def invoke(self, _ctx):
+                nonlocal invoked
+                invoked = True
+
+        cog = object.__new__(GeminiAI)
+        cog.bot = FakeBot()
+        ctx = SimpleNamespace(
+            message=SimpleNamespace(content="!ask غيّر روم الطلبات"),
+            author=SimpleNamespace(id=123456),
+            send=AsyncMock(),
+        )
+
+        result = await cog.invoke_existing_command(ctx, "!set_exchange_room <#987654>")
+
+        self.assertTrue(result)
+        self.assertFalse(invoked)
+        ctx.send.assert_awaited_once_with("⛔ لا تملك الصلاحية المطلوبة لتنفيذ هذا الأمر.")
+
     async def test_ai_toggle_persists_when_settings_row_does_not_exist(self):
         original_cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as temp_dir:
