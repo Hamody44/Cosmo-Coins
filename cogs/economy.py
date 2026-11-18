@@ -1,9 +1,15 @@
 import discord
 from discord.ext import commands
+import os
 import secrets
 import asyncio
 from datetime import datetime
 from types import SimpleNamespace
+from second_bot.auto_delivery import (
+    DELIVERY_RESULT_PREFIX,
+    build_handoff_message,
+    verify_delivery_result_message,
+)
 from database import (
     get_balance, parse_amount, generate_captcha_image,
     is_blacklisted, is_bot_admin, global_cursor, get_guild_db, PRIMARY_OWNER_ID,
@@ -11,7 +17,10 @@ from database import (
     accept_exchange_request, deny_exchange_request, get_currency_label,
     get_exchange_currencies, get_exchange_currency, has_pending_exchange_request,
     is_global_exchange_enabled, ExchangeSystemClosed, ExchangeCurrencyUnavailable,
-    get_exchange_room_id, EXCHANGE_BASE_COSMO, format_exchange_amount
+    get_exchange_room_id, EXCHANGE_BASE_COSMO, format_exchange_amount,
+    complete_auto_exchange_delivery, release_auto_exchange_delivery,
+    reject_auto_exchange_delivery, get_exchange_request_delivery_data,
+    get_exchange_requests_for_ui, set_exchange_request_message,
 )
 
 def can_manage_exchange_request(ctx: commands.Context, origin_guild_id: int) -> bool:
@@ -59,21 +68,63 @@ def manual_probot_transfer_command(currency_name: str, recipient_id: int, amount
     return delivery[1] if delivery and delivery[0] == "ProBot" else None
 
 class ManualExchangeDeliveryView(discord.ui.View):
-    def __init__(self, origin_guild_id: int, provider: str, command: str):
-        super().__init__(timeout=24 * 60 * 60)
+    def __init__(
+        self,
+        origin_guild_id: int,
+        provider: str | None,
+        command: str | None,
+        *,
+        cog=None,
+        request_id: int | None = None,
+        status: str = "قيد الانتظار",
+    ):
+        super().__init__(timeout=None)
         self.origin_guild_id = int(origin_guild_id)
         self.provider = provider
         self.command = command
-        self.children[0].label = f"نسخ أمر {provider}"
+        self.cog = cog
+        self.request_id = int(request_id) if request_id is not None else None
+        for item in list(self.children):
+            if item.custom_id == "cosmo:exchange:copy" and not self.command:
+                self.remove_item(item)
+            elif item.custom_id == "cosmo:exchange:copy" and status == "قيد الانتظار":
+                self.remove_item(item)
+            elif status == "تسليم يدوي" and item.custom_id != "cosmo:exchange:copy":
+                self.remove_item(item)
+            elif status in {"تسليم تلقائي", "مرفوض"}:
+                self.remove_item(item)
+            elif status == "قيد التسليم التلقائي":
+                item.disabled = True
+        for item in self.children:
+            if item.custom_id == "cosmo:exchange:copy":
+                item.label = f"نسخ أمر {provider}"
 
-    @discord.ui.button(label="نسخ أمر التسليم", style=discord.ButtonStyle.primary, emoji="📋")
+    @discord.ui.button(label="قبول الطلب يدويًا", style=discord.ButtonStyle.success, emoji="✅", custom_id="cosmo:exchange:accept")
+    async def accept_manually(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.cog is None or self.request_id is None:
+            return await interaction.response.send_message("❌ تعذر معالجة الطلب من هذه الواجهة.", ephemeral=True)
+        await self.cog._handle_exchange_button(interaction, self.request_id, accept=True)
+
+    @discord.ui.button(label="رفض الطلب", style=discord.ButtonStyle.danger, emoji="⛔", custom_id="cosmo:exchange:reject")
+    async def reject_manually(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.cog is None or self.request_id is None:
+            return await interaction.response.send_message("❌ تعذر معالجة الطلب من هذه الواجهة.", ephemeral=True)
+        await self.cog._handle_exchange_button(interaction, self.request_id, accept=False)
+
+    @discord.ui.button(label="نسخ أمر التسليم", style=discord.ButtonStyle.primary, emoji="📋", custom_id="cosmo:exchange:copy")
     async def copy_delivery_command(self, interaction: discord.Interaction, button: discord.ui.Button):
-        context = SimpleNamespace(
-            author=interaction.user,
-            guild=interaction.guild,
-            channel=interaction.channel,
-        )
-        if not can_manage_exchange_request(context, self.origin_guild_id):
+        if not self.command:
+            return await interaction.response.send_message("⚠️ لا يوجد أمر يدوي معرّف لهذه العملة.", ephemeral=True)
+        if self.cog is not None:
+            authorized = await self.cog._can_manage_request_user(interaction.user, self.origin_guild_id)
+        else:
+            context = SimpleNamespace(
+                author=interaction.user,
+                guild=interaction.guild,
+                channel=interaction.channel,
+            )
+            authorized = can_manage_exchange_request(context, self.origin_guild_id)
+        if not authorized:
             return await interaction.response.send_message(
                 "⛔ هذا الأمر متاح لمالك البوت أو إدارة السيرفر صاحب الطلب فقط.",
                 ephemeral=True,
@@ -211,6 +262,202 @@ class Economy(commands.Cog):
 
     async def cog_load(self):
         self.bot.add_view(ExchangePanelView(self))
+        asyncio.create_task(self._restore_exchange_request_ui())
+
+    async def _restore_exchange_request_ui(self) -> None:
+        await self.bot.wait_until_ready()
+        for row in get_exchange_requests_for_ui(100):
+            request_id, origin_guild_id, user_id, currency_name, received_amount, status, delivery_status, _channel_id, message_id = row
+            manual_delivery = manual_exchange_transfer_command(currency_name, user_id, received_amount)
+            provider, command = manual_delivery or (None, None)
+            view_status = "قيد التسليم التلقائي" if status == "قيد التسليم التلقائي" else delivery_status
+            view = ManualExchangeDeliveryView(
+                origin_guild_id,
+                provider,
+                command,
+                cog=self,
+                request_id=request_id,
+                status=view_status,
+            )
+            if view.children:
+                self.bot.add_view(view, message_id=int(message_id))
+            try:
+                await self._update_exchange_request_embed(request_id)
+            except discord.HTTPException:
+                continue
+
+    async def _can_manage_request_user(self, user, origin_guild_id: int) -> bool:
+        if getattr(user, "id", None) == PRIMARY_OWNER_ID:
+            return True
+        origin_guild = self.bot.get_guild(int(origin_guild_id))
+        if origin_guild is None:
+            return False
+        member = origin_guild.get_member(user.id)
+        if member is None:
+            try:
+                member = await origin_guild.fetch_member(user.id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return False
+        context = SimpleNamespace(author=member, guild=origin_guild, channel=None)
+        return can_manage_exchange_request(context, int(origin_guild_id))
+
+    @staticmethod
+    def _delivery_status_label(status: str) -> str:
+        return {
+            "قيد الانتظار": "⏳ قيد الانتظار",
+            "تسليم تلقائي": "🤖 تسليم تلقائي",
+            "تسليم يدوي": "🧑‍💼 تسليم يدوي",
+            "مرفوض": "❌ مرفوض",
+        }.get(status, "⏳ قيد الانتظار")
+
+    async def _update_exchange_request_embed(self, request_id: int) -> bool:
+        data = get_exchange_request_delivery_data(request_id)
+        if not data:
+            return False
+        (
+            origin_guild_id, user_id, cosmo_amount, currency_name, received_amount,
+            request_status, delivery_status, channel_id, message_id,
+        ) = data
+        if not channel_id or not message_id:
+            return False
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except discord.HTTPException:
+                return False
+        try:
+            request_message = await channel.fetch_message(message_id)
+        except (discord.HTTPException, AttributeError):
+            return False
+        if not request_message.embeds:
+            return False
+
+        embed = request_message.embeds[0].copy()
+        field_name = "🚚 حالة التسليم"
+        field_index = next(
+            (index for index, field in enumerate(embed.fields) if field.name == field_name),
+            None,
+        )
+        field_value = self._delivery_status_label(delivery_status)
+        if field_index is None:
+            embed.add_field(name=field_name, value=field_value, inline=True)
+        else:
+            embed.set_field_at(field_index, name=field_name, value=field_value, inline=True)
+
+        manual_delivery = manual_exchange_transfer_command(currency_name, user_id, received_amount)
+        provider, command = manual_delivery or (None, None)
+        view_status = "قيد التسليم التلقائي" if request_status == "قيد التسليم التلقائي" else delivery_status
+        view = ManualExchangeDeliveryView(
+            origin_guild_id,
+            provider,
+            command,
+            cog=self,
+            request_id=request_id,
+            status=view_status,
+        )
+        try:
+            await request_message.edit(embed=embed, view=view if view.children else None)
+            return True
+        except discord.HTTPException:
+            return False
+
+    async def _send_exchange_success_log(
+        self,
+        guild_id: int,
+        user_id: int,
+        amount: int,
+        received_amount: float,
+        currency_name: str,
+    ) -> None:
+        origin_guild = self.bot.get_guild(guild_id)
+        if origin_guild is None:
+            return
+        g_conn, g_cur = get_guild_db(guild_id)
+        try:
+            g_cur.execute("SELECT exchange_success_log FROM settings WHERE guild_id = ?", (guild_id,))
+            row = g_cur.fetchone()
+        finally:
+            g_conn.close()
+        if row and row[0]:
+            success_channel = origin_guild.get_channel(row[0])
+            if success_channel:
+                await success_channel.send(
+                    f"🎉 تم بنجاح تبديل `{amount:,}` {get_currency_label(guild_id)} "
+                    f"للعضو <@{user_id}> مقابل `{received_amount}` {currency_name}."
+                )
+
+    async def _handle_exchange_button(self, interaction: discord.Interaction, request_id: int, *, accept: bool) -> None:
+        data = get_exchange_request_delivery_data(request_id)
+        if not data:
+            return await interaction.response.send_message("❌ الطلب غير موجود.", ephemeral=True)
+        origin_guild_id, user_id, amount, currency_name, received_amount, status, _delivery_status, *_ = data
+        if not await self._can_manage_request_user(interaction.user, origin_guild_id):
+            return await interaction.response.send_message(
+                "⛔ هذا الإجراء متاح لمالك البوت أو إدارة السيرفر صاحب الطلب فقط.", ephemeral=True
+            )
+        if status != "قيد الانتظار":
+            await self._update_exchange_request_embed(request_id)
+            return await interaction.response.send_message(
+                "ℹ️ تمت معالجة هذا الطلب بالفعل أو يجري تسليمه تلقائيًا.", ephemeral=True
+            )
+
+        await interaction.response.defer(ephemeral=True)
+        if accept:
+            if not accept_exchange_request(request_id):
+                await self._update_exchange_request_embed(request_id)
+                return await interaction.followup.send("❌ تمت معالجة الطلب بالفعل.", ephemeral=True)
+            await self._update_exchange_request_embed(request_id)
+            await self._send_exchange_success_log(
+                origin_guild_id, user_id, amount, received_amount, currency_name
+            )
+            return await interaction.followup.send(f"✅ تم قبول الطلب #{request_id} يدويًا.", ephemeral=True)
+
+        refunded = deny_exchange_request(request_id)
+        if not refunded:
+            await self._update_exchange_request_embed(request_id)
+            return await interaction.followup.send("❌ تمت معالجة الطلب بالفعل.", ephemeral=True)
+        await self._update_exchange_request_embed(request_id)
+        try:
+            user = await self.bot.fetch_user(user_id)
+            if user:
+                await user.send(
+                    f"❌ تم رفض طلب التبديل #{request_id} وإعادة `{refunded[1]:,}` "
+                    f"{get_currency_label(origin_guild_id)} إلى رصيدك."
+                )
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            pass
+        await interaction.followup.send(f"🛑 تم رفض الطلب #{request_id} وإعادة الرصيد.", ephemeral=True)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        content = getattr(message, "content", "") or ""
+        if DELIVERY_RESULT_PREFIX not in content:
+            return
+        payload = verify_delivery_result_message(content, os.getenv("COSMO_AUTO_DELIVERY_SECRET", ""))
+        if payload is None or getattr(message.author, "id", None) != payload["issuer_id"]:
+            return
+        request_id = int(payload["order_id"])
+        outcome = payload["outcome"]
+        if outcome == "automatic":
+            complete_auto_exchange_delivery(request_id)
+        elif outcome == "pending":
+            release_auto_exchange_delivery(request_id)
+        elif outcome == "rejected":
+            request_data = get_exchange_request_delivery_data(request_id)
+            origin_guild_id = request_data[0] if request_data else None
+            refunded = reject_auto_exchange_delivery(request_id)
+            if refunded:
+                try:
+                    user = await self.bot.fetch_user(refunded[0])
+                    if user:
+                        await user.send(
+                            f"❌ رفض البوت الثاني طلب التبديل #{request_id} وأعاد `{refunded[1]:,}` "
+                            f"{get_currency_label(origin_guild_id)} إلى رصيدك."
+                        )
+                except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                    pass
+        await self._update_exchange_request_embed(request_id)
 
     @commands.hybrid_command(name="balance", aliases=["رصيد", "bal"], description="معرفة رصيد العملات")
     async def balance(self, ctx: commands.Context, member: discord.Member = None):
@@ -514,6 +761,7 @@ class Economy(commands.Cog):
         embed = discord.Embed(title=f"📥 طلب تبديل جديد #{req_id}", color=discord.Color.gold())
         embed.add_field(name="🏛️ السيرفر", value=server_display, inline=True)
         embed.add_field(name="📦 روم التسليمات", value=delivery_display, inline=True)
+        embed.add_field(name="🚚 حالة التسليم", value=self._delivery_status_label("قيد الانتظار"), inline=True)
         embed.add_field(name="👤 العضو", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=False)
         embed.add_field(name=f"🪙 مبلغ {currency_label}", value=f"`{parsed_amount:,}`", inline=True)
         embed.add_field(name=f"💵 المستحق من ({currency_name})", value=f"`{total_received}`", inline=True)
@@ -521,21 +769,52 @@ class Economy(commands.Cog):
         manual_provider, manual_command = manual_delivery or (None, None)
         if manual_command:
             embed.add_field(
-                name=f"📋 أمر {manual_provider} للتسليم اليدوي",
-                value=f"اضغط زر **نسخ أمر {manual_provider}** لعرض الأمر جاهزًا للنسخ. راجع الطلب وأرسل الأمر يدويًا؛ البوت لا ينفذ التحويل.",
+                name=f"📋 أمر {manual_provider} الاحتياطي",
+                value=f"إذا تم قبول الطلب يدويًا، سيظهر زر نسخ أمر {manual_provider} لإرساله في روم التسليمات.",
                 inline=False,
             )
         embed.add_field(name="📝 الوصف والملاحظات", value=f"```{note}```", inline=False)
         embed.set_footer(text=f"للقبول: /accept_exchange {req_id} | للرفض: /deny_exchange {req_id}")
 
+        auto_delivery_handoff = None
+        if delivery_log_id and manual_command:
+            auto_delivery_handoff = build_handoff_message(
+                secret=os.getenv("COSMO_AUTO_DELIVERY_SECRET", ""),
+                issuer_id=getattr(getattr(self.bot, "user", None), "id", 0),
+                order_id=req_id,
+                guild_id=ctx.guild.id,
+                delivery_channel_id=delivery_log_id,
+                user_id=ctx.author.id,
+                currency=currency_name,
+                amount=int(total_received),
+            )
+            if not auto_delivery_handoff:
+                embed.add_field(
+                    name="ℹ️ التسليم التلقائي",
+                    value="لم يُجهّز إشعار آمن للبوت الثاني؛ سيبقى زر التسليم اليدوي متاحًا. تحقّق من إعداد المفتاح المشترك في ملفي البيئة.",
+                    inline=False,
+                )
+
         try:
-            await req_channel.send(
+            request_message = await req_channel.send(
+                content=auto_delivery_handoff,
                 embed=embed,
-                view=ManualExchangeDeliveryView(ctx.guild.id, manual_provider, manual_command) if manual_command else None,
+                view=ManualExchangeDeliveryView(
+                    ctx.guild.id,
+                    manual_provider,
+                    manual_command,
+                    cog=self,
+                    request_id=req_id,
+                ),
             )
         except discord.HTTPException:
             deny_exchange_request(req_id)
             return await ctx.send("❌ تعذر إرسال الطلب للإدارة؛ أُعيد رصيدك تلقائياً.")
+        set_exchange_request_message(req_id, req_channel.id, request_message.id)
+        try:
+            await self._update_exchange_request_embed(req_id)
+        except discord.HTTPException:
+            pass
         await ctx.send(f"✅ تم إرسال طلب التبديل برقم `{req_id}` إلى الإدارة بنجاح.")
 
     @commands.hybrid_command(name="accept_exchange", aliases=["قبول_التبديل"], description="قبول طلب التبديل")
@@ -543,13 +822,16 @@ class Economy(commands.Cog):
         global_cursor.execute("SELECT user_id, cosmo_amount, target_currency, received_amount, status, guild_id FROM exchange_logs WHERE id = ?", (req_id,))
         row = global_cursor.fetchone()
         if not row or row[4] != "قيد الانتظار":
+            await self._update_exchange_request_embed(req_id)
             return await ctx.send("❌ الطلب غير موجود أو تمت معالجته مسبقاً.")
 
         if not can_manage_exchange_request(ctx, row[5]):
             return await ctx.send("⛔ يجب أن تكون مسؤولاً في السيرفر الذي يخصه طلب التبديل.")
         if not accept_exchange_request(req_id):
+            await self._update_exchange_request_embed(req_id)
             return await ctx.send("❌ تمت معالجة هذا الطلب بالفعل؛ لم يُنفذ القبول مرة أخرى.")
 
+        await self._update_exchange_request_embed(req_id)
         await ctx.send(f"✅ تم قبول طلب التبديل #{req_id}.")
 
         origin_guild_id = row[5]
@@ -570,14 +852,17 @@ class Economy(commands.Cog):
         global_cursor.execute("SELECT user_id, cosmo_amount, target_currency, status, guild_id FROM exchange_logs WHERE id = ?", (req_id,))
         row = global_cursor.fetchone()
         if not row or row[3] != "قيد الانتظار":
+            await self._update_exchange_request_embed(req_id)
             return await ctx.send("❌ الطلب غير صالح أو تمت معالجته.")
 
         if not can_manage_exchange_request(ctx, row[4]):
             return await ctx.send("⛔ يجب أن تكون مسؤولاً في السيرفر الذي يخصه طلب التبديل.")
         refunded = deny_exchange_request(req_id)
         if not refunded:
+            await self._update_exchange_request_embed(req_id)
             return await ctx.send("❌ تمت معالجة هذا الطلب بالفعل؛ لم يُرد الرصيد مرة أخرى.")
 
+        await self._update_exchange_request_embed(req_id)
         await ctx.send(f"🛑 تم رفض الطلب #{req_id} وإعادة الرصيد.")
         try:
             user = await self.bot.fetch_user(refunded[0])

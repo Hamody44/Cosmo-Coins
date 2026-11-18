@@ -166,6 +166,11 @@ async def on_message(message: discord.Message):
     if not message.guild or message.author.id == bot.user.id:
         return
 
+    # The Economy cog consumes authenticated callbacks from the self-hosted delivery bot.
+    # Keep these protocol messages out of auto-replies, aliases, and command processing.
+    if "COSMO_DELIVERY_RESULT_V1:" in (message.content or ""):
+        return
+
     # 1. فحص بوتات الشحن المصرح بها (مثل عجلة الحظ)
     if message.author.bot:
         g_conn, g_cur = get_guild_db(message.guild.id)

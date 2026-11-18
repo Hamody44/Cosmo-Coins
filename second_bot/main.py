@@ -7,6 +7,7 @@ import base64
 import csv
 import os
 import sys
+import sqlite3
 import time
 import asyncio
 import math
@@ -14,6 +15,7 @@ import re
 import hashlib
 import uuid
 from collections import Counter
+from contextlib import closing
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
@@ -32,8 +34,17 @@ from local_ocr import detect_style, load_image, load_model, recognize
 from evaluate_type1_rgb import channel_variants, mask_variants
 from type1_local_ocr import _feature, segment_candidates
 from type1 import load_template_bank, recognize_bmp
+try:
+    from second_bot.auto_delivery import (
+        HANDOFF_PREFIX,
+        build_delivery_result_message,
+        verify_handoff_message,
+    )
+except ImportError:  # direct execution from second_bot/
+    from auto_delivery import HANDOFF_PREFIX, build_delivery_result_message, verify_handoff_message
 
 BASE_DIR = Path(__file__).resolve().parent
+GLOBAL_DB_PATH = BASE_DIR.parent / "global_cosmo.db"
 RUN_BOTS_SCRIPT = BASE_DIR.parent / "run_bots.sh"
 LOCAL_OCR_MODEL_PATH = BASE_DIR / "models" / "local_ocr_model.json"
 SHARED_GUILD_STATE_PATH = BASE_DIR / ".runtime" / "shared_guilds.json"
@@ -58,8 +69,10 @@ COMMAND_PREFIX = "$"
 COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
 WALLET_STATE_PATH = BASE_DIR / ".runtime" / "wallet_balances.json"
+AUTO_DELIVERY_STATE_PATH = BASE_DIR / ".runtime" / "auto_delivery_state.json"
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 pending_currency_confirmations: dict[int, str] = {}
+AUTO_DELIVERY_LOCK = asyncio.Lock()
 DISCORD_INVITE_PATTERN = re.compile(
     r"^https://(?:www\.)?(?:discord\.gg/|discord\.com/invite/)([A-Za-z0-9-]+)(?:[/?#].*)?$",
     re.IGNORECASE,
@@ -169,6 +182,93 @@ def write_runtime_json(path: Path, payload: dict[str, object]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     temporary_path.replace(path)
+
+
+def auto_delivery_state() -> dict[str, object]:
+    """Load persistent delivery state; default on only when a shared key exists."""
+    secret_configured = len(os.getenv("COSMO_AUTO_DELIVERY_SECRET", "").strip()) >= 32
+    state = read_runtime_json(AUTO_DELIVERY_STATE_PATH) or {}
+    enabled = state.get("enabled", secret_configured)
+    if not isinstance(enabled, bool):
+        enabled = secret_configured
+    if not secret_configured:
+        enabled = False
+    processed = state.get("processed_orders", [])
+    if not isinstance(processed, list):
+        processed = []
+    normalized_processed = []
+    for order_id in processed:
+        if isinstance(order_id, int) and not isinstance(order_id, bool) and order_id > 0:
+            normalized_processed.append(order_id)
+    return {"enabled": enabled, "processed_orders": normalized_processed}
+
+
+def set_auto_delivery_enabled(enabled: bool) -> None:
+    state = auto_delivery_state()
+    state["enabled"] = bool(enabled)
+    write_runtime_json(AUTO_DELIVERY_STATE_PATH, state)
+
+
+def claim_auto_delivery_order(order_id: int) -> bool:
+    """Persist an order claim before posting any transfer command (at-most-once)."""
+    state = auto_delivery_state()
+    processed = list(state["processed_orders"])
+    if int(order_id) in processed:
+        return False
+    processed.append(int(order_id))
+    state["processed_orders"] = processed
+    write_runtime_json(AUTO_DELIVERY_STATE_PATH, state)
+    return True
+
+
+def transition_auto_exchange_request(order_id: int, operation: str) -> bool:
+    """Atomically reserve, complete, or release an exchange row shared with the primary bot."""
+    transitions = {
+        "claim": ("قيد التسليم التلقائي", "قيد الانتظار", None),
+        "complete": ("تم القبول", "قيد التسليم التلقائي", "تسليم تلقائي"),
+        "release": ("قيد الانتظار", "قيد التسليم التلقائي", "قيد الانتظار"),
+    }
+    if operation not in transitions:
+        raise ValueError(f"Unsupported automatic exchange transition: {operation}")
+    next_status, expected_status, delivery_status = transitions[operation]
+    with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(exchange_logs)").fetchall()}
+        if "delivery_status" not in columns:
+            conn.execute("ALTER TABLE exchange_logs ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'قيد الانتظار'")
+        if "request_channel_id" not in columns:
+            conn.execute("ALTER TABLE exchange_logs ADD COLUMN request_channel_id INTEGER")
+        if "request_message_id" not in columns:
+            conn.execute("ALTER TABLE exchange_logs ADD COLUMN request_message_id INTEGER")
+        conn.execute("BEGIN IMMEDIATE")
+        if delivery_status is None:
+            cursor = conn.execute(
+                "UPDATE exchange_logs SET status = ? WHERE id = ? AND status = ?",
+                (next_status, int(order_id), expected_status),
+            )
+        else:
+            cursor = conn.execute(
+                "UPDATE exchange_logs SET status = ?, delivery_status = ? WHERE id = ? AND status = ?",
+                (next_status, delivery_status, int(order_id), expected_status),
+            )
+        conn.commit()
+        return cursor.rowcount == 1
+
+
+async def report_auto_delivery_result(message: discord.Message, order_id: int, outcome: str) -> None:
+    secret = os.getenv("COSMO_AUTO_DELIVERY_SECRET", "")
+    issuer_id = getattr(getattr(bot, "user", None), "id", 0)
+    result_message = build_delivery_result_message(
+        secret=secret,
+        issuer_id=issuer_id,
+        order_id=order_id,
+        outcome=outcome,
+    )
+    if not result_message:
+        return
+    try:
+        await message.channel.send(result_message, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        logger.exception("Could not report automatic-delivery result for order %s.", order_id)
 
 
 def load_wallet_balances() -> dict[str, int]:
@@ -2084,6 +2184,31 @@ async def transfer_rob(ctx: commands.Context, target: discord.Member, amount: st
     await send_currency_command(ctx, target, amount, "!transfer", None)
 
 
+@bot.command(name="auto_delivery", aliases=["التسليم_التلقائي"])
+@commands.check(check_control_owner)
+async def auto_delivery(ctx: commands.Context, action: str = "status") -> None:
+    """Show or change automatic exchange delivery; only the control owner can use it."""
+    action = action.strip().lower()
+    if action == "status":
+        if len(os.getenv("COSMO_AUTO_DELIVERY_SECRET", "").strip()) < 32:
+            return await ctx.send(
+                "⚠️ التسليم التلقائي غير مهيأ؛ أضف COSMO_AUTO_DELIVERY_SECRET (32 حرفًا على الأقل) إلى ملفي البيئة المتطابقين."
+            )
+        status = "مفعّل" if auto_delivery_state()["enabled"] else "متوقف؛ الطلبات الجديدة يدوية"
+        return await ctx.send(f"حالة التسليم التلقائي: **{status}**. استخدم `{COMMAND_PREFIX}auto_delivery on|off`.")
+    if action not in {"on", "off"}:
+        return await ctx.send(f"الاستخدام: `{COMMAND_PREFIX}auto_delivery on|off|status`.")
+    if action == "on" and len(os.getenv("COSMO_AUTO_DELIVERY_SECRET", "").strip()) < 32:
+        return await ctx.send(
+            "❌ لا يمكن تشغيل التسليم التلقائي قبل ضبط COSMO_AUTO_DELIVERY_SECRET بالمفتاح نفسه في ملفي البيئة."
+        )
+    set_auto_delivery_enabled(action == "on")
+    if action == "on":
+        await ctx.send("✅ تم تشغيل التسليم التلقائي للطلبات الجديدة.")
+    else:
+        await ctx.send("⏸️ تم إيقاف التسليم التلقائي؛ ستُعالج الطلبات الجديدة يدويًا، ويظل زر نسخ الأمر متاحًا.")
+
+
 @bot.command(name="ping")
 async def ping(ctx: commands.Context) -> None:
     """Show the bot's connected state and Discord gateway latency."""
@@ -2363,6 +2488,116 @@ async def testall(ctx: commands.Context) -> None:
             checkpoint_path.unlink(missing_ok=True)
 
 
+async def process_auto_delivery_handoff(message: discord.Message) -> None:
+    """Accept only signed primary-bot handoffs and post each order at most once."""
+    if not getattr(getattr(message, "author", None), "bot", False):
+        return
+    if not auto_delivery_state()["enabled"]:
+        return
+    secret = os.getenv("COSMO_AUTO_DELIVERY_SECRET", "")
+    content = getattr(message, "content", "")
+    if HANDOFF_PREFIX not in content:
+        return
+    payload = verify_handoff_message(content, secret)
+    if payload is None or getattr(message.author, "id", None) != payload["issuer_id"]:
+        logger.warning("Ignored invalid or non-primary automatic-delivery handoff.")
+        return
+
+    async with AUTO_DELIVERY_LOCK:
+        if not auto_delivery_state()["enabled"]:
+            return
+        order_id = int(payload["order_id"])
+        try:
+            destination = bot.get_channel(int(payload["delivery_channel_id"]))
+            if destination is None:
+                destination = await bot.fetch_channel(int(payload["delivery_channel_id"]))
+        except (discord.HTTPException, AttributeError):
+            logger.exception("Could not resolve delivery channel for exchange order %s.", order_id)
+            try:
+                await message.channel.send(
+                    f"⚠️ تعذر فتح روم التسليم للطلب `#{order_id}`؛ استخدم زر الأمر اليدوي داخل الطلب.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                logger.exception("Could not report delivery-channel failure for order %s.", order_id)
+            return
+
+        destination_guild = getattr(destination, "guild", None)
+        if destination_guild is None or int(destination_guild.id) != int(payload["guild_id"]):
+            logger.warning("Rejected exchange order %s: destination guild did not match signed handoff.", order_id)
+            return
+        if payload["confirmation_type"] and int(destination.id) in pending_currency_confirmations:
+            try:
+                await message.channel.send(
+                    f"⚠️ تعذر بدء التسليم الآلي للطلب `#{order_id}` لأن هناك تأكيد تحويل سابقًا ينتظر صورة في روم التسليم؛ استخدم زر الأمر اليدوي بعد مراجعة الحالة.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                logger.exception("Could not report pending-confirmation conflict for order %s.", order_id)
+            return
+
+        try:
+            db_claimed = transition_auto_exchange_request(order_id, "claim")
+        except (OSError, sqlite3.Error):
+            logger.exception("Could not reserve exchange order %s in the shared database.", order_id)
+            return
+        if not db_claimed:
+            logger.info("Exchange order %s is no longer pending; no automatic command was sent.", order_id)
+            return
+
+        try:
+            claimed = claim_auto_delivery_order(order_id)
+        except (OSError, ValueError):
+            try:
+                transition_auto_exchange_request(order_id, "release")
+            except (OSError, sqlite3.Error):
+                logger.exception("Could not release exchange order %s after local claim failure.", order_id)
+            logger.exception("Could not persist the at-most-once claim for exchange order %s.", order_id)
+            return
+        if not claimed:
+            transition_auto_exchange_request(order_id, "release")
+            logger.info("Ignored duplicate automatic-delivery handoff for order %s.", order_id)
+            return
+
+        await report_auto_delivery_result(message, order_id, "processing")
+
+        confirmation_type = payload["confirmation_type"]
+        if confirmation_type:
+            pending_currency_confirmations[int(destination.id)] = confirmation_type
+        try:
+            await destination.send(
+                payload["command"],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            logger.info(
+                "Posted automatic %s delivery command for order %s in channel %s.",
+                payload["provider"], order_id, destination.id,
+            )
+            try:
+                completed = transition_auto_exchange_request(order_id, "complete")
+                if not completed:
+                    logger.error("Provider command was sent but order %s could not be marked as auto-accepted.", order_id)
+            except (OSError, sqlite3.Error):
+                logger.exception("Provider command was sent but database completion failed for order %s.", order_id)
+            await report_auto_delivery_result(message, order_id, "automatic")
+        except discord.HTTPException:
+            if confirmation_type:
+                pending_currency_confirmations.pop(int(destination.id), None)
+            try:
+                transition_auto_exchange_request(order_id, "release")
+            except (OSError, sqlite3.Error):
+                logger.exception("Could not release failed automatic-delivery claim for order %s.", order_id)
+            logger.exception("Could not post automatic delivery command for order %s.", order_id)
+            await report_auto_delivery_result(message, order_id, "pending")
+            try:
+                await message.channel.send(
+                    f"⚠️ تعذر إرسال أمر التسليم للطلب `#{order_id}`؛ استخدم زر الأمر اليدوي داخل الطلب.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                logger.exception("Could not report send failure for exchange order %s.", order_id)
+
+
 async def process_pending_currency_confirmation(message: discord.Message) -> None:
     """Read a pending currency confirmation image and send only its answer."""
     channel_id = getattr(message.channel, "id", None)
@@ -2420,6 +2655,7 @@ async def on_message(message: discord.Message) -> None:
             getattr(message.author, "id", None),
             content,
         )
+    await process_auto_delivery_handoff(message)
     await process_pending_currency_confirmation(message)
     await bot.process_commands(message)
 

@@ -133,6 +133,64 @@ class FinancialTransactionTests(unittest.TestCase):
         self.assertIsNone(database.deny_exchange_request(request_id))
         self.assertEqual(self.balance(13), 90)
 
+    def test_auto_delivery_claim_excludes_manual_acceptance_until_released(self):
+        database.update_balance(18, 500)
+        request_id = database.create_exchange_request(99, 18, 200, "Gems", 20.0, "test", "now")
+
+        self.assertTrue(database.claim_auto_exchange_delivery(request_id))
+        self.assertTrue(database.has_pending_exchange_request(18))
+        self.assertFalse(database.accept_exchange_request(request_id))
+        self.assertTrue(database.release_auto_exchange_delivery(request_id))
+        self.assertTrue(database.accept_exchange_request(request_id))
+        self.assertFalse(database.complete_auto_exchange_delivery(request_id))
+        self.assertEqual(self.balance(18), 300)
+        with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
+            self.assertEqual(
+                conn.execute("SELECT status, delivery_status FROM exchange_logs WHERE id = ?", (request_id,)).fetchone(),
+                ("تم القبول", "تسليم يدوي"),
+            )
+
+    def test_auto_delivery_completion_records_automatic_status_and_is_idempotent(self):
+        database.update_balance(19, 500)
+        request_id = database.create_exchange_request(99, 19, 200, "Gems", 20.0, "test", "now")
+
+        self.assertTrue(database.claim_auto_exchange_delivery(request_id))
+        self.assertTrue(database.complete_auto_exchange_delivery(request_id))
+        self.assertFalse(database.complete_auto_exchange_delivery(request_id))
+        self.assertFalse(database.accept_exchange_request(request_id))
+        with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
+            self.assertEqual(
+                conn.execute("SELECT status, delivery_status FROM exchange_logs WHERE id = ?", (request_id,)).fetchone(),
+                ("تم القبول", "تسليم تلقائي"),
+            )
+
+    def test_auto_rejection_refunds_reserved_balance_once(self):
+        database.update_balance(20, 500)
+        request_id = database.create_exchange_request(99, 20, 200, "Gems", 20.0, "test", "now")
+
+        self.assertTrue(database.claim_auto_exchange_delivery(request_id))
+        self.assertEqual(database.reject_auto_exchange_delivery(request_id), (20, 200))
+        self.assertIsNone(database.reject_auto_exchange_delivery(request_id))
+        self.assertEqual(self.balance(20), 500)
+        with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
+            self.assertEqual(
+                conn.execute("SELECT status, delivery_status FROM exchange_logs WHERE id = ?", (request_id,)).fetchone(),
+                ("مرفوض", "مرفوض"),
+            )
+
+    def test_request_log_message_reference_is_persisted(self):
+        database.update_balance(21, 500)
+        request_id = database.create_exchange_request(99, 21, 200, "Gems", 20.0, "test", "now")
+
+        self.assertTrue(database.set_exchange_request_message(request_id, 555, 777))
+        data = database.get_exchange_request_delivery_data(request_id)
+        self.assertEqual(data[0:2], (99, 21))
+        self.assertEqual(data[-2:], (555, 777))
+        self.assertEqual(data[6], "قيد الانتظار")
+        ui_rows = database.get_exchange_requests_for_ui()
+        self.assertEqual(ui_rows[0][0], request_id)
+        self.assertEqual(ui_rows[0][-2:], (555, 777))
+
     def test_direct_negative_balance_update_is_rejected(self):
         database.update_balance(14, 5)
         with self.assertRaises(ValueError):

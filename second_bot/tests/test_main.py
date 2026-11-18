@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import discord
 from discord.ext import commands
+from second_bot.auto_delivery import build_handoff_message
 
 _BOT_SPEC = spec_from_file_location("second_bot_main", Path(__file__).resolve().parents[1] / "main.py")
 assert _BOT_SPEC is not None and _BOT_SPEC.loader is not None
@@ -881,6 +882,101 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result[0][("Veryfi", "api")], "12880")
         veryfi.assert_awaited_once_with(b"enhanced", "image/png")
+
+
+class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.state_path = Path(self.temp_dir.name) / "auto_delivery_state.json"
+        self.state_patch = patch.object(main, "AUTO_DELIVERY_STATE_PATH", self.state_path)
+        self.state_patch.start()
+        self.addCleanup(self.state_patch.stop)
+        self.addCleanup(self.temp_dir.cleanup)
+        self.env_patch = patch.dict(os.environ, {
+            "COSMO_AUTO_DELIVERY_SECRET": "test-auto-delivery-secret-long-enough-12345",
+        })
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        main.pending_currency_confirmations.clear()
+        self.destination = SimpleNamespace(
+            id=456,
+            guild=SimpleNamespace(id=123),
+            send=AsyncMock(),
+        )
+        self.source_channel = SimpleNamespace(send=AsyncMock())
+        self.message = SimpleNamespace(
+            author=SimpleNamespace(bot=True, id=111),
+            channel=self.source_channel,
+            content=build_handoff_message(
+                secret=os.environ["COSMO_AUTO_DELIVERY_SECRET"],
+                issuer_id=111,
+                order_id=81,
+                guild_id=123,
+                delivery_channel_id=456,
+                user_id=789,
+                currency="ProBot Credits",
+                amount=250,
+            ),
+        )
+
+    async def test_signed_handoff_posts_one_command_and_arms_confirmation(self):
+        with patch.object(main.bot, "get_channel", return_value=self.destination), patch.object(
+            main, "transition_auto_exchange_request", return_value=True
+        ) as transition:
+            await main.process_auto_delivery_handoff(self.message)
+            self.assertEqual(main.pending_currency_confirmations[456], "type1")
+            main.pending_currency_confirmations.clear()
+            await main.process_auto_delivery_handoff(self.message)
+
+        self.destination.send.assert_awaited_once()
+        self.assertEqual(self.destination.send.await_args.args[0], "#credit 789 250")
+        self.assertEqual(
+            self.destination.send.await_args.kwargs["allowed_mentions"].to_dict(),
+            discord.AllowedMentions.none().to_dict(),
+        )
+        self.assertNotIn(456, main.pending_currency_confirmations)
+        self.assertEqual(main.auto_delivery_state()["processed_orders"], [81])
+        self.assertEqual(
+            [call.args[1] for call in transition.call_args_list],
+            ["claim", "complete", "claim", "release"],
+        )
+
+    async def test_disabled_auto_delivery_leaves_order_for_manual_handling(self):
+        main.write_runtime_json(self.state_path, {"enabled": False, "processed_orders": []})
+        with patch.object(main.bot, "get_channel", return_value=self.destination):
+            await main.process_auto_delivery_handoff(self.message)
+
+        self.destination.send.assert_not_awaited()
+
+    async def test_untrusted_non_bot_message_is_ignored(self):
+        self.message.author.bot = False
+        with patch.object(main.bot, "get_channel", return_value=self.destination):
+            await main.process_auto_delivery_handoff(self.message)
+
+        self.destination.send.assert_not_awaited()
+
+    def test_database_transition_claim_complete_and_release_is_atomic(self):
+        database_path = Path(self.temp_dir.name) / "global.db"
+        with main.sqlite3.connect(database_path) as conn:
+            conn.execute(
+                "CREATE TABLE exchange_logs (id INTEGER PRIMARY KEY, status TEXT, "
+                "delivery_status TEXT NOT NULL DEFAULT 'قيد الانتظار')"
+            )
+            conn.execute("INSERT INTO exchange_logs (id, status) VALUES (81, 'قيد الانتظار')")
+
+        with patch.object(main, "GLOBAL_DB_PATH", database_path):
+            self.assertTrue(main.transition_auto_exchange_request(81, "claim"))
+            self.assertFalse(main.transition_auto_exchange_request(81, "claim"))
+            self.assertTrue(main.transition_auto_exchange_request(81, "release"))
+            self.assertTrue(main.transition_auto_exchange_request(81, "claim"))
+            self.assertTrue(main.transition_auto_exchange_request(81, "complete"))
+            self.assertFalse(main.transition_auto_exchange_request(81, "release"))
+
+        with main.sqlite3.connect(database_path) as conn:
+            self.assertEqual(
+                conn.execute("SELECT status, delivery_status FROM exchange_logs WHERE id = 81").fetchone(),
+                ("تم القبول", "تسليم تلقائي"),
+            )
 
 
 if __name__ == "__main__":

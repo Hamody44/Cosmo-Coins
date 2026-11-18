@@ -56,6 +56,31 @@ def _ensure_guild_db_column(cur, table: str, column: str, definition: str, schem
                 return False
             raise
 
+
+def _ensure_exchange_delivery_columns(conn: sqlite3.Connection) -> None:
+    """Add persisted delivery state and the originating request-message reference."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(exchange_logs)").fetchall()}
+    definitions = {
+        "delivery_status": "TEXT NOT NULL DEFAULT 'قيد الانتظار'",
+        "request_channel_id": "INTEGER",
+        "request_message_id": "INTEGER",
+    }
+    delivery_status_added = False
+    changed = False
+    for column, definition in definitions.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE exchange_logs ADD COLUMN {column} {definition}")
+            changed = True
+            delivery_status_added = delivery_status_added or column == "delivery_status"
+    if delivery_status_added:
+        conn.execute(
+            "UPDATE exchange_logs SET delivery_status = CASE "
+            "WHEN status = 'تم القبول' THEN 'تسليم يدوي' "
+            "WHEN status LIKE 'مرفوض%' THEN 'مرفوض' ELSE 'قيد الانتظار' END"
+        )
+    if changed:
+        conn.commit()
+
 global_cursor.execute('''CREATE TABLE IF NOT EXISTS balances (
     user_id INTEGER PRIMARY KEY,
     balance INTEGER DEFAULT 0
@@ -78,8 +103,12 @@ global_cursor.execute('''CREATE TABLE IF NOT EXISTS exchange_logs (
     received_amount REAL,
     note TEXT,
     status TEXT,
-    timestamp TEXT
+    timestamp TEXT,
+    delivery_status TEXT NOT NULL DEFAULT 'قيد الانتظار',
+    request_channel_id INTEGER,
+    request_message_id INTEGER
 )''')
+_ensure_exchange_delivery_columns(global_conn)
 
 global_cursor.execute('''CREATE TABLE IF NOT EXISTS premium_codes (
     code TEXT PRIMARY KEY,
@@ -1783,7 +1812,7 @@ def transfer_balance_to_server_budget(user_id: int, guild_id: int, amount: int, 
 def has_pending_exchange_request(user_id: int) -> bool:
     with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
         row = conn.execute(
-            "SELECT 1 FROM exchange_logs WHERE user_id = ? AND status = 'قيد الانتظار' LIMIT 1",
+            "SELECT 1 FROM exchange_logs WHERE user_id = ? AND status IN ('قيد الانتظار', 'قيد التسليم التلقائي') LIMIT 1",
             (user_id,),
         ).fetchone()
         return row is not None
@@ -1802,7 +1831,7 @@ def _create_exchange_request_locked(guild_id: int, user_id: int, amount: int, cu
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
         conn.execute("BEGIN IMMEDIATE")
         pending = conn.execute(
-            "SELECT 1 FROM exchange_logs WHERE user_id = ? AND status = 'قيد الانتظار' LIMIT 1",
+            "SELECT 1 FROM exchange_logs WHERE user_id = ? AND status IN ('قيد الانتظار', 'قيد التسليم التلقائي') LIMIT 1",
             (user_id,),
         ).fetchone()
         if pending:
@@ -1857,9 +1886,11 @@ def create_exchange_request(guild_id: int, user_id: int, amount: int, currency: 
 
 def accept_exchange_request(request_id: int) -> bool:
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        _ensure_exchange_delivery_columns(conn)
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
-            "UPDATE exchange_logs SET status = 'تم القبول' WHERE id = ? AND status = 'قيد الانتظار'",
+            "UPDATE exchange_logs SET status = 'تم القبول', delivery_status = 'تسليم يدوي' "
+            "WHERE id = ? AND status = 'قيد الانتظار'",
             (request_id,),
         )
         conn.commit()
@@ -1867,6 +1898,7 @@ def accept_exchange_request(request_id: int) -> bool:
 
 def deny_exchange_request(request_id: int):
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        _ensure_exchange_delivery_columns(conn)
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT user_id, cosmo_amount FROM exchange_logs WHERE id = ? AND status = 'قيد الانتظار'",
@@ -1876,7 +1908,8 @@ def deny_exchange_request(request_id: int):
             conn.rollback()
             return None
         cur = conn.execute(
-            "UPDATE exchange_logs SET status = 'مرفوض' WHERE id = ? AND status = 'قيد الانتظار'",
+            "UPDATE exchange_logs SET status = 'مرفوض', delivery_status = 'مرفوض' "
+            "WHERE id = ? AND status = 'قيد الانتظار'",
             (request_id,),
         )
         if cur.rowcount != 1:
@@ -1895,11 +1928,123 @@ def deny_exchange_request(request_id: int):
         return row
 
 
+def claim_auto_exchange_delivery(request_id: int) -> bool:
+    """Atomically reserve a pending request for bot 2 before it sends a payout command."""
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        _ensure_exchange_delivery_columns(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE exchange_logs SET status = 'قيد التسليم التلقائي' "
+            "WHERE id = ? AND status = 'قيد الانتظار'",
+            (int(request_id),),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def complete_auto_exchange_delivery(request_id: int) -> bool:
+    """Mark a reserved auto payout accepted after bot 2 posted its provider command."""
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        _ensure_exchange_delivery_columns(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE exchange_logs SET status = 'تم القبول', delivery_status = 'تسليم تلقائي' "
+            "WHERE id = ? AND status = 'قيد التسليم التلقائي'",
+            (int(request_id),),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def release_auto_exchange_delivery(request_id: int) -> bool:
+    """Return an unposted auto payout to pending so admins can process it manually."""
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        _ensure_exchange_delivery_columns(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE exchange_logs SET status = 'قيد الانتظار', delivery_status = 'قيد الانتظار' "
+            "WHERE id = ? AND status = 'قيد التسليم التلقائي'",
+            (int(request_id),),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def reject_auto_exchange_delivery(request_id: int):
+    """Reject a bot-owned in-flight request and refund its reserved balance once."""
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        _ensure_exchange_delivery_columns(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT user_id, cosmo_amount FROM exchange_logs WHERE id = ? AND status = 'قيد التسليم التلقائي'",
+            (int(request_id),),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        user_id, amount = row
+        updated = conn.execute(
+            "UPDATE exchange_logs SET status = 'مرفوض', delivery_status = 'مرفوض' "
+            "WHERE id = ? AND status = 'قيد التسليم التلقائي'",
+            (int(request_id),),
+        )
+        if updated.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.execute("INSERT OR IGNORE INTO balances (user_id, balance) VALUES (?, 0)", (user_id,))
+        credited = conn.execute(
+            "UPDATE balances SET balance = balance + ? WHERE user_id = ? AND balance <= ?",
+            (amount, user_id, MAX_SQLITE_INTEGER - int(amount)),
+        )
+        if credited.rowcount != 1:
+            conn.rollback()
+            raise ValueError("استرداد الطلب سيرفع الرصيد فوق الحد المدعوم؛ بقي الطلب دون تغيير.")
+        conn.commit()
+        return row
+
+
+def set_exchange_request_message(request_id: int, channel_id: int, message_id: int) -> bool:
+    """Persist the global request-log message so later decisions can update its embed."""
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        _ensure_exchange_delivery_columns(conn)
+        cur = conn.execute(
+            "UPDATE exchange_logs SET request_channel_id = ?, request_message_id = ? WHERE id = ?",
+            (int(channel_id), int(message_id), int(request_id)),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def get_exchange_request_delivery_data(request_id: int) -> tuple | None:
+    """Return order state plus its request-log message reference for rendering."""
+    with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        _ensure_exchange_delivery_columns(conn)
+        return conn.execute(
+            "SELECT guild_id, user_id, cosmo_amount, target_currency, received_amount, status, delivery_status, "
+            "request_channel_id, request_message_id FROM exchange_logs WHERE id = ?",
+            (int(request_id),),
+        ).fetchone()
+
+
+def get_exchange_requests_for_ui(limit: int = 100) -> list[tuple]:
+    """Return recent requests with a stored log message so persistent controls can be restored."""
+    limit = max(1, min(int(limit), 500))
+    with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        _ensure_exchange_delivery_columns(conn)
+        return conn.execute(
+            "SELECT id, guild_id, user_id, target_currency, received_amount, status, delivery_status, "
+            "request_channel_id, request_message_id FROM exchange_logs "
+            "WHERE request_message_id IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+
 def expire_old_exchange_requests(max_age_seconds: int = 24 * 60 * 60) -> list[dict]:
     """Reject stale exchange requests and refund their reserved balances atomically."""
     cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - int(max_age_seconds)))
     expired = []
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=15)) as conn:
+        _ensure_exchange_delivery_columns(conn)
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             "SELECT id, guild_id, user_id, cosmo_amount, timestamp FROM exchange_logs "
@@ -1908,7 +2053,7 @@ def expire_old_exchange_requests(max_age_seconds: int = 24 * 60 * 60) -> list[di
         ).fetchall()
         for request_id, guild_id, user_id, amount, created_at in rows:
             updated = conn.execute(
-                "UPDATE exchange_logs SET status = 'مرفوض تلقائياً' "
+                "UPDATE exchange_logs SET status = 'مرفوض تلقائياً', delivery_status = 'مرفوض' "
                 "WHERE id = ? AND status = 'قيد الانتظار'",
                 (int(request_id),),
             )

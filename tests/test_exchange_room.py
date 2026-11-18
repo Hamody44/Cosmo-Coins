@@ -12,6 +12,7 @@ from cogs.economy import (
     manual_exchange_transfer_command,
     manual_probot_transfer_command,
 )
+from second_bot.auto_delivery import build_delivery_result_message
 from cogs.photo_contest import select_invite_for_join, select_used_invite
 
 
@@ -140,8 +141,80 @@ class ManualExchangeInstructionTests(unittest.TestCase):
 
     def test_delivery_view_shows_the_button_for_the_selected_provider(self):
         view = ManualExchangeDeliveryView(123, "AdamC", "T 987654 250")
-        self.assertEqual(len(view.children), 1)
-        self.assertEqual(view.children[0].label, "نسخ أمر AdamC")
+        self.assertIsNone(view.timeout)
+        self.assertEqual(len(view.children), 2)
+        self.assertEqual(
+            {button.label for button in view.children},
+            {"قبول الطلب يدويًا", "رفض الطلب"},
+        )
+
+        manually_accepted = ManualExchangeDeliveryView(
+            123, "AdamC", "T 987654 250", status="تسليم يدوي"
+        )
+        self.assertEqual(len(manually_accepted.children), 1)
+        self.assertEqual(manually_accepted.children[0].label, "نسخ أمر AdamC")
+
+        processing = ManualExchangeDeliveryView(
+            123, "AdamC", "T 987654 250", status="قيد التسليم التلقائي"
+        )
+        self.assertTrue(all(button.disabled for button in processing.children))
+
+    def test_delivery_status_labels_match_the_exchange_states(self):
+        labels = {
+            "قيد الانتظار": "⏳ قيد الانتظار",
+            "تسليم تلقائي": "🤖 تسليم تلقائي",
+            "تسليم يدوي": "🧑‍💼 تسليم يدوي",
+            "مرفوض": "❌ مرفوض",
+        }
+        for status, expected in labels.items():
+            with self.subTest(status=status):
+                self.assertEqual(Economy._delivery_status_label(status), expected)
+
+
+class ExchangeDeliveryCallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_origin_server_admin_can_use_central_request_button(self):
+        member = SimpleNamespace(
+            id=55,
+            guild_permissions=SimpleNamespace(administrator=True, manage_guild=False),
+        )
+        origin_guild = SimpleNamespace(
+            id=123,
+            owner_id=1,
+            get_member=lambda user_id: member if user_id == member.id else None,
+        )
+        cog = Economy(SimpleNamespace(get_guild=lambda guild_id: origin_guild))
+
+        self.assertTrue(await cog._can_manage_request_user(SimpleNamespace(id=55), 123))
+
+    async def test_primary_accepts_only_signed_result_from_the_stated_bot(self):
+        secret = "exchange-result-test-secret-that-is-long-enough"
+        content = build_delivery_result_message(
+            secret=secret, issuer_id=444, order_id=81, outcome="automatic"
+        )
+        message = SimpleNamespace(content=content, author=SimpleNamespace(id=444))
+        cog = Economy(SimpleNamespace())
+        with patch.dict(os.environ, {"COSMO_AUTO_DELIVERY_SECRET": secret}), patch(
+            "cogs.economy.complete_auto_exchange_delivery", return_value=True
+        ) as complete, patch.object(cog, "_update_exchange_request_embed", new=AsyncMock()) as update:
+            await cog.on_message(message)
+
+        complete.assert_called_once_with(81)
+        update.assert_awaited_once_with(81)
+
+    async def test_primary_ignores_tampered_or_wrong_author_result(self):
+        secret = "exchange-result-test-secret-that-is-long-enough"
+        content = build_delivery_result_message(
+            secret=secret, issuer_id=444, order_id=81, outcome="automatic"
+        )
+        message = SimpleNamespace(content=content, author=SimpleNamespace(id=445))
+        cog = Economy(SimpleNamespace())
+        with patch.dict(os.environ, {"COSMO_AUTO_DELIVERY_SECRET": secret}), patch(
+            "cogs.economy.complete_auto_exchange_delivery"
+        ) as complete, patch.object(cog, "_update_exchange_request_embed", new=AsyncMock()) as update:
+            await cog.on_message(message)
+
+        complete.assert_not_called()
+        update.assert_not_awaited()
 
 
 if __name__ == "__main__":

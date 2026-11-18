@@ -224,7 +224,13 @@ class Operations(commands.Cog):
     @tasks.loop(minutes=10)
     async def exchange_expiry_worker(self):
         expired = await asyncio.to_thread(database.expire_old_exchange_requests, 24 * 60 * 60)
+        economy = self.bot.get_cog("Economy")
         for item in expired:
+            if economy:
+                try:
+                    await economy._update_exchange_request_embed(item["request_id"])
+                except discord.HTTPException:
+                    pass
             try:
                 user = self.bot.get_user(item["user_id"]) or await self.bot.fetch_user(item["user_id"])
                 if user:
