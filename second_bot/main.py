@@ -15,6 +15,7 @@ import hashlib
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -186,6 +187,25 @@ def save_wallet_balances(balances: dict[str, int]) -> None:
         WALLET_STATE_PATH,
         {currency: int(balances[currency]) for currency in ("credit", "adamc", "rob")},
     )
+
+
+def parse_wallet_amount(value: str) -> int:
+    """Parse a wallet amount with optional k, m, or b suffix."""
+    normalized = str(value).strip().lower().replace(",", "")
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kmb]?)", normalized)
+    if match is None:
+        raise ValueError("invalid wallet amount")
+
+    try:
+        amount = Decimal(match.group(1))
+    except InvalidOperation as exc:
+        raise ValueError("invalid wallet amount") from exc
+
+    multiplier = {"": 1, "k": 1_000, "m": 1_000_000, "b": 1_000_000_000}[match.group(2)]
+    result = amount * multiplier
+    if result != result.to_integral_value():
+        raise ValueError("wallet amount must resolve to a whole number")
+    return int(result)
 
 
 def load_ocr_space_rate_state(*, now: float | None = None) -> dict[str, object]:
@@ -1690,14 +1710,14 @@ async def set_wallet(ctx: commands.Context, credit: str, adamc: str, rob: str) -
     """Store the owner's Credit, AdamC, and Robux balances."""
     try:
         values = {
-            "credit": int(credit.replace(",", "")),
-            "adamc": int(adamc.replace(",", "")),
-            "rob": int(rob.replace(",", "")),
+            "credit": parse_wallet_amount(credit),
+            "adamc": parse_wallet_amount(adamc),
+            "rob": parse_wallet_amount(rob),
         }
     except (AttributeError, TypeError, ValueError):
         await ctx.send(
             f"❌ الاستخدام الصحيح: `{COMMAND_PREFIX}set_wallet <credit> <adamc> <rob>`\n"
-            "أدخل أعدادًا صحيحة غير سالبة."
+            "أدخل أعدادًا غير سالبة، ويمكن استخدام k أو m أو b مثل: `1.5m`."
         )
         return
 
