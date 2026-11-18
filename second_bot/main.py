@@ -56,6 +56,7 @@ PRIMARY_OWNER_ID = 988840428591808584
 COMMAND_PREFIX = "$"
 COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
+WALLET_STATE_PATH = BASE_DIR / ".runtime" / "wallet_balances.json"
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 DISCORD_INVITE_PATTERN = re.compile(
     r"^https://(?:www\.)?(?:discord\.gg/|discord\.com/invite/)([A-Za-z0-9-]+)(?:[/?#].*)?$",
@@ -164,6 +165,27 @@ def write_runtime_json(path: Path, payload: dict[str, object]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     temporary_path.replace(path)
+
+
+def load_wallet_balances() -> dict[str, int]:
+    """Load the owner's manually stored external-currency balances."""
+    state = read_runtime_json(WALLET_STATE_PATH) or {}
+    balances: dict[str, int] = {}
+    for currency in ("credit", "adamc", "rob"):
+        try:
+            amount = int(state.get(currency, 0))
+        except (TypeError, ValueError):
+            amount = 0
+        balances[currency] = max(0, amount)
+    return balances
+
+
+def save_wallet_balances(balances: dict[str, int]) -> None:
+    """Persist the owner's manually stored external-currency balances."""
+    write_runtime_json(
+        WALLET_STATE_PATH,
+        {currency: int(balances[currency]) for currency in ("credit", "adamc", "rob")},
+    )
 
 
 def load_ocr_space_rate_state(*, now: float | None = None) -> dict[str, object]:
@@ -1655,6 +1677,54 @@ async def check_control_owner(ctx: commands.Context) -> bool:
         return await bot.is_owner(ctx.author)
     except (discord.HTTPException, AttributeError):
         return False
+
+
+async def check_wallet_owner(ctx: commands.Context) -> bool:
+    """Allow wallet commands only for the configured primary owner."""
+    return getattr(ctx.author, "id", None) == PRIMARY_OWNER_ID
+
+
+@bot.command(name="set_wallet", aliases=["حفظ_العملات", "تعديل_العملات"])
+@commands.check(check_wallet_owner)
+async def set_wallet(ctx: commands.Context, credit: str, adamc: str, rob: str) -> None:
+    """Store the owner's Credit, AdamC, and Robux balances."""
+    try:
+        values = {
+            "credit": int(credit.replace(",", "")),
+            "adamc": int(adamc.replace(",", "")),
+            "rob": int(rob.replace(",", "")),
+        }
+    except (AttributeError, TypeError, ValueError):
+        await ctx.send(
+            f"❌ الاستخدام الصحيح: `{COMMAND_PREFIX}set_wallet <credit> <adamc> <rob>`\n"
+            "أدخل أعدادًا صحيحة غير سالبة."
+        )
+        return
+
+    if any(amount < 0 for amount in values.values()):
+        await ctx.send("❌ لا يمكن أن تكون أرصدة العملات أرقامًا سالبة.")
+        return
+
+    save_wallet_balances(values)
+    await ctx.send(
+        "✅ تم حفظ أرصدتك:\n"
+        f"• Credit: `{values['credit']:,}`\n"
+        f"• AdamC: `{values['adamc']:,}`\n"
+        f"• Rob: `{values['rob']:,}`"
+    )
+
+
+@bot.command(name="wallet", aliases=["العملات", "محفظتي"])
+@commands.check(check_wallet_owner)
+async def wallet(ctx: commands.Context) -> None:
+    """Show the owner's stored Credit, AdamC, and Robux balances."""
+    values = load_wallet_balances()
+    await ctx.send(
+        "💰 أرصدتك المحفوظة:\n"
+        f"• Credit: `{values['credit']:,}`\n"
+        f"• AdamC: `{values['adamc']:,}`\n"
+        f"• Rob: `{values['rob']:,}`"
+    )
 
 
 @bot.command(name="start")
