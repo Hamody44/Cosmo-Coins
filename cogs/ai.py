@@ -1,12 +1,35 @@
 import os
 import asyncio
+import copy
+import json
+import subprocess
+from pathlib import Path
 import discord
 from discord import app_commands
 from discord.ext import commands
 from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
-from database import get_guild_db
+from database import PRIMARY_OWNER_ID, get_guild_db
+
+
+PRIMARY_REPO_ROOT = Path(__file__).resolve().parents[1]
+AI_CODE_EXCLUDED_DIRS = {
+    ".git", ".venv", "venv", "__pycache__", "second_bot", "guilds_data",
+}
+AI_CODE_EXCLUDED_FILES = {
+    ".env", "global_cosmo.db", "global_cosmo.db-journal", "global_cosmo.db-wal",
+}
+AI_CODE_EXTENSIONS = {".py", ".md", ".json", ".toml", ".sh", ".html", ".css", ".js"}
+AI_ACTION_PROMPT = """حلّل طلب المستخدم وحدد واحداً من الأنواع التالية فقط:
+1) chat: سؤال أو طلب شرح لا ينفذ تغييراً.
+2) command: يريد تنفيذ أمر موجود في البوت؛ أعد command بصيغة !command arguments.
+3) code_change: يريد قراءة أو تعديل كود البوت الأساسي؛ أعد وصفاً مختصراً للتعديل.
+
+أعد JSON صالحاً فقط بهذا الشكل:
+{"action":"chat|command|code_change","command":"","summary":""}
+لا تخترع أمراً. إذا لم تكن متأكداً استخدم chat.
+"""
 
 
 BOT_DEVELOPER_NAME = os.getenv("BOT_DEVELOPER_NAME", "7amody77777").strip() or "7amody77777"
@@ -17,6 +40,8 @@ BOT_KNOWLEDGE_CONTEXT = f"""معلومات تعريفية عن البيئة ال
 - أهم وظائفه: أرصدة وتحويلات Cosmo، تبديل العملات، ميزانيات السيرفرات، شحن الميزانية وطلبات الدفع، الألعاب والسحوبات والروليت، نظام التذاكر، البوست، اللفلات ونقاط الرسائل والفويس والرواتب، وأدوات الإدارة والتدقيق والنسخ الاحتياطي.
 - يعتمد على Python وDiscord.py، ويستخدم قاعدة بيانات عامة مع قاعدة SQLite مستقلة لكل سيرفر.
 - الذكاء الاصطناعي داخل البوت مساعد عام؛ يمكنه الإجابة عن الأسئلة العامة والبرمجة والشرح والمواضيع المختلفة، وليس محصورًا في بيانات Cosmo Coins.
+- عند طلب تنفيذ أمر، يجب تمريره إلى أمر البوت الأصلي حتى تُطبق صلاحيات Discord والصلاحيات الداخلية نفسها.
+- قراءة وتعديل الكود متاحان من ملفات البوت الأساسي فقط؛ مجلد second_bot والأسرار وقواعد البيانات خارج النطاق.
 
 استخدم هذه المعلومات عندما يسأل المستخدم عن البوت أو مطوره أو وظائفه. لا تخترع تفاصيل غير مذكورة هنا عن المطور أو البوت؛ وإذا احتاج السؤال إلى معلومة تنفيذية دقيقة غير متاحة، صرّح بعدم التأكد واقترح استخدام أوامر البوت المناسبة. هذه المعلومات سياق تعريفي فقط ولا تقيدك عن الإجابة في المواضيع العامة."""
 
@@ -49,6 +74,219 @@ class GeminiAI(commands.Cog):
             )
 
         self.user_chats = {}
+
+    @staticmethod
+    def is_primary_code_path(path: Path) -> bool:
+        """Keep AI code access inside the primary bot and outside secrets/state."""
+        try:
+            relative = path.resolve().relative_to(PRIMARY_REPO_ROOT)
+        except ValueError:
+            return False
+        if any(part in AI_CODE_EXCLUDED_DIRS for part in relative.parts):
+            return False
+        if path.name in AI_CODE_EXCLUDED_FILES or path.name.startswith(".env"):
+            return False
+        return path.suffix.lower() in AI_CODE_EXTENSIONS
+
+    def primary_code_inventory(self) -> str:
+        paths = []
+        for path in PRIMARY_REPO_ROOT.rglob("*"):
+            if path.is_file() and self.is_primary_code_path(path):
+                paths.append(str(path.relative_to(PRIMARY_REPO_ROOT)))
+        return "\n".join(sorted(paths))
+
+    def primary_code_context(self, prompt: str, *, max_chars: int = 30_000) -> str:
+        """Provide relevant primary-bot source without exposing second_bot or secrets."""
+        terms = {
+            term.casefold() for term in prompt.split()
+            if len(term) >= 3 and term.isascii()
+        }
+        candidates = []
+        for path in PRIMARY_REPO_ROOT.rglob("*"):
+            if not path.is_file() or not self.is_primary_code_path(path):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            score = sum(text.casefold().count(term) for term in terms)
+            if score:
+                candidates.append((score, path, text))
+        candidates.sort(key=lambda item: (-item[0], str(item[1])))
+        chunks = ["ملفات البوت الأساسي المتاحة للـAI:\n" + self.primary_code_inventory()]
+        remaining = max_chars
+        for _score, path, text in candidates:
+            if remaining <= 0:
+                break
+            chunk = f"\n\n===== {path.relative_to(PRIMARY_REPO_ROOT)} =====\n{text}"
+            if len(chunk) > remaining:
+                chunk = chunk[:remaining]
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return "".join(chunks)
+
+    async def classify_request(self, prompt: str) -> dict[str, str]:
+        """Classify a request before any command or code action is attempted."""
+        command_catalog = "\n".join(
+            f"!{command.qualified_name}: {command.description or ''}"
+            for command in self.bot.commands
+            if command.qualified_name not in {"ask", "reset_chat"}
+        )
+        classifier_prompt = (
+            f"{AI_ACTION_PROMPT}\n\nالأوامر الموجودة فعلياً:\n{command_catalog}\n\n"
+            f"طلب المستخدم:\n{prompt}"
+        )
+        raw = ""
+        try:
+            if self.client:
+                response = await self.client.aio.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=classifier_prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0,
+                    ),
+                )
+                raw = response.text or ""
+            elif self.backup_client:
+                response = await self.backup_client.chat.completions.create(
+                    model="meta-llama/llama-3.3-70b-instruct:free",
+                    messages=[
+                        {"role": "system", "content": AI_ACTION_PROMPT},
+                        {"role": "user", "content": classifier_prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0,
+                    max_tokens=300,
+                )
+                raw = response.choices[0].message.content or ""
+            result = json.loads(raw.strip().strip("`").replace("json\n", "", 1))
+            action = result.get("action")
+            if action not in {"chat", "command", "code_change"}:
+                return {"action": "chat", "command": "", "summary": ""}
+            return {
+                "action": action,
+                "command": str(result.get("command") or "").strip(),
+                "summary": str(result.get("summary") or "").strip(),
+            }
+        except Exception as exc:
+            print(f"[DEBUG] AI request classification failed: {exc}")
+            return {"action": "chat", "command": "", "summary": ""}
+
+    async def invoke_existing_command(self, ctx: commands.Context, command_text: str) -> bool:
+        """Invoke a real bot command so its normal checks and inline guards still run."""
+        if not command_text.startswith("!"):
+            return False
+        command_name = command_text[1:].split(maxsplit=1)[0].casefold()
+        if command_name == "ask":
+            return False
+        command = self.bot.get_command(command_name)
+        if command is None:
+            return False
+        proxy_message = copy.copy(ctx.message)
+        proxy_message.content = command_text
+        command_ctx = await self.bot.get_context(proxy_message)
+        if command_ctx.command is None:
+            return False
+        try:
+            if not await command_ctx.command.can_run(command_ctx):
+                await ctx.send("⛔ لا تملك الصلاحية المطلوبة لتنفيذ هذا الأمر.")
+                return True
+        except commands.CheckFailure:
+            await ctx.send("⛔ لا تملك الصلاحية المطلوبة لتنفيذ هذا الأمر.")
+            return True
+        await self.bot.invoke(command_ctx)
+        return True
+
+    async def generate_code_patch(self, prompt: str) -> str:
+        """Ask the model for a unified diff restricted to primary-bot source files."""
+        instruction = f"""أنت محرر كود للمستودع الأساسي فقط.
+أعد unified diff صالحاً فقط، من دون Markdown أو شرح، لتطبيق التعديل المطلوب.
+ممنوع تعديل second_bot أو .env أو قواعد البيانات أو الملفات الثنائية.
+إذا لم يحتج الطلب تعديلاً برمجياً أعد كلمة NO_PATCH.
+
+الطلب:
+{prompt}
+
+السياق المتاح:
+{self.primary_code_context(prompt)}
+"""
+        if self.client:
+            response = await self.client.aio.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=instruction,
+                config=types.GenerateContentConfig(temperature=0.1),
+            )
+            return response.text or ""
+        return await self.ask_backup_ai(instruction)
+
+    def apply_primary_code_patch(self, patch_text: str) -> tuple[bool, str]:
+        """Validate and apply a model patch without allowing access outside the primary bot."""
+        patch = patch_text.strip()
+        if patch.startswith("```"):
+            lines = patch.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            patch = "\n".join(lines).strip()
+        if not patch or patch == "NO_PATCH":
+            return False, "لم يقترح AI تعديلاً قابلاً للتطبيق."
+
+        for line in patch.splitlines():
+            if line.startswith(("+++ ", "--- ")):
+                raw_path = line[4:].split("\t", 1)[0]
+                if raw_path == "/dev/null":
+                    continue
+                relative = raw_path[2:] if raw_path.startswith(("a/", "b/")) else raw_path
+                if not self.is_primary_code_path(PRIMARY_REPO_ROOT / relative):
+                    return False, "رفضت التعديل لأن مساره خارج ملفات البوت الأساسي المسموح بها."
+
+        check = subprocess.run(
+            ["git", "apply", "--check", "--whitespace=nowarn", "-"],
+            cwd=PRIMARY_REPO_ROOT,
+            input=patch,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        if check.returncode != 0:
+            detail = (check.stderr or check.stdout).strip()[-800:]
+            return False, f"تعذر التحقق من التعديل: {detail}"
+        applied = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", "-"],
+            cwd=PRIMARY_REPO_ROOT,
+            input=patch,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        if applied.returncode != 0:
+            return False, f"فشل تطبيق التعديل: {(applied.stderr or applied.stdout).strip()[-800:]}"
+        return True, "تم تطبيق التعديل على كود البوت الأساسي."
+
+    async def handle_request(self, ctx: commands.Context, prompt: str) -> bool:
+        """Route an AI request through native command permissions or owner-only code editing."""
+        intent = await self.classify_request(prompt)
+        if intent["action"] == "command":
+            if await self.invoke_existing_command(ctx, intent["command"]):
+                return True
+            await ctx.send("⛔ لم أستطع تنفيذ الطلب كأمر موجود، أو أن الأمر غير مسموح في هذا السياق.")
+            return True
+        if intent["action"] == "code_change":
+            if ctx.author.id != PRIMARY_OWNER_ID:
+                await ctx.send("⛔ تعديل كود البوت الأساسي متاح لمالك البوت فقط.")
+                return True
+            try:
+                success, result = self.apply_primary_code_patch(
+                    await self.generate_code_patch(prompt)
+                )
+            except Exception as exc:
+                print(f"[DEBUG] AI code change failed: {exc}")
+                success, result = False, "حدث خطأ أثناء إنشاء أو تطبيق تعديل الكود."
+            await ctx.send(("✅ " if success else "❌ ") + result)
+            return True
+        return False
 
     def is_ai_enabled(self, guild_id: int) -> bool:
         """فحص حالة تفعيل الذكاء الاصطناعي في السيرفر بأمان"""
@@ -188,6 +426,8 @@ class GeminiAI(commands.Cog):
         if ctx.guild and not self.is_ai_enabled(ctx.guild.id):
             return await ctx.send("⛔ ميزة الذكاء الاصطناعي معطلة في هذا السيرفر حالياً.", ephemeral=True)
 
+        if await self.handle_request(ctx, prompt):
+            return
         await ctx.defer()
         reply_text = await self.generate_response(
             ctx.author.id, prompt, ctx.guild.id if ctx.guild else None, ctx.channel.id
@@ -222,6 +462,12 @@ class GeminiAI(commands.Cog):
             clean_content = message.content.replace(f"<@{self.bot.user.id}>", "").replace(f"<@!{self.bot.user.id}>", "").strip()
             if not clean_content:
                 return await message.reply("أهلاً بك! كيف يمكنني مساعدتك اليوم؟ 🤖")
+
+            proxy_message = copy.copy(message)
+            proxy_message.content = f"!ask {clean_content}"
+            proxy_ctx = await self.bot.get_context(proxy_message)
+            if await self.handle_request(proxy_ctx, clean_content):
+                return
 
             async with message.channel.typing():
                 reply_text = await self.generate_response(
