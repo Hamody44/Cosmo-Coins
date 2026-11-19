@@ -17,7 +17,7 @@ _MODEL = load_model(DEFAULT_MODEL_PATH) if DEFAULT_MODEL_PATH.is_file() else Non
 
 
 def _candidate_segments(image, model=None):
-    if hasattr(model, "predict_proba") and getattr(model, "n_features_in_", None) == 1155:
+    if hasattr(model, "predict_proba") and getattr(model, "n_features_in_", None) == 459:
         segments = segment_type1_image(image)
         return [segments] if len(segments) == CELL_COUNT else []
     segments = _best_segments(image)

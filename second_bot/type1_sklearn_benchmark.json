@@ -25,7 +25,7 @@
   },
   "validation_metrics": {
     "validation_samples": 408,
-    "overall_digit_accuracy": 0.7034313725490197,
+    "overall_digit_accuracy": 0.7328431372549019,
     "per_digit_accuracy": {
       "0": {
         "correct": 24,
@@ -33,29 +33,29 @@
         "accuracy": 0.7272727272727273
       },
       "1": {
-        "correct": 34,
+        "correct": 33,
         "total": 42,
-        "accuracy": 0.8095238095238095
+        "accuracy": 0.7857142857142857
       },
       "2": {
+        "correct": 26,
+        "total": 37,
+        "accuracy": 0.7027027027027027
+      },
+      "3": {
         "correct": 24,
         "total": 37,
         "accuracy": 0.6486486486486487
       },
-      "3": {
-        "correct": 22,
-        "total": 37,
-        "accuracy": 0.5945945945945946
-      },
       "4": {
+        "correct": 32,
+        "total": 42,
+        "accuracy": 0.7619047619047619
+      },
+      "5": {
         "correct": 31,
         "total": 42,
         "accuracy": 0.7380952380952381
-      },
-      "5": {
-        "correct": 27,
-        "total": 42,
-        "accuracy": 0.6428571428571429
       },
       "6": {
         "correct": 36,
@@ -63,14 +63,14 @@
         "accuracy": 0.7659574468085106
       },
       "7": {
-        "correct": 37,
+        "correct": 36,
         "total": 45,
-        "accuracy": 0.8222222222222222
+        "accuracy": 0.8
       },
       "8": {
-        "correct": 24,
+        "correct": 29,
         "total": 43,
-        "accuracy": 0.5581395348837209
+        "accuracy": 0.6744186046511628
       },
       "9": {
         "correct": 28,
@@ -79,25 +79,26 @@
       }
     },
     "full_captcha_total": 80,
-    "full_captcha_correct": 25,
-    "full_captcha_accuracy": 0.3125,
+    "full_captcha_correct": 37,
+    "full_captcha_accuracy": 0.4625,
     "top_3_confused_pairs": [
       {
-        "true_digit": "8",
-        "predicted_digit": "0",
-        "count": 7
-      },
-      {
-        "true_digit": "0",
-        "predicted_digit": "3",
-        "count": 4
+        "true_digit": "4",
+        "predicted_digit": "1",
+        "count": 5
       },
       {
         "true_digit": "3",
-        "predicted_digit": "6",
+        "predicted_digit": "9",
+        "count": 4
+      },
+      {
+        "true_digit": "8",
+        "predicted_digit": "0",
         "count": 4
       }
-    ]
+    ],
+    "latency_note": "Measured separately on 80 samples after warm-up"
   },
   "augmentation": {
     "variants_per_crop": 4,
@@ -109,28 +110,29 @@
     ],
     "validation_training_matrix_shape": [
       6520,
-      1155
+      459
     ],
     "final_training_matrix_shape": [
       8152,
-      1155
+      459
     ]
   },
-  "classifier": "make_pipeline(StandardScaler(), SVC(kernel='rbf', C=4.0, gamma='scale', probability=True))",
-  "feature_length": 1155,
-  "model_path": "/home/ubuntu/Cosmo-Coins/second_bot/models/type1_model.joblib",
-  "model_size_bytes": 1847685,
-  "model_under_2mb": true,
+  "classifier": "SVC(kernel='rbf', C=6.0, gamma='scale', probability=True)",
+  "feature_length": 459,
+  "latency_ms": {
+    "mean": 62.3313,
+    "median": 61.9945,
+    "p95": 68.1664,
+    "sample_count": 80,
+    "warmup": 5
+  },
+  "model_path": "second_bot/models/type1_model.joblib",
+  "model_size_bytes": 3108473,
+  "model_under_2mb": false,
   "pillow_version": "13.0.0",
-  "storage_format": "SVC support glyph pixels/metadata stored in compact LZMA form; reconstructed once during model loading",
-  "support_vector_count": 6465,
-  "inference_benchmark": {
-    "captcha": "samples/type1_01.webp",
-    "module_import_and_model_restore_ms": 3674.36,
-    "batch_predict_proba_five_digits_median_ms": 55.815,
-    "shared_segmentation_first_measurement_ms": 106.618,
-    "predict_with_confidence_full_path_median_ms": 132.122,
-    "under_5ms": false,
-    "note": "Warm steady-state timings; all five digits were passed to predict_proba in one batch. Module-import timing includes dependency import and model reconstruction. The 5ms target is not met; timings are environment-specific."
+  "latency_baseline_ms": 132.0,
+  "preprocessing_line_removal_ms": {
+    "min": 8.87,
+    "max": 11.76
   }
 }

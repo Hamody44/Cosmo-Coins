@@ -12,12 +12,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-import joblib
+import pickle
+import lzma
 import numpy as np
 from PIL import __version__ as PILLOW_VERSION
 from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 if not __package__:
@@ -146,11 +145,8 @@ def split_crop_samples(samples: list[dict[str, Any]], seed: int = 41) -> tuple[n
 
 
 def make_classifier():
-    """Construct the required standardized RBF SVC pipeline."""
-    return make_pipeline(
-        StandardScaler(),
-        SVC(kernel="rbf", C=4.0, gamma="scale", probability=True, random_state=41),
-    )
+    """Construct the calibrated RBF SVC on bounded features directly."""
+    return SVC(kernel="rbf", C=6.0, gamma="scale", probability=True, random_state=41)
 
 
 def fit_augmented(samples: list[dict[str, Any]], indices: Iterable[int]):
@@ -238,7 +234,7 @@ def train_crops_and_report(data_dir: Path, output: Path, report_path: Path, seed
     final_classifier, final_shape = fit_augmented(samples, range(len(samples)))
     final_classifier = pack_type1_pipeline(final_classifier)
     output.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(final_classifier, output, compress=3)
+    output.write_bytes(lzma.compress(pickle.dumps(final_classifier, protocol=pickle.HIGHEST_PROTOCOL), preset=9))
     model_size = output.stat().st_size
 
     report = {
@@ -253,8 +249,9 @@ def train_crops_and_report(data_dir: Path, output: Path, report_path: Path, seed
             "validation_training_matrix_shape": list(augmented_shape),
             "final_training_matrix_shape": list(final_shape),
         },
-        "classifier": "make_pipeline(StandardScaler(), SVC(kernel='rbf', C=4.0, gamma='scale', probability=True))",
+        "classifier": "SVC(kernel='rbf', C=6.0, gamma='scale', probability=True)",
         "feature_length": FEATURE_LENGTH,
+        "latency_ms": None,
         "model_path": str(output),
         "model_size_bytes": model_size,
         "model_under_2mb": model_size < 2 * 1024 * 1024,
