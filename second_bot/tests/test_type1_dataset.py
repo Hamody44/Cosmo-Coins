@@ -15,7 +15,7 @@ class Type1DatasetTests(unittest.TestCase):
     def test_repository_dataset_has_type1_only_and_keeps_png_webp(self):
         root = Path(__file__).resolve().parents[2] / "samples"
         rows = read_dataset(root)
-        self.assertEqual(len(rows), 309)
+        self.assertEqual(len(rows), 409)
         self.assertTrue(all(row["type"] == "type1" and not row["filename"].startswith("type2_") for row in rows))
         formats = {Path(row["filename"]).suffix.lower() for row in rows}
         self.assertTrue({".png", ".webp"}.issubset(formats))

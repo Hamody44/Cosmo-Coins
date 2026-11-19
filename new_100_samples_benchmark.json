@@ -1,0 +1,922 @@
+{
+  "sources": 100,
+  "exact_sequences": 0,
+  "exact_sequence_accuracy": 0.0,
+  "correct_digits": 0,
+  "total_digits": 500,
+  "digit_accuracy": 0.0,
+  "abstentions": 100,
+  "unlabelled_archive_files": [
+    "101.png",
+    "102.png",
+    "103.png",
+    "104.png",
+    "105.png",
+    "106.png",
+    "107.png",
+    "108.png",
+    "109.png"
+  ],
+  "results": [
+    {
+      "filename": "type1_310.png",
+      "expected": "40763",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_311.png",
+      "expected": "61677",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_312.png",
+      "expected": "55477",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_313.png",
+      "expected": "54129",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_314.png",
+      "expected": "76447",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_315.png",
+      "expected": "66433",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_316.png",
+      "expected": "79147",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_317.png",
+      "expected": "44430",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_318.png",
+      "expected": "61890",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_319.png",
+      "expected": "61890",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_320.png",
+      "expected": "39318",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_321.png",
+      "expected": "70825",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_322.png",
+      "expected": "58845",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_323.png",
+      "expected": "32097",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_324.png",
+      "expected": "39047",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_325.png",
+      "expected": "90684",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_326.png",
+      "expected": "66084",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_327.png",
+      "expected": "67371",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_328.png",
+      "expected": "65318",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_329.png",
+      "expected": "38468",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_330.png",
+      "expected": "10302",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_331.png",
+      "expected": "14808",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_332.png",
+      "expected": "72062",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_333.png",
+      "expected": "35922",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_334.png",
+      "expected": "39474",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_335.png",
+      "expected": "20567",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_336.png",
+      "expected": "83626",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_337.png",
+      "expected": "42334",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_338.png",
+      "expected": "39778",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_339.png",
+      "expected": "76972",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_340.png",
+      "expected": "15130",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_341.png",
+      "expected": "87675",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_342.png",
+      "expected": "81870",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_343.png",
+      "expected": "66079",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_344.png",
+      "expected": "16161",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_345.png",
+      "expected": "66288",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_346.png",
+      "expected": "45785",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_347.png",
+      "expected": "75585",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_348.png",
+      "expected": "32119",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_349.png",
+      "expected": "27246",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_350.png",
+      "expected": "59308",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_351.png",
+      "expected": "84531",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_352.png",
+      "expected": "36362",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_353.png",
+      "expected": "18186",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_354.png",
+      "expected": "66306",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_355.png",
+      "expected": "75900",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_356.png",
+      "expected": "53741",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_357.png",
+      "expected": "77786",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_358.png",
+      "expected": "27514",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_359.png",
+      "expected": "73511",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_360.png",
+      "expected": "18951",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_361.png",
+      "expected": "47620",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_362.png",
+      "expected": "93837",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_363.png",
+      "expected": "46454",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_364.png",
+      "expected": "56574",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_365.png",
+      "expected": "15699",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_366.png",
+      "expected": "96860",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_367.png",
+      "expected": "58485",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_368.png",
+      "expected": "76914",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_369.png",
+      "expected": "80553",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_370.png",
+      "expected": "53486",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_371.png",
+      "expected": "34778",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_372.png",
+      "expected": "74177",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_373.png",
+      "expected": "67663",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_374.png",
+      "expected": "53500",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_375.png",
+      "expected": "27085",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_376.png",
+      "expected": "54114",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_377.png",
+      "expected": "83337",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_378.png",
+      "expected": "48903",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_379.png",
+      "expected": "75550",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_380.png",
+      "expected": "15671",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_381.png",
+      "expected": "86662",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_382.png",
+      "expected": "61932",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_383.png",
+      "expected": "59864",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_384.png",
+      "expected": "71219",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_385.png",
+      "expected": "31413",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_386.png",
+      "expected": "29120",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_387.png",
+      "expected": "94764",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_388.png",
+      "expected": "89158",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_389.png",
+      "expected": "71766",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_390.png",
+      "expected": "50084",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_391.png",
+      "expected": "20745",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_392.png",
+      "expected": "12916",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_393.png",
+      "expected": "94712",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_394.png",
+      "expected": "84953",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_395.png",
+      "expected": "18601",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_396.png",
+      "expected": "85615",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_397.png",
+      "expected": "61950",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_398.png",
+      "expected": "76309",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_399.png",
+      "expected": "48481",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_400.png",
+      "expected": "48471",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_401.png",
+      "expected": "58311",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_402.png",
+      "expected": "17094",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_403.png",
+      "expected": "56303",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_404.png",
+      "expected": "56303",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_405.png",
+      "expected": "80255",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_406.png",
+      "expected": "58217",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_407.png",
+      "expected": "97134",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_408.png",
+      "expected": "35955",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "type1_409.png",
+      "expected": "49137",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    }
+  ]
+}
