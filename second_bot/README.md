@@ -45,7 +45,7 @@ second_bot/.venv/bin/python -m pip install --upgrade pip
 second_bot/.venv/bin/python -m pip install -r second_bot/cosmo_second_requirements.lock
 ```
 
-يعمل مسار OCR المستخدم حاليًا للنوع الثاني باستخدام Pillow فقط، ولا يحتاج إلى OpenCV أو NumPy. أما `type1 local OCR` الجديد فهو تجربة منفصلة لبنية CNN-BiLSTM مع CTC، ولا يستورده البوت أثناء التشغيل ولا يغيّر سلوك النوع الثاني.
+يعمل مسار OCR المستخدم حاليًا للنوع الثاني باستخدام Pillow فقط، ولا يحتاج إلى OpenCV أو NumPy. تتضمن وحدة Type1 المحلية نموذجًا اختياريًا بـscikit-learn، مع بقاء مسار Type1 الهجين في `main.py` منفصلًا وعدم تغيير سلوك Type2.
 
 قبل التشغيل، أنشئ أيضًا ملف `.env` الخاص ببوت Cosmo-Coins في جذر المستودع وفق إعداداته الحالية، إن لم يكن موجودًا بالفعل. لا تستبدل ملف `.env` قائمًا.
 
@@ -120,20 +120,25 @@ PYTHONPATH=second_bot python3 second_bot/evaluate_type1_rgb.py \
 
 ## مكتبة OCR المحلية المستقلة لـType1
 
-أعيد تنظيم OCR المحلي للنوع الأول في `type1_ocr/` بواجهة Python قابلة للاختبار وإعادة الاستخدام. تعتمد المكتبة على Pillow وNumPy لتسريع استخراج ميزات البكسلات وإسقاطات الصفوف والأعمدة، مع مسار احتياطي يعمل دون NumPy، وتدعم PNG وWebP. تفصل التحميل والمعالجة الأولية والتقطيع والسمات والقوالب والثقة. لا تحتوي المكتبة على OCR.Space أو Gemini؛ تظل مزودات OCR الاحتياطية ضمن `main.py`. بقيت الملفات `type1_local_ocr.py` و`train_type1_local_ocr.py` و`evaluate_type1_rgb.py` كواجهات توافق لأن البوت والاختبارات والوثائق الحالية تستوردها.
+توفر `type1_ocr/` واجهة محلية قابلة لإعادة الاستخدام. يحتفظ `recognize_type1(source, model=None, *, model_path=..., max_distance=..., minimum_confidence=...)` بتوقيعه ونتيجته `Type1Result`، وتعيد `predict_with_confidence(image)` النص وثقة أضعف خانة وثقات الخانات الخمس. عند وجود `models/type1_model.joblib` تحمّل المكتبة نموذج scikit-learn مرة واحدة عند الاستيراد. يظل مسار OCR الهجين الموجود في `main.py` منفصلًا؛ هذا النموذج متاح عبر وحدة Type1 وواجهاتها المتوافقة ولا يغيّر مسار `$numbers` تلقائيًا.
 
-اقرأ مجموعة البيانات أو درّب مرشحًا محليًا بأوامر مستقلة:
+يتشارك مولّد `digits_crops/` والاستدلال خوارزمية RGB threshold وإزالة الخطوط وتقسيم الخانات الخمس. يستبعد قارئ القصّات الصور ذات الارتفاع الأصلي الأقل من 20px أو العرض الأقل من 5px، ويستخرج 1155 ميزة لكل خانة: لوحة 32×32 مع الحفاظ على نسبة الأبعاد وهامش 2px، متوسطات 8×8، إسقاطات أفقية/عمودية، وثلاث ميزات وصفية. يحتفظ `read_dataset` ودوال التدريب القديمة بتوافقها مع `samples/label.csv`.
+
+لتدريب نموذج القصّات والتحقق منه ثم إعادة تدريبه على كامل البيانات:
+
+```bash
+python3 second_bot/tools/train_type1.py --data digits_crops
+```
+
+يستخدم التدريب تقسيمًا stratified بخمس طيات ومجموعات حسب صورة CAPTCHA، لذلك لا تتسرب قصّات الصورة الواحدة بين التدريب والتحقق. يطبّق أربع نسخ خفيفة لكل قصّة، ويطبع دقة كل رقم والدقة الإجمالية ودقة CAPTCHA كاملة وأعلى ثلاثة التباسات، ثم يحفظ pipeline `StandardScaler + RBF SVC` بضغط joblib. يحفظ تقرير التحقق في `second_bot/type1_sklearn_benchmark.json` دون استبدال التقرير التاريخي. للاستمرار في أدوات مجموعة البيانات القديمة:
 
 ```bash
 python3 second_bot/tools/inspect_type1_dataset.py --data samples
-python3 second_bot/tools/train_type1.py --data samples
 python3 second_bot/tools/evaluate_type1.py --data samples
 python3 second_bot/tools/evaluate_type1_rgb.py --data samples --variants blue --max-candidates 6
 ```
 
-يقبل قارئ البيانات صفوف `type1` فقط (309 عينة في البيانات الحالية)، ويستبعد صفوف `type2`، ولا يكتب التدريب إلى `models/type1_local_ocr.json` المستخدم اختياريًا في البوت. يوضع المرشح افتراضيًا في `models/candidates/type1_local_ocr_candidate.json` ويظل `production_enabled: false`؛ لا توجد آلية ترقية أو تفعيل تلقائي. التقسيم العشوائي لصورة داخل المجموعة لا يثبت التكافؤ مع OCR.Space/Gemini أو التعميم على دفعة مستقلة، لذا يجب إبقاء مسار البوت الحالي كما هو حتى ينجح تقييم مستقل موثق. واجهة `safe_consensus` ترفض النتائج المنفردة أو منخفضة الثقة أو المتعارضة كي يستطيع التطبيق مواصلة fallback القائم.
-
-في تقييم seed `41` الحالي دُرّبت القوالب على 247 صورة واختُبرت على 62 صورة من تقسيم عشوائي بلا `batch_id`: كانت دقة التسلسل الكامل `0/62`، ودقة المحارف `23.87%`، مع 4 حالات امتناع. هذا أقل من خط الأساس التاريخي المذكور أعلاه (`27.5%` على 170 صورة)، مع اختلاف التقسيم والحجم فلا تُعد مقارنة مباشرة؛ لكنه لا يثبت تحسنًا، ولذلك تبقى بوابة التفعيل مغلقة.
+نتائج التقييم مقياس للمجموعة المحفوظة فقط، ولا تعني تلقائيًا تفوقًا على OCR.Space أو Gemini أو صلاحية تبديل مسار البوت الإنتاجي. تظل واجهة `safe_consensus` وخيارات fallback كما هي.
 
 تشغيل اختبارات second_bot:
 

@@ -14,6 +14,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -21,6 +22,9 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO / "second_bot"))
+from type1_ocr.features_type1 import segment_type1_image
+
 OUT = REPO / "digits_crops"
 EXPECTED_SIZE = (300, 110)
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
@@ -275,13 +279,7 @@ def tight_digit_crop(mask: np.ndarray, x0: int, x1: int) -> np.ndarray:
 
 def process_source(source):
     with Image.open(io.BytesIO(source["data"])) as im:
-        rgb = np.asarray(im.convert("RGB"), dtype=np.uint8)
-    # Required colorful-dot removal / binary ink mask.
-    ink = np.mean(rgb, axis=2) < 115
-    cleaned = remove_long_lines(ink)
-    dividers = find_dividers(cleaned)
-    cuts = [0, *dividers, cleaned.shape[1]]
-    return [tight_digit_crop(cleaned, cuts[pos], cuts[pos + 1]) for pos in range(5)]
+        return [np.asarray(crop, dtype=np.uint8) for crop in segment_type1_image(im)]
 
 
 def load_font(size: int):

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .confidence import score_confidence
+from .features_type1 import segment_type1_image
 from .image import ImageSource, load_image
 from .preprocessing import preprocessing_variants
 from .segmentation import split_candidate_records
@@ -15,7 +16,10 @@ from .types import CELL_COUNT, Type1Result
 _MODEL = load_model(DEFAULT_MODEL_PATH) if DEFAULT_MODEL_PATH.is_file() else None
 
 
-def _candidate_segments(image):
+def _candidate_segments(image, model=None):
+    if hasattr(model, "predict_proba") and getattr(model, "n_features_in_", None) == 1155:
+        segments = segment_type1_image(image)
+        return [segments] if len(segments) == CELL_COUNT else []
     segments = _best_segments(image)
     return [segments] if len(segments) == CELL_COUNT else []
 
@@ -42,7 +46,7 @@ def recognize_type1(
 
     image = load_image(source)
     best: dict[str, Any] | None = None
-    for segments in _candidate_segments(image):
+    for segments in _candidate_segments(image, selected_model):
         prediction = predict_segments(segments, selected_model)
         if prediction.get("abstained"):
             continue
@@ -69,3 +73,21 @@ def recognize_type1(
 
 
 recognize = recognize_type1
+
+
+def predict_with_confidence(source: ImageSource) -> tuple[str, float, tuple[float, ...]]:
+    """Return the five-digit prediction, its weakest digit probability, and all five probabilities."""
+    if _MODEL is None:
+        return "", 0.0, ()
+    image = load_image(source)
+    candidates = _candidate_segments(image, _MODEL)
+    if not candidates:
+        return "", 0.0, ()
+    prediction = predict_segments(candidates[0], _MODEL)
+    if prediction.get("abstained"):
+        return "", 0.0, ()
+    text = str(prediction.get("text", ""))
+    values = tuple(float(item.get("confidence", 0.0)) for item in prediction.get("confidence", []))
+    if len(text) != CELL_COUNT or not text.isascii() or not text.isdigit() or len(values) != CELL_COUNT:
+        return "", 0.0, ()
+    return text, min(values), values

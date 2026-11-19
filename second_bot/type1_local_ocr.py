@@ -11,7 +11,7 @@ from typing import Any, Iterable
 from PIL import Image
 
 try:  # package import, e.g. second_bot.type1_local_ocr
-    from .type1_ocr.api import recognize_type1
+    from .type1_ocr.api import predict_with_confidence, recognize_type1
     from .type1_ocr.features import extract_feature as _feature, feature_distance as _distance
     from .type1_ocr.image import load_image
     from .type1_ocr.preprocessing import grayscale as _gray, preprocessing_variants
@@ -30,7 +30,7 @@ try:  # package import, e.g. second_bot.type1_local_ocr
     )
     from .type1_ocr.types import CELL_COUNT, FEATURE_SIZE, IMAGE_SIZE
 except ImportError:  # direct import from the bot's working directory
-    from type1_ocr.api import recognize_type1
+    from type1_ocr.api import predict_with_confidence, recognize_type1
     from type1_ocr.features import extract_feature as _feature, feature_distance as _distance
     from type1_ocr.image import load_image
     from type1_ocr.preprocessing import grayscale as _gray, preprocessing_variants

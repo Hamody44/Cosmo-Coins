@@ -1,0 +1,136 @@
+{
+  "dataset": "digits_crops",
+  "total_usable_crops": 2038,
+  "skipped_outliers_by_digit": {
+    "0": 1,
+    "1": 0,
+    "2": 1,
+    "3": 0,
+    "4": 0,
+    "5": 0,
+    "6": 1,
+    "7": 4,
+    "8": 0,
+    "9": 0
+  },
+  "split": {
+    "method": "StratifiedGroupKFold",
+    "seed": 41,
+    "validation_fraction_target": 0.2,
+    "training_captchas": 327,
+    "validation_captchas": 82,
+    "training_samples": 1630,
+    "validation_samples": 408,
+    "group_overlap": 0
+  },
+  "validation_metrics": {
+    "validation_samples": 408,
+    "overall_digit_accuracy": 0.7034313725490197,
+    "per_digit_accuracy": {
+      "0": {
+        "correct": 24,
+        "total": 33,
+        "accuracy": 0.7272727272727273
+      },
+      "1": {
+        "correct": 34,
+        "total": 42,
+        "accuracy": 0.8095238095238095
+      },
+      "2": {
+        "correct": 24,
+        "total": 37,
+        "accuracy": 0.6486486486486487
+      },
+      "3": {
+        "correct": 22,
+        "total": 37,
+        "accuracy": 0.5945945945945946
+      },
+      "4": {
+        "correct": 31,
+        "total": 42,
+        "accuracy": 0.7380952380952381
+      },
+      "5": {
+        "correct": 27,
+        "total": 42,
+        "accuracy": 0.6428571428571429
+      },
+      "6": {
+        "correct": 36,
+        "total": 47,
+        "accuracy": 0.7659574468085106
+      },
+      "7": {
+        "correct": 37,
+        "total": 45,
+        "accuracy": 0.8222222222222222
+      },
+      "8": {
+        "correct": 24,
+        "total": 43,
+        "accuracy": 0.5581395348837209
+      },
+      "9": {
+        "correct": 28,
+        "total": 40,
+        "accuracy": 0.7
+      }
+    },
+    "full_captcha_total": 80,
+    "full_captcha_correct": 25,
+    "full_captcha_accuracy": 0.3125,
+    "top_3_confused_pairs": [
+      {
+        "true_digit": "8",
+        "predicted_digit": "0",
+        "count": 7
+      },
+      {
+        "true_digit": "0",
+        "predicted_digit": "3",
+        "count": 4
+      },
+      {
+        "true_digit": "3",
+        "predicted_digit": "6",
+        "count": 4
+      }
+    ]
+  },
+  "augmentation": {
+    "variants_per_crop": 4,
+    "transforms": [
+      "original",
+      "horizontal shift -1px + rotation -3deg",
+      "horizontal shift +1px + rotation +3deg",
+      "vertical shift +/-1px + rotation +/-3deg"
+    ],
+    "validation_training_matrix_shape": [
+      6520,
+      1155
+    ],
+    "final_training_matrix_shape": [
+      8152,
+      1155
+    ]
+  },
+  "classifier": "make_pipeline(StandardScaler(), SVC(kernel='rbf', C=4.0, gamma='scale', probability=True))",
+  "feature_length": 1155,
+  "model_path": "/home/ubuntu/Cosmo-Coins/second_bot/models/type1_model.joblib",
+  "model_size_bytes": 1847685,
+  "model_under_2mb": true,
+  "pillow_version": "13.0.0",
+  "storage_format": "SVC support glyph pixels/metadata stored in compact LZMA form; reconstructed once during model loading",
+  "support_vector_count": 6465,
+  "inference_benchmark": {
+    "captcha": "samples/type1_01.webp",
+    "module_import_and_model_restore_ms": 3674.36,
+    "batch_predict_proba_five_digits_median_ms": 55.815,
+    "shared_segmentation_first_measurement_ms": 106.618,
+    "predict_with_confidence_full_path_median_ms": 132.122,
+    "under_5ms": false,
+    "note": "Warm steady-state timings; all five digits were passed to predict_proba in one batch. Module-import timing includes dependency import and model reconstruction. The 5ms target is not met; timings are environment-specific."
+  }
+}

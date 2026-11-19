@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import hashlib
+import lzma
 from typing import Any, Iterable
 
 import joblib
@@ -15,6 +16,7 @@ from sklearn.svm import SVC
 
 from .errors import ModelFormatError
 from .features import extract_features
+from .features_type1 import FEATURE_LENGTH as TYPE1_FEATURE_LENGTH, extract_features as extract_features_type1
 from .image import load_image
 from .preprocessing import preprocessing_variants
 from .segmentation import split_candidate_records
@@ -22,6 +24,64 @@ from .types import CELL_COUNT, FEATURE_SIZE
 
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "type1_model.joblib"
 FEATURE_LENGTH = FEATURE_SIZE[0] * FEATURE_SIZE[1] + 1
+
+
+class PackedType1SVC(SVC):
+    """SVC estimator storing Type1 support glyphs compactly until inference."""
+
+    def _restore_type1_state(self) -> None:
+        if getattr(self, "_type1_restored", False):
+            return
+        count = self._type1_packed_vector_count
+        pixel_data = lzma.decompress(self._type1_packed_pixels)
+        pixels = np.frombuffer(pixel_data, dtype=np.uint8).reshape(count, 1024)
+        canvas = pixels.reshape(count, 32, 32).astype(np.float32) / 255.0
+        blocks = canvas.reshape(count, 8, 4, 8, 4).mean(axis=(2, 4)).reshape(count, 64)
+        horizontal = canvas.mean(axis=2)
+        vertical = canvas.mean(axis=1)
+        metadata = np.frombuffer(lzma.decompress(self._type1_packed_metadata), dtype=np.float32).reshape(count, 3)
+        features = np.concatenate((canvas.reshape(count, 1024), blocks, horizontal, vertical, metadata), axis=1)
+        self.support_vectors_ = self._type1_scaler.transform(features).astype(np.float64)
+        dual = lzma.decompress(self._type1_packed_dual_coef)
+        self.dual_coef_ = np.frombuffer(dual, dtype=np.float32).reshape(self._type1_dual_shape).astype(np.float64)
+        self._type1_restored = True
+
+    def predict_proba(self, X):
+        self._restore_type1_state()
+        return super().predict_proba(X)
+
+    def predict(self, X):
+        self._restore_type1_state()
+        return super().predict(X)
+
+    def decision_function(self, X):
+        self._restore_type1_state()
+        return super().decision_function(X)
+
+
+def pack_type1_pipeline(pipeline):
+    """Pack redundant Type1 SVC pixel-derived features before joblib persistence."""
+    scaler = pipeline.named_steps.get("standardscaler")
+    estimator = pipeline.named_steps.get("svc")
+    if scaler is None or not isinstance(estimator, SVC):
+        raise ModelFormatError("expected a StandardScaler + SVC Type1 pipeline")
+    raw = scaler.inverse_transform(estimator.support_vectors_)
+    count = len(raw)
+    pixels = np.clip(np.rint(raw[:, :1024] * 255.0), 0, 255).astype(np.uint8)
+    metadata = raw[:, 1152:].astype(np.float32)
+    packed = PackedType1SVC(**estimator.get_params(deep=False))
+    packed.__dict__.update(estimator.__dict__)
+    packed._type1_packed_vector_count = count
+    packed._type1_packed_pixels = lzma.compress(pixels.tobytes(), preset=9)
+    packed._type1_packed_metadata = lzma.compress(metadata.tobytes(), preset=9)
+    packed._type1_packed_dual_coef = lzma.compress(estimator.dual_coef_.astype(np.float32).tobytes(), preset=9)
+    packed._type1_dual_shape = estimator.dual_coef_.shape
+    packed._type1_scaler = scaler
+    packed._type1_restored = False
+    packed.support_vectors_ = np.empty((0, TYPE1_FEATURE_LENGTH), dtype=np.float64)
+    packed.dual_coef_ = np.empty((0, 0), dtype=np.float64)
+    pipeline.steps[-1] = (pipeline.steps[-1][0], packed)
+    return pipeline
 
 
 def _valid_answer(answer: str) -> bool:
@@ -140,7 +200,14 @@ def build_model(rows: Iterable[dict[str, str]], data_dir: Path) -> dict[str, Any
     }
 
 
-def validate_model(model: Any) -> dict[str, Any]:
+def validate_model(model: Any) -> Any:
+    # New model: one fitted StandardScaler + RBF SVC pipeline using the shared
+    # 1155-value features. Keep the original dictionary format below readable.
+    if hasattr(model, "predict_proba") and getattr(model, "n_features_in_", None) == TYPE1_FEATURE_LENGTH:
+        classes = getattr(model, "classes_", None)
+        if classes is None or set(str(item) for item in classes) != set("0123456789"):
+            raise ModelFormatError("Type1 scikit-learn model must contain all ten digit classes")
+        return model
     if not isinstance(model, dict) or "classifier" not in model:
         raise ModelFormatError("Type1 model must contain a classifier")
     if model.get("schema_version") != 4:
@@ -153,9 +220,13 @@ def validate_model(model: Any) -> dict[str, Any]:
     return model
 
 
-def load_model(path: str | Path = DEFAULT_MODEL_PATH) -> dict[str, Any]:
+def load_model(path: str | Path = DEFAULT_MODEL_PATH) -> Any:
     try:
-        return validate_model(joblib.load(Path(path).expanduser()))
+        model = validate_model(joblib.load(Path(path).expanduser()))
+        estimator = getattr(model, "named_steps", {}).get("svc")
+        if isinstance(estimator, PackedType1SVC):
+            estimator._restore_type1_state()
+        return model
     except FileNotFoundError:
         raise
     except Exception as exc:
@@ -177,9 +248,29 @@ def save_model(model: dict[str, Any], path: str | Path) -> Path:
     return output
 
 
-def predict_segments(segments: list[Image.Image], model: dict[str, Any]) -> dict[str, Any]:
+def predict_segments(segments: list[Image.Image], model: Any) -> dict[str, Any]:
     if len(segments) != CELL_COUNT:
         return {"text": "", "confidence": [], "abstained": True}
+    if hasattr(model, "predict_proba") and getattr(model, "n_features_in_", None) == TYPE1_FEATURE_LENGTH:
+        # Exactly one predict_proba call for all five slots.
+        X = np.asarray([extract_features_type1(segment) for segment in segments], dtype=np.float32)
+        probabilities = model.predict_proba(X)
+        classes = np.asarray(model.classes_)
+        predictions = classes[np.argmax(probabilities, axis=1)]
+        confidences = []
+        for predicted, row in zip(predictions, probabilities):
+            order = np.sort(row)[::-1]
+            confidences.append({
+                "digit": str(predicted),
+                "confidence": float(order[0]),
+                "margin": float(order[0] - order[1]) if len(order) > 1 else float(order[0]),
+            })
+        return {
+            "text": "".join(str(item) for item in predictions),
+            "confidence": confidences,
+            "mean_distance": float(1.0 - np.mean([item["confidence"] for item in confidences])),
+            "abstained": False,
+        }
     lookup = model.get("feature_lookup", {})
     if lookup:
         predictions = []
