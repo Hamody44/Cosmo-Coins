@@ -145,8 +145,40 @@ def split_crop_samples(samples: list[dict[str, Any]], seed: int = 41) -> tuple[n
 
 
 def make_classifier():
-    """Construct the calibrated RBF SVC on bounded features directly."""
-    return SVC(kernel="rbf", C=6.0, gamma="scale", probability=True, random_state=41)
+    """Construct the fast uncalibrated RBF SVC; confidence uses margins."""
+    return SVC(kernel="rbf", C=7.0, gamma="scale", probability=False, random_state=41)
+
+
+def _softmax_confidence(decision: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    scores = np.asarray(decision, dtype=np.float64)
+    if scores.ndim == 1:
+        scores = scores[:, None]
+    shifted = scores - scores.max(axis=1, keepdims=True)
+    probabilities = np.exp(np.clip(shifted, -50.0, 0.0))
+    probabilities /= probabilities.sum(axis=1, keepdims=True)
+    order = np.sort(probabilities, axis=1)[:, ::-1]
+    return probabilities, order[:, 0] - order[:, 1]
+
+
+def prune_training_samples(samples: list[dict[str, Any]], train_indices: np.ndarray, seed: int = 41) -> tuple[np.ndarray, dict[str, Any]]:
+    """Discard only strong OOF contradictions using grouped five-fold CV."""
+    subset = np.asarray(train_indices, dtype=int)
+    X = np.asarray([samples[int(i)]["features"] for i in subset], dtype=np.float32)
+    y = np.asarray([samples[int(i)]["label"] for i in subset], dtype="U1")
+    groups = np.asarray([samples[int(i)]["group"] for i in subset])
+    oof_pred = np.empty(len(subset), dtype="U1")
+    oof_margin = np.zeros(len(subset), dtype=np.float32)
+    splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed + 1)
+    for fit_pos, test_pos in splitter.split(X, y, groups):
+        classifier = make_classifier()
+        classifier.fit(X[fit_pos], y[fit_pos])
+        decision = classifier.decision_function(X[test_pos])
+        oof_pred[test_pos] = classifier.classes_[np.argmax(decision, axis=1)].astype("U1")
+        _, margins = _softmax_confidence(decision)
+        oof_margin[test_pos] = margins.astype(np.float32)
+    strong_disagreement = (oof_pred != y) & (oof_margin >= 0.16)
+    kept = subset[~strong_disagreement]
+    return kept, {"method": "grouped_5_fold_oof_margin", "before": int(len(subset)), "removed": int(strong_disagreement.sum()), "after": int(len(kept)), "threshold": 0.16}
 
 
 def fit_augmented(samples: list[dict[str, Any]], indices: Iterable[int]):
@@ -225,13 +257,16 @@ def train_crops_and_report(data_dir: Path, output: Path, report_path: Path, seed
     if not samples:
         raise ValueError(f"no usable digit crops found in {data_dir}")
     train_indices, validation_indices, split_info = split_crop_samples(samples, seed=seed)
-    print(f"Fitting validation fold on {len(train_indices)} grouped crops (4x augmentation)...", flush=True)
+    # OOF pruning is intentionally disabled: rare brush/font variants are valid.
+    pruned_train_indices = train_indices
+    pruning = {"method": "disabled", "before": int(len(train_indices)), "removed": 0, "after": int(len(train_indices))}
+    print(f"OOF pruning disabled; retaining {len(train_indices)} grouped training crops", flush=True)
     validation_classifier, augmented_shape = fit_augmented(samples, train_indices)
     metrics = evaluate_crop_model(validation_classifier, samples, validation_indices)
-    print("Validation metrics computed; refitting final classifier on all usable crops...", flush=True)
+    print("Validation metrics computed; fitting final classifier on all usable crops...", flush=True)
 
-    # Once the held-out score is recorded, refit on every usable source crop.
-    final_classifier, final_shape = fit_augmented(samples, range(len(samples)))
+    final_indices = range(len(samples))
+    final_classifier, final_shape = fit_augmented(samples, final_indices)
     final_classifier = pack_type1_pipeline(final_classifier)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(lzma.compress(pickle.dumps(final_classifier, protocol=pickle.HIGHEST_PROTOCOL), preset=9))
@@ -242,14 +277,15 @@ def train_crops_and_report(data_dir: Path, output: Path, report_path: Path, seed
         "total_usable_crops": len(samples),
         "skipped_outliers_by_digit": skipped,
         "split": split_info,
+        "pruning": pruning,
         "validation_metrics": metrics,
         "augmentation": {
-            "variants_per_crop": 4,
-            "transforms": ["original", "horizontal shift -1px + rotation -3deg", "horizontal shift +1px + rotation +3deg", "vertical shift +/-1px + rotation +/-3deg"],
+            "variants_per_crop": 5,
+            "transforms": ["original", "horizontal shift -1px", "horizontal shift +1px", "vertical shift -1px", "vertical shift +1px"],
             "validation_training_matrix_shape": list(augmented_shape),
             "final_training_matrix_shape": list(final_shape),
         },
-        "classifier": "SVC(kernel='rbf', C=6.0, gamma='scale', probability=True)",
+        "classifier": "SVC(kernel='rbf', C=7.0, gamma='scale', probability=False)",
         "feature_length": FEATURE_LENGTH,
         "latency_ms": None,
         "model_path": str(output),

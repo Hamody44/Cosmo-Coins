@@ -147,8 +147,8 @@ def build_model(rows: Iterable[dict[str, str]], data_dir: Path) -> dict[str, Any
 
 
 def validate_model(model: Any) -> Any:
-    # New model: one calibrated RBF SVC using the bounded 459-value features.
-    if hasattr(model, "predict_proba") and getattr(model, "n_features_in_", None) == TYPE1_FEATURE_LENGTH:
+    # New model: one fast RBF SVC using the bounded 875-value features.
+    if hasattr(model, "decision_function") and getattr(model, "n_features_in_", None) == TYPE1_FEATURE_LENGTH:
         classes = getattr(model, "classes_", None)
         if classes is None or set(str(item) for item in classes) != set("0123456789"):
             raise ModelFormatError("Type1 scikit-learn model must contain all ten digit classes")
@@ -186,33 +186,28 @@ def save_model(model: dict[str, Any], path: str | Path) -> Path:
     persisted["persisted_classifier_kind"] = "compact_feature_lookup"
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(gzip.compress(pickle.dumps(persisted, protocol=pickle.HIGHEST_PROTOCOL), compresslevel=9))
+    output.write_bytes(lzma.compress(pickle.dumps(persisted, protocol=pickle.HIGHEST_PROTOCOL), preset=9))
     return output
 
 
 def predict_segments(segments: list[Image.Image], model: Any) -> dict[str, Any]:
     if len(segments) != CELL_COUNT:
         return {"text": "", "confidence": [], "abstained": True}
-    if hasattr(model, "predict_proba") and getattr(model, "n_features_in_", None) == TYPE1_FEATURE_LENGTH:
-        # Exactly one predict_proba call for all five slots.
+    if hasattr(model, "decision_function") and getattr(model, "n_features_in_", None) == TYPE1_FEATURE_LENGTH:
         X = np.asarray([extract_features_type1(segment) for segment in segments], dtype=np.float32)
-        probabilities = model.predict_proba(X)
+        decision = np.asarray(model.decision_function(X), dtype=np.float64)
+        if decision.ndim == 1:
+            decision = decision[:, None]
+        shifted = decision - decision.max(axis=1, keepdims=True)
+        probabilities = np.exp(np.clip(shifted, -50.0, 0.0))
+        probabilities /= probabilities.sum(axis=1, keepdims=True)
         classes = np.asarray(model.classes_)
-        predictions = classes[np.argmax(probabilities, axis=1)]
+        predictions = classes[np.argmax(decision, axis=1)]
         confidences = []
         for predicted, row in zip(predictions, probabilities):
             order = np.sort(row)[::-1]
-            confidences.append({
-                "digit": str(predicted),
-                "confidence": float(order[0]),
-                "margin": float(order[0] - order[1]) if len(order) > 1 else float(order[0]),
-            })
-        return {
-            "text": "".join(str(item) for item in predictions),
-            "confidence": confidences,
-            "mean_distance": float(1.0 - np.mean([item["confidence"] for item in confidences])),
-            "abstained": False,
-        }
+            confidences.append({"digit": str(predicted), "confidence": float(order[0]), "margin": float(order[0] - order[1]) if len(order) > 1 else float(order[0])})
+        return {"text": "".join(str(item) for item in predictions), "confidence": confidences, "mean_distance": float(1.0 - np.mean([item["confidence"] for item in confidences])), "abstained": False}
     lookup = model.get("feature_lookup", {})
     if lookup:
         predictions = []
