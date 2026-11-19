@@ -25,10 +25,15 @@ from functools import lru_cache
 
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from google.genai import types
 from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
+from auto_join import (
+    load_auto_join_queue,
+    publish_second_bot_state,
+    remove_auto_join,
+)
 
 from local_ocr import detect_style, load_image, load_model, recognize
 from evaluate_type1_rgb import channel_variants, mask_variants
@@ -73,6 +78,8 @@ AUTO_DELIVERY_STATE_PATH = BASE_DIR / ".runtime" / "auto_delivery_state.json"
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 pending_currency_confirmations: dict[int, str] = {}
 AUTO_DELIVERY_LOCK = asyncio.Lock()
+AUTO_JOIN_INTERVAL_SECONDS = 60
+auto_join_next_allowed_at = 0.0
 DISCORD_INVITE_PATTERN = re.compile(
     r"^https://(?:www\.)?(?:discord\.gg/|discord\.com/invite/)([A-Za-z0-9-]+)(?:[/?#].*)?$",
     re.IGNORECASE,
@@ -2644,6 +2651,66 @@ async def process_pending_currency_confirmation(message: discord.Message) -> Non
         logger.exception("Could not process pending %s currency confirmation.", expected_type)
 
 
+def publish_current_second_bot_state() -> None:
+    """Publish the account identity and guild cache for the primary bot."""
+    publish_second_bot_state(
+        user_id=getattr(getattr(bot, "user", None), "id", None),
+        guild_ids=[guild.id for guild in bot.guilds],
+    )
+
+
+async def process_auto_join_queue_once() -> bool:
+    """Accept at most one queued invite, leaving a full minute between joins."""
+    global auto_join_next_allowed_at
+    if time.monotonic() < auto_join_next_allowed_at:
+        return False
+    queue = sorted(load_auto_join_queue().values(), key=lambda item: (item["queued_at"], item["guild_id"]))
+    for item in queue:
+        guild_id = int(item["guild_id"])
+        if bot.get_guild(guild_id) is not None:
+            remove_auto_join(guild_id)
+            continue
+        invite_url = str(item["invite_url"])
+        try:
+            invite = await bot.fetch_invite(invite_url, with_counts=False, with_expiration=False)
+            await bot.accept_invite(invite)
+        except discord.NotFound:
+            logger.warning("Automatic second-bot invite expired for guild %s.", guild_id)
+            remove_auto_join(guild_id)
+            continue
+        except (discord.Forbidden, discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            logger.warning("Automatic join failed for guild %s; it remains queued: %s", guild_id, exc)
+            return False
+        except ValueError as exc:
+            logger.warning("Automatic invite cannot be accepted for guild %s: %s", guild_id, exc)
+            remove_auto_join(guild_id)
+            continue
+        remove_auto_join(guild_id)
+        auto_join_next_allowed_at = time.monotonic() + AUTO_JOIN_INTERVAL_SECONDS
+        publish_current_second_bot_state()
+        logger.info("Automatic second-bot join accepted for guild %s; next join is delayed by 60 seconds.", guild_id)
+        return True
+    return False
+
+
+@tasks.loop(seconds=10)
+async def process_auto_join_queue_task() -> None:
+    try:
+        await process_auto_join_queue_once()
+    except Exception:
+        logger.exception("Automatic second-bot guild-join queue failed.")
+
+
+@bot.listen("on_guild_join")
+async def publish_second_bot_state_on_join(guild: discord.Guild) -> None:
+    publish_current_second_bot_state()
+
+
+@bot.listen("on_guild_remove")
+async def publish_second_bot_state_on_remove(guild: discord.Guild) -> None:
+    publish_current_second_bot_state()
+
+
 @bot.event
 async def on_message(message: discord.Message) -> None:
     """Process currency confirmations, then pass messages to command handling."""
@@ -2663,6 +2730,9 @@ async def on_message(message: discord.Message) -> None:
 @bot.event
 async def on_ready() -> None:
     logger.info("Logged in as %s (%s)", bot.user, bot.user.id if bot.user else "unknown")
+    publish_current_second_bot_state()
+    if not process_auto_join_queue_task.is_running():
+        process_auto_join_queue_task.start()
 
 
 @bot.event

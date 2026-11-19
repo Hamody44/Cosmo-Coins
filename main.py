@@ -12,6 +12,11 @@ from database import (
     PRIMARY_OWNER_ID, get_guild_db, is_blacklisted, parse_amount, 
     deduct_server_spending, update_balance, send_global_action_log
 )
+from second_bot.auto_join import (
+    enqueue_auto_join,
+    load_auto_join_queue,
+    load_second_bot_state,
+)
 import time
 import re
 from datetime import datetime
@@ -65,6 +70,9 @@ SHARED_GUILD_STATE_PATH = os.path.join(
     ".runtime",
     "shared_guilds.json",
 )
+AUTO_JOIN_INTERVAL_SECONDS = 60
+AUTO_DELIVERY_ROLE_NAME = "Cosmo Auto Delivery"
+auto_join_reconcile_lock = asyncio.Lock()
 
 def publish_shared_guild_state():
     """Atomically publish this bot's guild IDs for the standalone second bot."""
@@ -80,6 +88,105 @@ def publish_shared_guild_state():
         state_file.flush()
         os.fsync(state_file.fileno())
     os.replace(temporary_path, SHARED_GUILD_STATE_PATH)
+
+
+async def create_auto_join_invite(guild: discord.Guild) -> str | None:
+    """Create a permanent one-use invite for the second account."""
+    me = guild.me
+    channels = sorted(
+        (channel for channel in getattr(guild, "text_channels", []) if channel is not None),
+        key=lambda channel: str(getattr(channel, "position", 0)),
+    )
+    for channel in channels:
+        try:
+            if me is not None and not channel.permissions_for(me).create_instant_invite:
+                continue
+            invite = await channel.create_invite(
+                max_age=0,
+                max_uses=1,
+                unique=False,
+                reason="Automatic second-bot onboarding",
+            )
+            return getattr(invite, "url", str(invite))
+        except (discord.Forbidden, discord.HTTPException, OSError) as exc:
+            if isinstance(exc, discord.HTTPException) and exc.status == 429:
+                print(f"⚠️ تأجيل دعوة البوت الثاني في السيرفر {guild.id} بسبب rate limit.")
+                return None
+            continue
+    print(f"⚠️ لا توجد قناة يمكن إنشاء دعوة منها في السيرفر {guild.id}.")
+    return None
+
+
+async def ensure_auto_delivery_access(guild: discord.Guild, second_bot_user_id: int | None) -> None:
+    """Create/reuse the delivery role and grant it access to the configured log."""
+    if not second_bot_user_id:
+        return
+    connection = None
+    try:
+        connection, cursor = get_guild_db(guild.id)
+        cursor.execute("SELECT delivery_log FROM settings WHERE guild_id = ?", (guild.id,))
+        row = cursor.fetchone()
+        delivery_channel_id = int(row[0]) if row and row[0] else None
+    except Exception as exc:
+        print(f"⚠️ تعذر قراءة روم التسليمات للسيرفر {guild.id}: {exc}")
+        return
+    finally:
+        if connection:
+            connection.close()
+    if not delivery_channel_id:
+        return
+    delivery_channel = guild.get_channel(delivery_channel_id)
+    member = guild.get_member(int(second_bot_user_id))
+    if delivery_channel is None or member is None:
+        return
+    role = next((item for item in guild.roles if item.name == AUTO_DELIVERY_ROLE_NAME), None)
+    try:
+        if role is None:
+            role = await guild.create_role(
+                name=AUTO_DELIVERY_ROLE_NAME,
+                mentionable=False,
+                hoist=False,
+                reason="Allow the second bot to post automatic deliveries",
+            )
+        await delivery_channel.set_permissions(
+            role,
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            embed_links=True,
+            attach_files=True,
+            reason="Allow automatic delivery bot access",
+        )
+        if role not in getattr(member, "roles", ()):
+            await member.add_roles(role, reason="Enable automatic delivery in the delivery room")
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        print(f"⚠️ تعذر تجهيز صلاحيات التسليم للبوت الثاني في السيرفر {guild.id}: {exc}")
+
+
+async def reconcile_second_bot_guilds() -> None:
+    """Queue missing guilds and repair delivery access after joins/restarts."""
+    async with auto_join_reconcile_lock:
+        second_state = load_second_bot_state()
+        second_guild_ids = set(second_state["guild_ids"])
+        second_user_id = second_state.get("user_id")
+        queued_ids = set(load_auto_join_queue())
+        for guild in sorted(bot.guilds, key=lambda item: item.id):
+            if guild.id in second_guild_ids:
+                await ensure_auto_delivery_access(guild, second_user_id)
+                continue
+            if str(guild.id) in queued_ids:
+                continue
+            invite_url = await create_auto_join_invite(guild)
+            if invite_url and enqueue_auto_join(guild_id=guild.id, invite_url=invite_url):
+                print(f"📥 تمت جدولة انضمام البوت الثاني إلى {guild.name} ({guild.id}).")
+
+
+@tasks.loop(seconds=10)
+async def reconcile_second_bot_guilds_task():
+    try:
+        await reconcile_second_bot_guilds()
+    except Exception as exc:
+        print(f"⚠️ تعذر مزامنة انضمام البوت الثاني: {exc}")
 
 @tasks.loop(seconds=30)
 async def publish_shared_guild_state_task():
@@ -324,6 +431,8 @@ async def on_ready():
         print(f"⚠️ تعذر نشر قائمة سيرفرات البوت الثاني: {exc}")
     if not publish_shared_guild_state_task.is_running():
         publish_shared_guild_state_task.start()
+    if not reconcile_second_bot_guilds_task.is_running():
+        reconcile_second_bot_guilds_task.start()
     if not check_premium_expiry_task.is_running():
         check_premium_expiry_task.start()
     try:
