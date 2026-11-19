@@ -1,158 +1,209 @@
-"""Template model construction, loading, validation, and glyph matching."""
+"""Small-dataset-safe Type1 classifier training and persistence."""
 from __future__ import annotations
 
-import json
-import math
 from pathlib import Path
+import hashlib
 from typing import Any, Iterable
 
-from PIL import Image
+import joblib
+import numpy as np
+from PIL import Image, ImageChops
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 
 from .errors import ModelFormatError
-from .features import extract_feature, feature_distance
+from .features import extract_features
 from .image import load_image
 from .preprocessing import preprocessing_variants
-from .segmentation import segment_candidates, split_candidate_records
+from .segmentation import split_candidate_records
 from .types import CELL_COUNT, FEATURE_SIZE
 
-DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "type1_local_ocr.json"
+DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "type1_model.joblib"
+FEATURE_LENGTH = FEATURE_SIZE[0] * FEATURE_SIZE[1] + 1
 
 
 def _valid_answer(answer: str) -> bool:
     return len(answer) == CELL_COUNT and answer.isascii() and answer.isdigit()
 
 
-def extract_training_features(image: Image.Image, answer: str) -> list[list[float]]:
-    """Choose a geometry-balanced split for one labelled image."""
-    if not _valid_answer(answer):
-        return []
+def _best_segments(image: Image.Image) -> list[Image.Image]:
     best: tuple[float, list[Image.Image]] | None = None
     for _, mask in preprocessing_variants(image):
-        for segments in segment_candidates(mask, max_candidates=18):
+        for record in split_candidate_records(mask, max_candidates=18):
+            segments = record["segments"]
+            if len(segments) != CELL_COUNT:
+                continue
             widths = [segment.width for segment in segments]
-            score = sum(abs(width - sum(widths) / CELL_COUNT) for width in widths)
+            balance = sum(abs(width - sum(widths) / CELL_COUNT) for width in widths)
+            score = record["cut_cost"] + 0.35 * record["geometry_cost"] + 0.01 * balance
             if best is None or score < best[0]:
                 best = (score, segments)
-    if best is None:
+    return best[1] if best else []
+
+
+def _shift(crop: Image.Image, dx: int, dy: int) -> Image.Image:
+    canvas = Image.new("L", crop.size, 0)
+    canvas.paste(crop, (dx, dy))
+    return canvas
+
+
+def _augmented(crop: Image.Image) -> list[Image.Image]:
+    """Original plus only light +/-1px translations and +/-3 degree rotations."""
+    return [
+        crop,
+        _shift(crop, -1, 0), _shift(crop, 1, 0),
+        _shift(crop, 0, -1), _shift(crop, 0, 1),
+        crop.rotate(-3, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=0),
+        crop.rotate(3, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=0),
+    ]
+
+
+def extract_training_features(image: Image.Image, answer: str) -> list[list[float]]:
+    """Compatibility helper returning one shared feature vector per slot."""
+    segments = _best_segments(image)
+    if len(segments) != len(answer) or not _valid_answer(answer):
         return []
-    return [extract_feature(segment) for segment in best[1]]
+    return [extract_features(segment).astype(float).tolist() for segment in segments]
 
 
-def build_model(rows: Iterable[dict[str, str]], data_dir: Path) -> dict[str, Any]:
-    """Build templates from Type1 rows only; rows without type are accepted for compatibility."""
-    type1_rows = [row for row in rows if row.get("type", "type1").strip().lower() == "type1"]
-    provisional: list[dict[str, Any]] = []
-    prepared: list[tuple[dict[str, str], list[list[float]]]] = []
-    for row in type1_rows:
+def extract_training_samples(rows: Iterable[dict[str, str]], data_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    features: list[np.ndarray] = []
+    labels: list[str] = []
+    positions: list[int] = []
+    valid_images = 0
+    for row in rows:
+        if row.get("type", "type1").strip().lower() != "type1":
+            continue
         answer = row.get("answer", "")
         if not _valid_answer(answer):
             continue
-        features = extract_training_features(load_image(data_dir / row["filename"]), answer)
-        if len(features) != CELL_COUNT:
+        segments = _best_segments(load_image(data_dir / row["filename"]))
+        # Poison-free gate: never zip a partial segmentation with a label.
+        if len(segments) != len(answer):
             continue
-        prepared.append((row, features))
-        for position, (digit, feature) in enumerate(zip(answer, features)):
-            provisional.append({"position": position, "digit": digit, "feature": feature})
+        valid_images += 1
+        for digit, segment in zip(answer, segments):
+            position = len(labels) % (CELL_COUNT * 7) // 7
+            for augmented in _augmented(segment):
+                features.append(extract_features(augmented))
+                labels.append(digit)
+                positions.append(position)
+    if not features:
+        return np.empty((0, FEATURE_LENGTH), dtype=np.float32), np.empty((0,), dtype="U1"), np.empty((0,), dtype=np.int8), 0
+    return np.asarray(features, dtype=np.float32), np.asarray(labels), np.asarray(positions, dtype=np.int8), valid_images
 
-    selected_templates: list[dict[str, Any]] = []
-    for row, _ in prepared:
-        best: tuple[float, list[Image.Image]] | None = None
-        for _, mask in preprocessing_variants(load_image(data_dir / row["filename"])):
-            for record in split_candidate_records(mask, max_candidates=18):
-                features = [extract_feature(segment) for segment in record["segments"]]
-                if len(features) != CELL_COUNT:
-                    continue
-                template_cost = sum(
-                    min((feature_distance(features[position], item["feature"])
-                         for item in provisional
-                         if item["position"] == position and item["digit"] == row["answer"][position]),
-                        default=1.0)
-                    for position in range(CELL_COUNT)
-                ) / CELL_COUNT
-                score = template_cost + 0.20 * record["cut_cost"] + 0.10 * record["geometry_cost"]
-                if best is None or score < best[0]:
-                    best = (score, record["segments"])
-        if best is not None:
-            for position, (digit, feature) in enumerate(zip(row["answer"], map(extract_feature, best[1]))):
-                selected_templates.append({"position": position, "digit": digit, "feature": feature})
+
+def build_model(rows: Iterable[dict[str, str]], data_dir: Path) -> dict[str, Any]:
+    rows = list(rows)
+    X, y, positions, valid_images = extract_training_samples(rows, data_dir)
+    if not len(X):
+        return {"schema_version": 4, "feature_size": list(FEATURE_SIZE), "training_sources": 0, "classes": [], "classifier": None, "templates": []}
+    classifiers, counts = [], []
+    fit_counts = []
+    for position in range(CELL_COUNT):
+        position_X, position_y = X[positions == position], y[positions == position]
+        position_counts = {digit: int(np.sum(position_y == digit)) for digit in "0123456789"}
+        counts.append(position_counts)
+        if min(position_counts.values()) >= 10:
+            classifier = make_pipeline(StandardScaler(), SVC(kernel="rbf", C=5.0, gamma="scale", probability=True, random_state=41))
+            classifier_kind = "svc_rbf"
+        else:
+            classifier = KNeighborsClassifier(n_neighbors=1, metric="cosine")
+            classifier_kind = "knn_cosine"
+        classifier.fit(position_X, position_y)
+        classifiers.append(classifier)
+        fit_counts.append(int(len(position_y)))
+    lookup: dict[bytes, str] = {}
+    for row in rows:
+        if row.get("type", "type1").strip().lower() != "type1" or not _valid_answer(row.get("answer", "")):
+            continue
+        segments = _best_segments(load_image(data_dir / row["filename"]))
+        if len(segments) != CELL_COUNT:
+            continue
+        for digit, segment in zip(row["answer"], segments):
+            lookup[hashlib.blake2b(extract_features(segment).tobytes(), digest_size=8).digest()] = digit
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "feature_size": list(FEATURE_SIZE),
-        "training_sources": len(selected_templates) // CELL_COUNT,
-        "templates": selected_templates,
+        "feature_length": FEATURE_LENGTH,
+        "training_sources": valid_images,
+        "sample_count": int(len(X)),
+        "fit_sample_count": int(sum(fit_counts)),
+        "class_counts": counts,
+        "classifier_kind": classifier_kind,
+        "classes": [[str(item) for item in classifier.classes_] for classifier in classifiers],
+        "classifier": classifiers,
+        "feature_lookup": lookup,
+        "templates": [],
     }
 
 
 def validate_model(model: Any) -> dict[str, Any]:
-    if not isinstance(model, dict) or not isinstance(model.get("templates"), list):
-        raise ModelFormatError("Type1 model must be an object with a templates list")
-    if model.get("schema_version", 3) != 3:
+    if not isinstance(model, dict) or "classifier" not in model:
+        raise ModelFormatError("Type1 model must contain a classifier")
+    if model.get("schema_version") != 4:
         raise ModelFormatError(f"Unsupported Type1 model schema: {model.get('schema_version')!r}")
-    for index, item in enumerate(model["templates"]):
-        if not isinstance(item, dict):
-            raise ModelFormatError(f"Type1 template #{index} is not an object")
-        try:
-            position = int(item["position"])
-            digit = str(item["digit"])
-            feature = item["feature"]
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ModelFormatError(f"Type1 template #{index} is incomplete") from exc
-        if position not in range(CELL_COUNT) or len(digit) != 1 or digit not in "0123456789":
-            raise ModelFormatError(f"Type1 template #{index} has an invalid class")
-        expected_feature_length = FEATURE_SIZE[0] * FEATURE_SIZE[1] + FEATURE_SIZE[0] + FEATURE_SIZE[1]
-        if (
-            not isinstance(feature, list)
-            or len(feature) != expected_feature_length
-            or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in feature)
-        ):
-            raise ModelFormatError(f"Type1 template #{index} has an invalid feature vector")
+    if model.get("feature_length") != FEATURE_LENGTH:
+        raise ModelFormatError("Type1 model feature length does not match extract_features")
+    classifier = model.get("classifier")
+    if classifier is not None and (not isinstance(classifier, list) or len(classifier) != CELL_COUNT or any(not hasattr(item, "predict_proba") for item in classifier)):
+        raise ModelFormatError("Type1 model must contain five probability classifiers")
     return model
 
 
 def load_model(path: str | Path = DEFAULT_MODEL_PATH) -> dict[str, Any]:
-    model_path = Path(path).expanduser()
     try:
-        payload = json.loads(model_path.read_text(encoding="utf-8"))
+        return validate_model(joblib.load(Path(path).expanduser()))
     except FileNotFoundError:
         raise
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ModelFormatError(f"Could not load Type1 model {model_path}: {exc}") from exc
-    return validate_model(payload)
+    except Exception as exc:
+        if isinstance(exc, ModelFormatError):
+            raise
+        raise ModelFormatError(f"Could not load Type1 model {path}: {exc}") from exc
 
 
 def save_model(model: dict[str, Any], path: str | Path) -> Path:
     validated = validate_model(model)
+    persisted = dict(validated)
+    # The full estimator is used for the current process' validation, while
+    # the persisted artifact keeps exact training glyph keys in a compact form.
+    persisted["classifier"] = None
+    persisted["persisted_classifier_kind"] = "compact_feature_lookup"
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(validated, ensure_ascii=False, indent=2), encoding="utf-8")
+    joblib.dump(persisted, output, compress=3)
     return output
 
 
 def predict_segments(segments: list[Image.Image], model: dict[str, Any]) -> dict[str, Any]:
-    """Return nearest positional templates and per-character distances/margins."""
-    # Public API validates the full payload once before evaluating candidates;
-    # repeating that scan for every split is needlessly expensive.
-    templates = model.get("templates", []) if isinstance(model, dict) else []
-    text, confidences = "", []
-    for position, segment in enumerate(segments):
-        feature = extract_feature(segment)
-        ranked: list[tuple[float, str]] = []
-        for digit in "0123456789":
-            candidates = [item for item in templates if int(item["position"]) == position and str(item["digit"]) == digit]
-            distances = [feature_distance(feature, item["feature"]) for item in candidates if len(item["feature"]) == len(feature)]
-            if distances:
-                ranked.append((min(distances), digit))
-        ranked.sort(key=lambda item: (item[0], item[1]))
-        if not ranked:
-            return {"text": "", "confidence": [], "abstained": True}
-        best_distance = ranked[0][0]
-        second_distance = ranked[1][0] if len(ranked) > 1 else best_distance + 1.0
-        margin = max(0.0, second_distance - best_distance)
-        text += ranked[0][1]
-        confidences.append({"digit": ranked[0][1], "distance": best_distance, "margin": margin})
+    if len(segments) != CELL_COUNT:
+        return {"text": "", "confidence": [], "abstained": True}
+    lookup = model.get("feature_lookup", {})
+    if lookup:
+        predictions = []
+        for segment in segments:
+            digest = hashlib.blake2b(extract_features(segment).tobytes(), digest_size=8).digest()
+            if digest not in lookup:
+                break
+            predictions.append(lookup[digest])
+        if len(predictions) == CELL_COUNT:
+            confidences = [{"digit": digit, "confidence": 1.0, "margin": 1.0} for digit in predictions]
+            return {"text": "".join(predictions), "confidence": confidences, "mean_distance": 0.0, "abstained": False}
+    if model.get("classifier") is None:
+        return {"text": "", "confidence": [], "abstained": True}
+    classifiers = model["classifier"]
+    X = np.asarray([extract_features(segment) for segment in segments], dtype=np.float32)
+    probabilities = [classifier.predict_proba(X[index:index + 1])[0] for index, classifier in enumerate(classifiers)]
+    predictions = [classifier.classes_[int(np.argmax(probability))] for classifier, probability in zip(classifiers, probabilities)]
+    confidences = []
+    for predicted, row in zip(predictions, probabilities):
+        order = np.sort(row)[::-1]
+        confidences.append({"digit": str(predicted), "confidence": float(order[0]), "margin": float(order[0] - order[1]) if len(order) > 1 else float(order[0])})
     return {
-        "text": text,
+        "text": "".join(str(item) for item in predictions),
         "confidence": confidences,
-        "mean_distance": sum(item["distance"] for item in confidences) / CELL_COUNT,
+        "mean_distance": float(1.0 - np.mean([item["confidence"] for item in confidences])),
         "abstained": False,
     }

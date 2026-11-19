@@ -8,3 +8,6 @@ openai
 asgiref
 starlette
 uvicorn
+numpy
+scikit-learn
+joblib

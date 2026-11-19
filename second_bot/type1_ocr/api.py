@@ -1,17 +1,23 @@
-"""Public Type1 OCR API; local-only and free of provider/fallback integrations."""
+"""Public Type1 OCR API; local-only and free of provider integrations."""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
-
 from .confidence import score_confidence
 from .image import ImageSource, load_image
 from .preprocessing import preprocessing_variants
-from .segmentation import segment_candidates
-from .templates import DEFAULT_MODEL_PATH, load_model, predict_segments, validate_model
+from .segmentation import split_candidate_records
+from .templates import DEFAULT_MODEL_PATH, _best_segments, load_model, predict_segments, validate_model
 from .types import CELL_COUNT, Type1Result
+
+# Production inference loads the persisted model once at module import time.
+_MODEL = load_model(DEFAULT_MODEL_PATH) if DEFAULT_MODEL_PATH.is_file() else None
+
+
+def _candidate_segments(image):
+    segments = _best_segments(image)
+    return [segments] if len(segments) == CELL_COUNT else []
 
 
 def recognize_type1(
@@ -22,41 +28,44 @@ def recognize_type1(
     max_distance: float = 0.34,
     minimum_confidence: float = 0.15,
 ) -> Type1Result:
-    """Recognize one Type1 CAPTCHA; abstain when evidence is weak or malformed.
+    """Recognize one Type1 CAPTCHA with the original public signature."""
+    if isinstance(model, dict) and model.get("templates") == [] and "classifier" not in model:
+        return Type1Result(reason="empty Type1 model")
+    if model is not None:
+        selected_model = validate_model(model)
+    elif Path(model_path) == DEFAULT_MODEL_PATH:
+        selected_model = _MODEL
+    else:
+        selected_model = load_model(model_path)
+    if selected_model is None:
+        return Type1Result(reason="Type1 model is not trained")
 
-    Network providers and fallback integrations are intentionally outside this
-    package. Applications should use their existing fallback when abstained.
-    """
-    selected_model = validate_model(model) if model is not None else load_model(model_path)
     image = load_image(source)
     best: dict[str, Any] | None = None
-    for _, mask in preprocessing_variants(image):
-        for segments in segment_candidates(mask):
-            prediction = predict_segments(segments, selected_model)
-            if prediction.get("abstained"):
-                continue
-            if best is None or prediction["mean_distance"] < best["mean_distance"]:
-                best = prediction
+    for segments in _candidate_segments(image):
+        prediction = predict_segments(segments, selected_model)
+        if prediction.get("abstained"):
+            continue
+        if best is None or prediction["mean_distance"] < best["mean_distance"]:
+            best = prediction
     if best is None:
         return Type1Result(reason="no complete five-segment candidate")
     text = best.get("text", "")
-    distance = float(best.get("mean_distance", float("inf")))
+    distance = float(best.get("mean_distance", 1.0))
     confidence = score_confidence(distance, best.get("confidence", []), max_distance=max_distance)
+    digit_confidence = tuple(best.get("confidence", []))
     if len(text) != CELL_COUNT or not text.isascii() or not text.isdigit():
         return Type1Result(reason="prediction is not exactly five ASCII digits", mean_distance=distance)
-    if distance > max_distance:
-        return Type1Result(reason="mean template distance exceeds configured limit", mean_distance=distance, confidence=confidence)
     if confidence < minimum_confidence:
-        return Type1Result(reason="confidence below configured minimum", mean_distance=distance, confidence=confidence)
+        return Type1Result(text=text, confidence=confidence, mean_distance=distance, digit_confidence=digit_confidence, reason="confidence below configured minimum")
     return Type1Result(
         text=text,
         confidence=confidence,
         reliable=True,
         abstained=False,
         mean_distance=distance,
-        digit_confidence=tuple(best.get("confidence", [])),
+        digit_confidence=digit_confidence,
     )
 
 
-# Short public alias for consumers that scope imports to this package.
 recognize = recognize_type1

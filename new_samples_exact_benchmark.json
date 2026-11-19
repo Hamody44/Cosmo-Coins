@@ -1,0 +1,463 @@
+{
+  "generator": "Exact database.generate_captcha_image reproduction",
+  "seed": 20261119,
+  "sources": 50,
+  "exact_sequences": 0,
+  "exact_sequence_accuracy": 0.0,
+  "correct_digits": 0,
+  "total_digits": 250,
+  "digit_accuracy": 0.0,
+  "abstentions": 50,
+  "samples": [
+    {
+      "filename": "exact_001.png",
+      "expected": "78930",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_002.png",
+      "expected": "03370",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_003.png",
+      "expected": "93501",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_004.png",
+      "expected": "67270",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_005.png",
+      "expected": "99556",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_006.png",
+      "expected": "21680",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_007.png",
+      "expected": "37012",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_008.png",
+      "expected": "90754",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_009.png",
+      "expected": "28499",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_010.png",
+      "expected": "22953",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_011.png",
+      "expected": "80874",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_012.png",
+      "expected": "92874",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_013.png",
+      "expected": "79598",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_014.png",
+      "expected": "55286",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_015.png",
+      "expected": "39235",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_016.png",
+      "expected": "01614",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_017.png",
+      "expected": "21616",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_018.png",
+      "expected": "20231",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_019.png",
+      "expected": "63257",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_020.png",
+      "expected": "05927",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_021.png",
+      "expected": "23535",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_022.png",
+      "expected": "34718",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_023.png",
+      "expected": "02909",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_024.png",
+      "expected": "00094",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_025.png",
+      "expected": "11460",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_026.png",
+      "expected": "95150",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_027.png",
+      "expected": "01177",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_028.png",
+      "expected": "76739",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_029.png",
+      "expected": "91567",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_030.png",
+      "expected": "75855",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_031.png",
+      "expected": "08151",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_032.png",
+      "expected": "51923",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_033.png",
+      "expected": "37153",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_034.png",
+      "expected": "02107",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_035.png",
+      "expected": "73691",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_036.png",
+      "expected": "15181",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_037.png",
+      "expected": "12924",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_038.png",
+      "expected": "43758",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_039.png",
+      "expected": "62493",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_040.png",
+      "expected": "33596",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_041.png",
+      "expected": "26028",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_042.png",
+      "expected": "00849",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_043.png",
+      "expected": "82282",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_044.png",
+      "expected": "22513",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_045.png",
+      "expected": "01592",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_046.png",
+      "expected": "73164",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_047.png",
+      "expected": "75467",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_048.png",
+      "expected": "35566",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_049.png",
+      "expected": "18950",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "exact_050.png",
+      "expected": "72772",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    }
+  ]
+}

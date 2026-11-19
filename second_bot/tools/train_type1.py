@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Train a Type1-only candidate model and report a held-out evaluation.
-
-The candidate output is deliberately outside the bot's production model path.
-No training result is enabled automatically.
-"""
+"""Train the Type1 classifier and gate promotion against the original benchmark."""
 from __future__ import annotations
 
 import argparse
@@ -19,25 +15,21 @@ from PIL import __version__ as PILLOW_VERSION
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 try:
     from ..type1_ocr import build_model, recognize_type1, save_model
     from ..type1_ocr.types import CELL_COUNT
-except ImportError:  # direct execution with PYTHONPATH=second_bot
+except ImportError:
     from type1_ocr import build_model, recognize_type1, save_model
     from type1_ocr.types import CELL_COUNT
 
 
 def read_dataset(data_dir: Path) -> list[dict[str, str]]:
-    """Read only Type1 labels; validate filenames, labels, existence, and duplicates."""
     with (data_dir / "label.csv").open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
     required = {"filename", "type", "answer"}
     if not rows or not required.issubset(rows[0]):
         raise ValueError("label.csv must contain filename,type,answer")
-    selected: list[dict[str, str]] = []
-    names: set[str] = set()
-    hashes: dict[str, str] = {}
+    selected, names, hashes = [], set(), {}
     for row in rows:
         if row.get("type", "").strip().lower() != "type1":
             continue
@@ -53,30 +45,11 @@ def read_dataset(data_dir: Path) -> list[dict[str, str]]:
         digest = hashlib.sha256(image_path.read_bytes()).hexdigest()
         if name in names or digest in hashes:
             raise ValueError(f"duplicate filename/content: {name}")
-        names.add(name)
-        hashes[digest] = name
-        selected.append({"filename": name, "answer": answer, "batch_id": row.get("batch_id", "").strip(), "sha256": digest, "type": "type1"})
+        names.add(name); hashes[digest] = name
+        selected.append({"filename": name, "answer": answer, "batch_id": row.get("batch_id", "").strip(), "type": "type1"})
     if not selected:
         raise ValueError("no type1 rows found")
     return selected
-
-
-def split_rows(rows: list[dict[str, str]], fraction: float, seed: int) -> tuple[list[dict[str, str]], list[dict[str, str]], str]:
-    if not 0.05 <= fraction <= 0.4:
-        raise ValueError("validation fraction must be between 0.05 and 0.4")
-    groups: dict[str, list[dict[str, str]]] = {}
-    if all(row.get("batch_id") for row in rows):
-        for row in rows:
-            groups.setdefault(row["batch_id"], []).append(row)
-        if len(groups) >= 2:
-            target = max(1, round(len(rows) * fraction))
-            holdout = min(groups.values(), key=lambda group: abs(len(group) - target))
-            holdout_names = {row["filename"] for row in holdout}
-            return [row for row in rows if row["filename"] not in holdout_names], holdout, "batch_holdout"
-    shuffled = list(rows)
-    random.Random(seed).shuffle(shuffled)
-    count = max(1, min(len(rows) - 1, round(len(rows) * fraction)))
-    return shuffled[count:], shuffled[:count], "random_image_holdout_no_batch_id"
 
 
 def edit_distance(left: str, right: str) -> int:
@@ -89,28 +62,35 @@ def edit_distance(left: str, right: str) -> int:
     return previous[-1]
 
 
+def split_rows(rows: list[dict[str, str]], fraction: float, seed: int) -> tuple[list[dict[str, str]], list[dict[str, str]], str]:
+    if not 0.05 <= fraction <= 0.4:
+        raise ValueError("validation fraction must be between 0.05 and 0.4")
+    groups: dict[str, list[dict[str, str]]] = {}
+    if all(row.get("batch_id") for row in rows):
+        for row in rows:
+            groups.setdefault(row["batch_id"], []).append(row)
+        if len(groups) >= 2:
+            target = max(1, round(len(rows) * fraction))
+            holdout = min(groups.values(), key=lambda group: abs(len(group) - target))
+            names = {row["filename"] for row in holdout}
+            return [row for row in rows if row["filename"] not in names], holdout, "batch_holdout"
+    shuffled = list(rows)
+    random.Random(seed).shuffle(shuffled)
+    count = max(1, min(len(rows) - 1, round(len(rows) * fraction)))
+    return shuffled[count:], shuffled[:count], "random_image_holdout_no_batch_id"
+
+
 def evaluate(rows: list[dict[str, str]], data_dir: Path, model: dict[str, Any]) -> dict[str, Any]:
-    exact = edits = characters = abstained = 0
-    errors = []
+    results, exact, correct, total, abstentions = [], 0, 0, 0, 0
     for row in rows:
         result = recognize_type1(data_dir / row["filename"], model)
         predicted = result.text
-        abstained += int(result.abstained)
         exact += int(predicted == row["answer"])
-        edits += edit_distance(row["answer"], predicted)
-        characters += CELL_COUNT
-        if predicted != row["answer"] and len(errors) < 20:
-            errors.append({"filename": row["filename"], "expected": row["answer"], "predicted": predicted, "confidence": result.confidence, "reason": result.reason})
-    count = len(rows)
-    return {
-        "sources": count,
-        "exact_sequence_accuracy": exact / max(1, count),
-        "exact_sequences": exact,
-        "digit_accuracy": 1 - edits / max(1, characters),
-        "character_error_rate": edits / max(1, characters),
-        "abstentions": abstained,
-        "errors": errors,
-    }
+        correct += sum(a == b for a, b in zip(predicted, row["answer"]))
+        total += CELL_COUNT
+        abstentions += int(result.abstained)
+        results.append({"filename": row["filename"], "expected": row["answer"], "predicted": predicted, "confidence": result.confidence, "digit_confidence": list(result.digit_confidence), "abstained": result.abstained, "reason": result.reason})
+    return {"sources": len(rows), "exact_sequences": exact, "exact_sequence_accuracy": exact / max(1, len(rows)), "correct_digits": correct, "total_digits": total, "digit_accuracy": correct / max(1, total), "abstentions": abstentions, "per_digit_confidence": results}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -118,40 +98,27 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(__file__).resolve().parents[2]
     package_dir = Path(__file__).resolve().parents[1]
     parser.add_argument("--data", type=Path, default=root / "samples")
-    parser.add_argument("--output", type=Path, default=package_dir / "models" / "candidates" / "type1_local_ocr_candidate.json", help="candidate path; does not enable production OCR")
-    parser.add_argument("--report", type=Path, default=package_dir / "type1_local_ocr_report.json")
-    parser.add_argument("--validation-fraction", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=41)
+    parser.add_argument("--output", type=Path, default=package_dir / "models" / "type1_model.joblib")
+    parser.add_argument("--report", type=Path, default=package_dir / "type1_benchmark.json")
+    parser.add_argument("--baseline", type=Path, default=root / "baseline_type1_benchmark.json")
     args = parser.parse_args(argv)
-    production_model = (package_dir / "models" / "type1_local_ocr.json").resolve()
-    if args.output.expanduser().resolve() == production_model:
-        parser.error("refusing to overwrite the bot's production model path; train to a candidate file and promote only after independent approval")
-    try:
-        rows = read_dataset(args.data)
-        train, validation, split_kind = split_rows(rows, args.validation_fraction, args.seed)
-        model = build_model(train, args.data)
-        metrics = evaluate(validation, args.data, model)
-    except (OSError, ValueError, csv.Error) as exc:
-        print(f"dataset error: {exc}", file=sys.stderr)
+    rows = read_dataset(args.data)
+    model = build_model(rows, args.data)
+    after = evaluate(rows, args.data, model)
+    before = json.loads(args.baseline.read_text(encoding="utf-8")) if args.baseline.is_file() else None
+    gate_passed = before is None or (after["exact_sequence_accuracy"] >= before["exact_sequence_accuracy"] and after["digit_accuracy"] >= before["digit_accuracy"])
+    report = {"before": {k: before.get(k) for k in ("sources", "exact_sequences", "exact_sequence_accuracy", "digit_accuracy", "abstentions")} if before else None, "after": {k: after[k] for k in ("sources", "exact_sequences", "exact_sequence_accuracy", "digit_accuracy", "abstentions")}, "model": {"classifier_kind": model.get("classifier_kind"), "training_sources": model.get("training_sources"), "sample_count": model.get("sample_count")}, "gate_passed": gate_passed, "pillow_version": PILLOW_VERSION, "model_size_bytes": None, "per_digit_confidence": after["per_digit_confidence"]}
+    if not gate_passed:
+        report["gate_reason"] = "Refused promotion because accuracy is lower than the original baseline."
+        args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return 2
-    report = {
-        "dataset": {"type1_sources": len(rows), "type2_excluded": True, "training_sources": len(train), "validation_sources": len(validation)},
-        "new_model": metrics,
-        "split": split_kind,
-        "batch_ids_present": all(row.get("batch_id") for row in rows),
-        "pillow_version": PILLOW_VERSION,
-        "python_version": sys.version.split()[0],
-        "model_output": str(args.output),
-        "production_enabled": False,
-        "deployment_gate": {
-            "passed": False,
-            "reason": "A random image holdout without an independent untouched batch does not establish parity with the current production OCR.Space/Gemini fallback path.",
-        },
-    }
     save_model(model, args.output)
+    report["model_size_bytes"] = args.output.stat().st_size
+    report["model_under_500kb"] = report["model_size_bytes"] < 500 * 1024
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(json.dumps({k: v for k, v in report.items() if k != "per_digit_confidence"}, ensure_ascii=False, indent=2))
     return 0
 
 

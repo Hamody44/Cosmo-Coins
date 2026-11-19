@@ -1,0 +1,463 @@
+{
+  "generator": "Pillow recreation of database.generate_captcha_image style",
+  "seed": 20261119,
+  "sources": 50,
+  "exact_sequences": 0,
+  "exact_sequence_accuracy": 0.0,
+  "correct_digits": 0,
+  "total_digits": 250,
+  "digit_accuracy": 0.0,
+  "abstentions": 50,
+  "samples": [
+    {
+      "filename": "new_001.png",
+      "expected": "78930",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_002.png",
+      "expected": "03370",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_003.png",
+      "expected": "40935",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_004.png",
+      "expected": "63672",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_005.png",
+      "expected": "74995",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_006.png",
+      "expected": "87216",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_007.png",
+      "expected": "68951",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_008.png",
+      "expected": "30704",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_009.png",
+      "expected": "87963",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_010.png",
+      "expected": "17037",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_011.png",
+      "expected": "04639",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_012.png",
+      "expected": "70899",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_013.png",
+      "expected": "83155",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_014.png",
+      "expected": "03169",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_015.png",
+      "expected": "69840",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_016.png",
+      "expected": "35841",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_017.png",
+      "expected": "57711",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_018.png",
+      "expected": "65862",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_019.png",
+      "expected": "74766",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_020.png",
+      "expected": "56433",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_021.png",
+      "expected": "24459",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_022.png",
+      "expected": "75959",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_023.png",
+      "expected": "04502",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_024.png",
+      "expected": "64262",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_025.png",
+      "expected": "03847",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_026.png",
+      "expected": "14071",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_027.png",
+      "expected": "49262",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_028.png",
+      "expected": "67156",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_029.png",
+      "expected": "38334",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_030.png",
+      "expected": "94349",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_031.png",
+      "expected": "64231",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_032.png",
+      "expected": "14525",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_033.png",
+      "expected": "29767",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_034.png",
+      "expected": "24410",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_035.png",
+      "expected": "86219",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_036.png",
+      "expected": "90755",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_037.png",
+      "expected": "56955",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_038.png",
+      "expected": "74195",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_039.png",
+      "expected": "34733",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_040.png",
+      "expected": "81595",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_041.png",
+      "expected": "27730",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_042.png",
+      "expected": "64642",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_043.png",
+      "expected": "66048",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_044.png",
+      "expected": "26244",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_045.png",
+      "expected": "30050",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_046.png",
+      "expected": "74700",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_047.png",
+      "expected": "50574",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_048.png",
+      "expected": "22120",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_049.png",
+      "expected": "82130",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    },
+    {
+      "filename": "new_050.png",
+      "expected": "89321",
+      "predicted": "",
+      "confidence": 0.0,
+      "digit_confidence": [],
+      "abstained": true,
+      "reason": "no complete five-segment candidate"
+    }
+  ]
+}

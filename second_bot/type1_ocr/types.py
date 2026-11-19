@@ -6,7 +6,7 @@ from typing import Any
 
 CELL_COUNT = 5
 IMAGE_SIZE = (300, 110)
-FEATURE_SIZE = (24, 40)
+FEATURE_SIZE = (24, 24)
 
 
 @dataclass(frozen=True)
