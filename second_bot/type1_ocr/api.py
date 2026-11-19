@@ -6,6 +6,7 @@ from typing import Any
 
 from .confidence import score_confidence
 from .features_type1 import segment_type1_image
+from .gemini_solver import solve_with_gemini_flash
 from .image import ImageSource, load_image
 from .preprocessing import preprocessing_variants
 from .segmentation import split_candidate_records
@@ -14,6 +15,19 @@ from .types import CELL_COUNT, Type1Result
 
 # Production inference loads the persisted model once at module import time.
 _MODEL = load_model(DEFAULT_MODEL_PATH) if DEFAULT_MODEL_PATH.is_file() else None
+
+
+def _cloud_fallback(source: ImageSource) -> Type1Result | None:
+    text = solve_with_gemini_flash(source)
+    if text is None:
+        return None
+    return Type1Result(
+        text=text,
+        confidence=1.0,
+        reliable=True,
+        abstained=False,
+        digit_confidence=(1.0,) * CELL_COUNT,
+    )
 
 
 def _candidate_segments(image, model=None):
@@ -42,7 +56,7 @@ def recognize_type1(
     else:
         selected_model = load_model(model_path)
     if selected_model is None:
-        return Type1Result(reason="Type1 model is not trained")
+        return _cloud_fallback(source) or Type1Result(reason="Type1 model is not trained")
 
     image = load_image(source)
     best: dict[str, Any] | None = None
@@ -53,7 +67,7 @@ def recognize_type1(
         if best is None or prediction["mean_distance"] < best["mean_distance"]:
             best = prediction
     if best is None:
-        return Type1Result(reason="no complete five-segment candidate")
+        return _cloud_fallback(source) or Type1Result(reason="no complete five-segment candidate")
     text = best.get("text", "")
     distance = float(best.get("mean_distance", 1.0))
     confidence = score_confidence(distance, best.get("confidence", []), max_distance=max_distance)
