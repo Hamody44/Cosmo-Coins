@@ -74,6 +74,7 @@ COMMAND_PREFIX = "$"
 COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
 WALLET_STATE_PATH = BASE_DIR / ".runtime" / "wallet_balances.json"
+WALLET_CURRENCY_BY_PROVIDER = {"ProBot": "credit", "AdamC": "adamc", "Rob": "rob"}
 AUTO_DELIVERY_STATE_PATH = BASE_DIR / ".runtime" / "auto_delivery_state.json"
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 pending_currency_confirmations: dict[int, str] = {}
@@ -229,6 +230,15 @@ def claim_auto_delivery_order(order_id: int) -> bool:
     return True
 
 
+def release_auto_delivery_order_claim(order_id: int) -> None:
+    """Release a local claim when no provider transfer was attempted."""
+    state = auto_delivery_state()
+    state["processed_orders"] = [
+        existing_id for existing_id in state["processed_orders"] if existing_id != int(order_id)
+    ]
+    write_runtime_json(AUTO_DELIVERY_STATE_PATH, state)
+
+
 def transition_auto_exchange_request(order_id: int, operation: str) -> bool:
     """Atomically reserve, complete, or release an exchange row shared with the primary bot."""
     transitions = {
@@ -298,6 +308,30 @@ def save_wallet_balances(balances: dict[str, int]) -> None:
         WALLET_STATE_PATH,
         {currency: int(balances[currency]) for currency in ("credit", "adamc", "rob")},
     )
+
+
+async def reserve_wallet_balance(currency: str, amount: int) -> tuple[bool, int]:
+    """Atomically debit an amount if the owner has enough of that currency."""
+    if currency not in {"credit", "adamc", "rob"} or amount < 0:
+        raise ValueError("unsupported wallet currency or amount")
+    async with WALLET_LOCK:
+        balances = load_wallet_balances()
+        available = balances[currency]
+        if amount > available:
+            return False, available
+        balances[currency] -= amount
+        save_wallet_balances(balances)
+        return True, available
+
+
+async def restore_wallet_balance(currency: str, amount: int) -> None:
+    """Restore a reservation when dispatching the external transfer fails."""
+    if currency not in {"credit", "adamc", "rob"} or amount < 0:
+        raise ValueError("unsupported wallet currency or amount")
+    async with WALLET_LOCK:
+        balances = load_wallet_balances()
+        balances[currency] += amount
+        save_wallet_balances(balances)
 
 
 def parse_wallet_amount(value: str) -> int:
@@ -2175,45 +2209,38 @@ async def send_currency_command(
         )
         return
 
-    async with WALLET_LOCK:
-        balances = load_wallet_balances()
-        available = balances[wallet_currency]
-        if parsed_amount > available:
-            if channel_id is not None:
-                if previous_confirmation is None:
-                    pending_currency_confirmations.pop(channel_id, None)
-                else:
-                    pending_currency_confirmations[channel_id] = previous_confirmation
-            await send_notice(
-                ctx,
-                f"❌ رصيد {wallet_currency.upper()} غير كافٍ. المتاح `{available:,}` والمطلوب `{parsed_amount:,}`.",
-            )
-            return
-
-        balances[wallet_currency] -= parsed_amount
-        save_wallet_balances(balances)
-        try:
-            await ctx.send(
-                f"{command} {target.mention} {amount}",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except Exception:
-            restored = load_wallet_balances()
-            restored[wallet_currency] += parsed_amount
-            save_wallet_balances(restored)
-            if channel_id is not None:
-                if previous_confirmation is None:
-                    pending_currency_confirmations.pop(channel_id, None)
-                else:
-                    pending_currency_confirmations[channel_id] = previous_confirmation
-            raise
+    reserved, available = await reserve_wallet_balance(wallet_currency, parsed_amount)
+    if not reserved:
+        if channel_id is not None:
+            if previous_confirmation is None:
+                pending_currency_confirmations.pop(channel_id, None)
+            else:
+                pending_currency_confirmations[channel_id] = previous_confirmation
+        await send_notice(
+            ctx,
+            f"❌ رصيد {wallet_currency.upper()} غير كافٍ. المتاح `{available:,}` والمطلوب `{parsed_amount:,}`.",
+        )
+        return
+    try:
+        await ctx.send(
+            f"{command} {target.mention} {amount}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except Exception:
+        await restore_wallet_balance(wallet_currency, parsed_amount)
+        if channel_id is not None:
+            if previous_confirmation is None:
+                pending_currency_confirmations.pop(channel_id, None)
+            else:
+                pending_currency_confirmations[channel_id] = previous_confirmation
+        raise
 
 
 @bot.command(name="tc")
 @commands.check(check_control_owner)
 async def transfer_credit(ctx: commands.Context, target: discord.Member, amount: str) -> None:
     """Send a ProBot Credit command; type1 confirmation remains available for later use."""
-    await send_currency_command(ctx, target, amount, "#credit", "type1")
+    await send_currency_command(ctx, target, amount, "#credit", "type1", wallet_currency="credit")
 
 
 @bot.command(name="ta")
@@ -2227,7 +2254,7 @@ async def transfer_adamc(ctx: commands.Context, target: discord.Member, amount: 
 @commands.check(check_control_owner)
 async def transfer_rob(ctx: commands.Context, target: discord.Member, amount: str) -> None:
     """Send a Rob transfer command without arming an image confirmation."""
-    await send_currency_command(ctx, target, amount, "!transfer", None)
+    await send_currency_command(ctx, target, amount, "!transfer", None, wallet_currency="rob")
 
 
 @bot.command(name="auto_delivery", aliases=["التسليم_التلقائي"])
@@ -2605,6 +2632,41 @@ async def process_auto_delivery_handoff(message: discord.Message) -> None:
             logger.info("Ignored duplicate automatic-delivery handoff for order %s.", order_id)
             return
 
+        wallet_currency = WALLET_CURRENCY_BY_PROVIDER.get(payload["provider"])
+        if wallet_currency is None:
+            transition_auto_exchange_request(order_id, "release")
+            release_auto_delivery_order_claim(order_id)
+            logger.error("No wallet currency is configured for provider %s.", payload["provider"])
+            await report_auto_delivery_result(message, order_id, "pending")
+            return
+        try:
+            reserved, available = await reserve_wallet_balance(wallet_currency, int(payload["amount"]))
+        except OSError:
+            try:
+                transition_auto_exchange_request(order_id, "release")
+                release_auto_delivery_order_claim(order_id)
+            except (OSError, sqlite3.Error, ValueError):
+                logger.exception("Could not release order %s after wallet reservation failed.", order_id)
+            logger.exception("Could not reserve %s wallet funds for order %s.", wallet_currency, order_id)
+            await report_auto_delivery_result(message, order_id, "pending")
+            return
+        if not reserved:
+            try:
+                transition_auto_exchange_request(order_id, "release")
+                release_auto_delivery_order_claim(order_id)
+            except (OSError, sqlite3.Error, ValueError):
+                logger.exception("Could not release underfunded order %s.", order_id)
+            await report_auto_delivery_result(message, order_id, "pending")
+            try:
+                await message.channel.send(
+                    f"⚠️ لم يُرسل الطلب `#{order_id}`: رصيد {wallet_currency.upper()} غير كافٍ. "
+                    f"المتاح `{available:,}` والمطلوب `{int(payload['amount']):,}`؛ بقي الطلب قيد الانتظار.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                logger.exception("Could not report insufficient %s funds for order %s.", wallet_currency, order_id)
+            return
+
         await report_auto_delivery_result(message, order_id, "processing")
 
         confirmation_type = payload["confirmation_type"]
@@ -2627,6 +2689,10 @@ async def process_auto_delivery_handoff(message: discord.Message) -> None:
                 logger.exception("Provider command was sent but database completion failed for order %s.", order_id)
             await report_auto_delivery_result(message, order_id, "automatic")
         except discord.HTTPException:
+            try:
+                await restore_wallet_balance(wallet_currency, int(payload["amount"]))
+            except OSError:
+                logger.exception("Could not restore %s wallet funds after failed order %s send.", wallet_currency, order_id)
             if confirmation_type:
                 pending_currency_confirmations.pop(int(destination.id), None)
             try:

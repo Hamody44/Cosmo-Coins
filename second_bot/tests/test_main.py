@@ -889,9 +889,13 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.state_path = Path(self.temp_dir.name) / "auto_delivery_state.json"
+        self.wallet_path = Path(self.temp_dir.name) / "wallet_balances.json"
         self.state_patch = patch.object(main, "AUTO_DELIVERY_STATE_PATH", self.state_path)
         self.state_patch.start()
         self.addCleanup(self.state_patch.stop)
+        self.wallet_patch = patch.object(main, "WALLET_STATE_PATH", self.wallet_path)
+        self.wallet_patch.start()
+        self.addCleanup(self.wallet_patch.stop)
         self.addCleanup(self.temp_dir.cleanup)
         self.env_patch = patch.dict(os.environ, {
             "COSMO_AUTO_DELIVERY_SECRET": "test-auto-delivery-secret-long-enough-12345",
@@ -899,6 +903,7 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         main.pending_currency_confirmations.clear()
+        main.save_wallet_balances({"credit": 1_000, "adamc": 1_000, "rob": 1_000})
         self.destination = SimpleNamespace(
             id=456,
             guild=SimpleNamespace(id=123),
@@ -931,6 +936,7 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.destination.send.assert_awaited_once()
         self.assertEqual(self.destination.send.await_args.args[0], "#credit 789 250")
+        self.assertEqual(main.load_wallet_balances()["credit"], 750)
         self.assertEqual(
             self.destination.send.await_args.kwargs["allowed_mentions"].to_dict(),
             discord.AllowedMentions.none().to_dict(),
@@ -948,6 +954,43 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             await main.process_auto_delivery_handoff(self.message)
 
         self.destination.send.assert_not_awaited()
+
+    async def test_auto_delivery_deducts_wallet_for_each_supported_currency(self):
+        cases = ((82, "ProBot Credits", "credit"), (83, "AdamC", "adamc"), (84, "Robux", "rob"))
+        for order_id, currency, wallet_currency in cases:
+            main.pending_currency_confirmations.clear()
+            self.destination.send.reset_mock()
+            content = build_handoff_message(
+                secret=os.environ["COSMO_AUTO_DELIVERY_SECRET"],
+                issuer_id=111,
+                order_id=order_id,
+                guild_id=123,
+                delivery_channel_id=456,
+                user_id=789,
+                currency=currency,
+                amount=250,
+            )
+            message = SimpleNamespace(author=self.message.author, channel=self.source_channel, content=content)
+            with patch.object(main.bot, "get_channel", return_value=self.destination), patch.object(
+                main, "transition_auto_exchange_request", return_value=True
+            ):
+                await main.process_auto_delivery_handoff(message)
+
+            self.destination.send.assert_awaited_once()
+            self.assertEqual(main.load_wallet_balances()[wallet_currency], 750)
+
+    async def test_auto_delivery_leaves_underfunded_order_pending_without_sending(self):
+        main.save_wallet_balances({"credit": 100, "adamc": 1_000, "rob": 1_000})
+        with patch.object(main.bot, "get_channel", return_value=self.destination), patch.object(
+            main, "transition_auto_exchange_request", return_value=True
+        ) as transition:
+            await main.process_auto_delivery_handoff(self.message)
+
+        self.destination.send.assert_not_awaited()
+        self.assertEqual(main.load_wallet_balances()["credit"], 100)
+        self.assertEqual(main.auto_delivery_state()["processed_orders"], [])
+        self.assertEqual([call.args[1] for call in transition.call_args_list], ["claim", "release"])
+        self.assertTrue(any("غير كافٍ" in call.args[0] for call in self.source_channel.send.await_args_list))
 
     async def test_untrusted_non_bot_message_is_ignored(self):
         self.message.author.bot = False
@@ -980,7 +1023,7 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             )
 
 
-class AdamCWalletTransferTests(unittest.IsolatedAsyncioTestCase):
+class WalletCurrencyTransferTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.wallet_path = Path(self.temp_dir.name) / "wallet_balances.json"
@@ -990,7 +1033,7 @@ class AdamCWalletTransferTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.addCleanup(main.pending_currency_confirmations.clear)
         main.pending_currency_confirmations.clear()
-        main.save_wallet_balances({"credit": 0, "adamc": 2_000_000, "rob": 0})
+        main.save_wallet_balances({"credit": 2_000_000, "adamc": 2_000_000, "rob": 2_000_000})
 
     def make_context(self, channel_id=555, *, send=None):
         return SimpleNamespace(
@@ -1028,6 +1071,24 @@ class AdamCWalletTransferTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(main.load_wallet_balances()["adamc"], 2_000_000)
         self.assertNotIn(555, main.pending_currency_confirmations)
+
+    async def test_tc_deducts_credit_from_its_wallet_balance(self):
+        ctx = self.make_context()
+        target = SimpleNamespace(mention="<@123>")
+
+        await main.transfer_credit.callback(ctx, target, "1m")
+
+        self.assertEqual(main.load_wallet_balances()["credit"], 1_000_000)
+        self.assertEqual(ctx.send.await_args.args[0], "#credit <@123> 1m")
+
+    async def test_tr_deducts_rob_from_its_wallet_balance(self):
+        ctx = self.make_context()
+        target = SimpleNamespace(mention="<@123>")
+
+        await main.transfer_rob.callback(ctx, target, "1m")
+
+        self.assertEqual(main.load_wallet_balances()["rob"], 1_000_000)
+        self.assertEqual(ctx.send.await_args.args[0], "!transfer <@123> 1m")
 
     async def test_concurrent_ta_commands_cannot_spend_the_same_balance_twice(self):
         main.save_wallet_balances({"credit": 0, "adamc": 1_000_000, "rob": 0})
