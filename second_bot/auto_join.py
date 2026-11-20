@@ -11,6 +11,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 RUNTIME_DIR = ROOT_DIR / "second_bot" / ".runtime"
 AUTO_JOIN_QUEUE_PATH = RUNTIME_DIR / "auto_join_queue.json"
 SECOND_BOT_STATE_PATH = RUNTIME_DIR / "second_bot_state.json"
+AUTO_JOIN_SUPPRESSIONS_PATH = RUNTIME_DIR / "auto_join_suppressions.json"
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -54,6 +55,33 @@ def load_second_bot_state() -> dict[str, Any]:
     }
 
 
+def load_auto_join_suppressions() -> set[int]:
+    payload = _read_json(AUTO_JOIN_SUPPRESSIONS_PATH, [])
+    if not isinstance(payload, list):
+        return set()
+    suppressed: set[int] = set()
+    for value in payload:
+        try:
+            guild_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if guild_id > 0:
+            suppressed.add(guild_id)
+    return suppressed
+
+
+def suppress_auto_join(guild_id: int) -> None:
+    guild_id = int(guild_id)
+    if guild_id <= 0:
+        return
+    suppressed = load_auto_join_suppressions()
+    suppressed.add(guild_id)
+    _write_json(AUTO_JOIN_SUPPRESSIONS_PATH, sorted(suppressed))
+    queue = _read_json(AUTO_JOIN_QUEUE_PATH, {})
+    if isinstance(queue, dict) and queue.pop(str(guild_id), None) is not None:
+        _write_json(AUTO_JOIN_QUEUE_PATH, queue)
+
+
 def publish_second_bot_state(*, user_id: int | None, guild_ids: list[int] | set[int]) -> None:
     normalized = []
     for value in guild_ids:
@@ -63,12 +91,18 @@ def publish_second_bot_state(*, user_id: int | None, guild_ids: list[int] | set[
             continue
         if value > 0:
             normalized.append(value)
+    normalized_ids = sorted(set(normalized))
+    previous = load_second_bot_state()
+    normalized_user_id = int(user_id) if user_id else None
+    if normalized_user_id is not None and previous["user_id"] == normalized_user_id:
+        for departed_guild_id in set(previous["guild_ids"]) - set(normalized_ids):
+            suppress_auto_join(departed_guild_id)
     _write_json(
         SECOND_BOT_STATE_PATH,
         {
             "updated_at": time.time(),
-            "user_id": int(user_id) if user_id else None,
-            "guild_ids": sorted(set(normalized)),
+            "user_id": normalized_user_id,
+            "guild_ids": normalized_ids,
         },
     )
 
@@ -77,6 +111,7 @@ def load_auto_join_queue() -> dict[str, dict[str, Any]]:
     payload = _read_json(AUTO_JOIN_QUEUE_PATH, {})
     if not isinstance(payload, dict):
         return {}
+    suppressed = load_auto_join_suppressions()
     queue: dict[str, dict[str, Any]] = {}
     for key, value in payload.items():
         if not isinstance(value, dict):
@@ -87,7 +122,7 @@ def load_auto_join_queue() -> dict[str, dict[str, Any]]:
         except (TypeError, ValueError):
             continue
         invite_url = str(value.get("invite_url", "")).strip()
-        if guild_id > 0 and invite_url:
+        if guild_id > 0 and guild_id not in suppressed and invite_url:
             queue[str(guild_id)] = {
                 "guild_id": guild_id,
                 "invite_url": invite_url,
@@ -97,6 +132,8 @@ def load_auto_join_queue() -> dict[str, dict[str, Any]]:
 
 
 def enqueue_auto_join(*, guild_id: int, invite_url: str) -> bool:
+    if int(guild_id) in load_auto_join_suppressions():
+        return False
     queue = load_auto_join_queue()
     key = str(int(guild_id))
     if key in queue:

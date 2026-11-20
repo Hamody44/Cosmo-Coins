@@ -15,6 +15,7 @@ from database import (
 from second_bot.auto_join import (
     enqueue_auto_join,
     load_auto_join_queue,
+    load_auto_join_suppressions,
     load_second_bot_state,
 )
 import time
@@ -169,10 +170,13 @@ async def reconcile_second_bot_guilds() -> None:
         second_state = load_second_bot_state()
         second_guild_ids = set(second_state["guild_ids"])
         second_user_id = second_state.get("user_id")
+        suppressed_guild_ids = load_auto_join_suppressions()
         queued_ids = set(load_auto_join_queue())
         for guild in sorted(bot.guilds, key=lambda item: item.id):
             if guild.id in second_guild_ids:
                 await ensure_auto_delivery_access(guild, second_user_id)
+                continue
+            if guild.id in suppressed_guild_ids:
                 continue
             if str(guild.id) in queued_ids:
                 continue
