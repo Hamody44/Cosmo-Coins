@@ -54,7 +54,16 @@ class GeminiAI(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-        # Cerebras is the primary provider; Gemini is the first fallback.
+        # Gemini 3.5 Flash-Lite is the primary provider.
+        api_key = os.getenv("GEMINI_API_KEY")
+        self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
+        if not api_key:
+            print("⚠️ [GeminiAI] لم يتم العثور على GEMINI_API_KEY في ملف .env")
+            self.client = None
+        else:
+            self.client = genai.Client(api_key=api_key)
+
+        # Cerebras fallback
         cerebras_key = os.getenv("CEREBRAS_API_KEY")
         self.cerebras_model = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b").strip() or "gpt-oss-120b"
         self.cerebras_client = None
@@ -65,14 +74,6 @@ class GeminiAI(commands.Cog):
                 api_key=cerebras_key,
                 base_url="https://api.cerebras.ai/v1",
             )
-
-        # Gemini fallback
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            print("⚠️ [GeminiAI] لم يتم العثور على GEMINI_API_KEY في ملف .env")
-            self.client = None
-        else:
-            self.client = genai.Client(api_key=api_key)
 
         # Optional third fallback through OpenRouter
         openrouter_key = os.getenv("OPENROUTER_API_KEY")
@@ -154,20 +155,11 @@ class GeminiAI(commands.Cog):
         ]
 
         # Try providers in priority order; invalid output also triggers fallback.
-        for provider in ("Cerebras", "Gemini", "OpenRouter"):
+        for provider in ("Gemini", "Cerebras", "OpenRouter"):
             try:
-                if provider == "Cerebras" and self.cerebras_client:
-                    response = await self.cerebras_client.chat.completions.create(
-                        model=self.cerebras_model,
-                        messages=messages,
-                        response_format={"type": "json_object"},
-                        temperature=0.1,
-                        max_tokens=300,
-                    )
-                    raw = response.choices[0].message.content or ""
-                elif provider == "Gemini" and self.client:
+                if provider == "Gemini" and self.client:
                     response = await self.client.aio.models.generate_content(
-                        model="gemini-3.8-flash",
+                        model=self.gemini_model,
                         contents=classifier_prompt,
                         config=types.GenerateContentConfig(
                             system_instruction=AI_ACTION_PROMPT,
@@ -176,6 +168,15 @@ class GeminiAI(commands.Cog):
                         ),
                     )
                     raw = response.text or ""
+                elif provider == "Cerebras" and self.cerebras_client:
+                    response = await self.cerebras_client.chat.completions.create(
+                        model=self.cerebras_model,
+                        messages=messages,
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                        max_tokens=300,
+                    )
+                    raw = response.choices[0].message.content or ""
                 elif provider == "OpenRouter" and self.backup_client:
                     response = await self.backup_client.chat.completions.create(
                         model="meta-llama/llama-3.3-70b-instruct:free",
@@ -240,6 +241,18 @@ class GeminiAI(commands.Cog):
 السياق المتاح:
 {self.primary_code_context(prompt)}
 """
+        if self.client:
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=self.gemini_model,
+                    contents=instruction,
+                    config=types.GenerateContentConfig(temperature=0.1),
+                )
+                patch = response.text or ""
+                if patch:
+                    return patch
+            except Exception as exc:
+                print(f"[DEBUG] Gemini code generation failed; trying Cerebras: {exc}")
         if self.cerebras_client:
             try:
                 response = await self.cerebras_client.chat.completions.create(
@@ -252,19 +265,7 @@ class GeminiAI(commands.Cog):
                 if patch:
                     return patch
             except Exception as exc:
-                print(f"[DEBUG] Cerebras code generation failed; trying Gemini: {exc}")
-        if self.client:
-            try:
-                response = await self.client.aio.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=instruction,
-                    config=types.GenerateContentConfig(temperature=0.1),
-                )
-                patch = response.text or ""
-                if patch:
-                    return patch
-            except Exception as exc:
-                print(f"[DEBUG] Gemini code generation failed; trying OpenRouter: {exc}")
+                print(f"[DEBUG] Cerebras code generation failed; trying OpenRouter: {exc}")
         return await self.ask_backup_ai(instruction)
 
     def apply_primary_code_patch(self, patch_text: str) -> tuple[bool, str]:
@@ -358,11 +359,11 @@ class GeminiAI(commands.Cog):
             return True
 
     async def ask_backup_ai(self, prompt: str) -> str:
-        """Use OpenRouter as an optional third provider after Cerebras and Gemini."""
+        """Use OpenRouter as an optional third provider after Gemini and Cerebras."""
         if not self.backup_client:
-            return "⚠️ تعذر توليد الرد من Cerebras وGemini، كما أن OPENROUTER_API_KEY غير مضبوط للمزوّد الثالث."
+            return "⚠️ تعذر توليد الرد من Gemini وCerebras، كما أن OPENROUTER_API_KEY غير مضبوط للمزوّد الثالث."
         try:
-            print("🔄 [Fallback] Cerebras وGemini غير متاحين؛ جاري تجربة OpenRouter...")
+            print("🔄 [Fallback] Gemini وCerebras غير متاحين؛ جاري تجربة OpenRouter...")
             response = await self.backup_client.chat.completions.create(
                 model="meta-llama/llama-3.3-70b-instruct:free",
                 messages=[
@@ -381,9 +382,9 @@ class GeminiAI(commands.Cog):
             return f"⚠️ خطأ أثناء توليد الرد من الخادم البديل: {e}"
 
     async def ask_gemini_ai(self, prompt: str, *, temperature: float = 0.7) -> str:
-        """Generate a response from Gemini after the primary Cerebras provider fails."""
+        """Generate a response from the primary Gemini model."""
         response = await self.client.aio.models.generate_content(
-            model="gemini-3.8-flash",
+            model=self.gemini_model,
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=AI_SYSTEM_INSTRUCTION,
@@ -410,6 +411,15 @@ class GeminiAI(commands.Cog):
             if item["role"] != "system"
         )
 
+        if self.client:
+            try:
+                answer = await self.ask_gemini_ai(fallback_prompt)
+                if answer:
+                    history.append({"role": "assistant", "content": answer})
+                    return answer
+            except Exception as exc:
+                print(f"[DEBUG] Gemini Error; trying Cerebras fallback: {exc}")
+
         if self.cerebras_client:
             try:
                 response = await self.cerebras_client.chat.completions.create(
@@ -423,16 +433,7 @@ class GeminiAI(commands.Cog):
                     history.append({"role": "assistant", "content": answer})
                     return answer
             except Exception as exc:
-                print(f"[DEBUG] Cerebras Error; trying Gemini fallback: {exc}")
-
-        if self.client:
-            try:
-                answer = await self.ask_gemini_ai(fallback_prompt)
-                if answer:
-                    history.append({"role": "assistant", "content": answer})
-                    return answer
-            except Exception as exc:
-                print(f"[DEBUG] Gemini Error; trying OpenRouter fallback: {exc}")
+                print(f"[DEBUG] Cerebras Error; trying OpenRouter fallback: {exc}")
 
         if self.backup_client:
             answer = await self.ask_backup_ai(fallback_prompt)
@@ -443,7 +444,7 @@ class GeminiAI(commands.Cog):
             return answer
 
         history.pop()
-        return "⚠️ تعذر توليد الرد من Cerebras وGemini. تحقق من مفاتيح API وحالة المزوّدين."
+        return "⚠️ تعذر توليد الرد من Gemini وCerebras. تحقق من مفاتيح API وحالة المزوّدين."
 
     async def send_split_message(self, target, text: str):
         chunks = [text[i:i + 1900] for i in range(0, len(text), 1900)]
