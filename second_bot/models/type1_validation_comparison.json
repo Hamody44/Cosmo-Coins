@@ -1,0 +1,118 @@
+{
+  "baseline": {
+    "dataset_crops": 2038,
+    "validation_samples": 408,
+    "overall_digit_accuracy": 0.7426470588235294,
+    "full_captcha_accuracy": 0.45,
+    "per_digit_accuracy": {
+      "0": 0.7272727272727273,
+      "1": 0.8095238095238095,
+      "2": 0.7567567567567568,
+      "3": 0.7027027027027027,
+      "4": 0.7619047619047619,
+      "5": 0.6904761904761905,
+      "6": 0.7872340425531915,
+      "7": 0.8444444444444444,
+      "8": 0.6511627906976745,
+      "9": 0.675
+    },
+    "model_size_bytes": 1678710,
+    "model_size_mib": 1.600942611694336,
+    "latency_ms": {
+      "mean": 41.42367882500224,
+      "median": 41.238956,
+      "p95": 43.281520049993105,
+      "benchmark_images": 40
+    }
+  },
+  "after_cleaning_and_opencv_aug": {
+    "dataset_crops": 1256,
+    "validation_samples": 251,
+    "overall_digit_accuracy": 0.9083665338645418,
+    "full_captcha_accuracy": 0.6923076923076923,
+    "per_digit_accuracy": {
+      "0": 0.8888888888888888,
+      "1": 0.8571428571428571,
+      "2": 0.8823529411764706,
+      "3": 1.0,
+      "4": 0.896551724137931,
+      "5": 0.9354838709677419,
+      "6": 0.88,
+      "7": 0.9259259259259259,
+      "8": 0.9696969696969697,
+      "9": 0.8148148148148148
+    },
+    "model_size_bytes": 828075,
+    "model_size_mib": 0.7897138595581055,
+    "latency_ms": {
+      "mean": 29.1689731,
+      "median": 29.102907999998706,
+      "p95": 30.16523674995426,
+      "benchmark_images": 40,
+      "measurement": "recognize_type1 full CAPTCHA inference"
+    },
+    "augmentation_variants_per_training_crop": 8
+  },
+  "cleaning_counts": {
+    "0": {
+      "before_count": 165,
+      "kept_count": 90,
+      "quarantined_count": 75
+    },
+    "1": {
+      "before_count": 208,
+      "kept_count": 105,
+      "quarantined_count": 103
+    },
+    "2": {
+      "before_count": 185,
+      "kept_count": 85,
+      "quarantined_count": 100
+    },
+    "3": {
+      "before_count": 188,
+      "kept_count": 115,
+      "quarantined_count": 73
+    },
+    "4": {
+      "before_count": 214,
+      "kept_count": 146,
+      "quarantined_count": 68
+    },
+    "5": {
+      "before_count": 209,
+      "kept_count": 155,
+      "quarantined_count": 54
+    },
+    "6": {
+      "before_count": 234,
+      "kept_count": 122,
+      "quarantined_count": 112
+    },
+    "7": {
+      "before_count": 227,
+      "kept_count": 137,
+      "quarantined_count": 90
+    },
+    "8": {
+      "before_count": 215,
+      "kept_count": 166,
+      "quarantined_count": 49
+    },
+    "9": {
+      "before_count": 200,
+      "kept_count": 137,
+      "quarantined_count": 63
+    }
+  },
+  "runtime_isolation": {
+    "forbidden_imports": [],
+    "requirements": [
+      "discord.py-self",
+      "Pillow",
+      "numpy",
+      "python-dotenv"
+    ],
+    "compileall": true
+  }
+}

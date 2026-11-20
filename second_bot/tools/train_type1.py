@@ -12,8 +12,9 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+import cv2
 import numpy as np
-from PIL import __version__ as PILLOW_VERSION
+from PIL import Image, __version__ as PILLOW_VERSION
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.svm import SVC
 
@@ -24,12 +25,13 @@ try:
     from ..type1_ocr.features_type1 import (
         FEATURE_LENGTH,
         augment_canvas_features,
+        extract_features,
         load_labeled_crops,
     )
     from ..type1_ocr.types import CELL_COUNT
 except ImportError:
     from type1_ocr import build_model, recognize_type1, save_model
-    from type1_ocr.features_type1 import FEATURE_LENGTH, augment_canvas_features, load_labeled_crops
+    from type1_ocr.features_type1 import FEATURE_LENGTH, augment_canvas_features, extract_features, load_labeled_crops
     from type1_ocr.types import CELL_COUNT
 
 
@@ -177,13 +179,49 @@ def prune_training_samples(samples: list[dict[str, Any]], train_indices: np.ndar
     return kept, {"method": "grouped_5_fold_oof_margin", "before": int(len(subset)), "removed": int(strong_disagreement.sum()), "after": int(len(kept)), "threshold": 0.16}
 
 
+def augment_brush_crops(crop, sample_index: int) -> list[Any]:
+    """Create eight deterministic brush/noise variants in training space only."""
+    source = np.asarray(crop.convert("L"), dtype=np.uint8)
+    height, width = source.shape
+    rng = np.random.default_rng(4100 + int(sample_index))
+    variants = [crop.copy()]
+    for variant in range(7):
+        image = source.copy()
+        # Alternate thin/thick brush strokes with the requested kernel sizes.
+        kernel_size = (2, 2) if variant % 2 == 0 else (3, 3)
+        kernel = np.ones(kernel_size, dtype=np.uint8)
+        image = cv2.erode(image, kernel, iterations=1) if variant % 3 == 0 else cv2.dilate(image, kernel, iterations=1)
+
+        angle = float(rng.uniform(-7.0, 7.0))
+        shear = float(rng.uniform(-0.055, 0.055))
+        center = (width / 2.0, height / 2.0)
+        matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+        matrix[0, 1] += shear
+        matrix[0, 2] -= shear * height / 2.0
+        image = cv2.warpAffine(image, matrix, (width, height), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+
+        # Faint crossing lines and tiny speckles reproduce CAPTCHA background noise.
+        overlay = image.copy()
+        for _ in range(1 + (variant % 2)):
+            x0, y0 = int(rng.integers(0, width)), int(rng.integers(0, height))
+            x1, y1 = int(rng.integers(0, width)), int(rng.integers(0, height))
+            cv2.line(overlay, (x0, y0), (x1, y1), int(rng.integers(180, 236)), 1, cv2.LINE_AA)
+        image = cv2.addWeighted(image, 0.94, overlay, 0.06, 0.0)
+        speck_count = max(1, int(width * height * 0.0025))
+        for _ in range(speck_count):
+            x, y = int(rng.integers(0, width)), int(rng.integers(0, height))
+            image[y, x] = int(rng.integers(150, 245))
+        variants.append(Image.fromarray(image, mode="L"))
+    return variants
+
+
 def fit_augmented(samples: list[dict[str, Any]], indices: Iterable[int]):
     features: list[np.ndarray] = []
     labels: list[str] = []
     for sample_index in indices:
         sample = samples[int(sample_index)]
-        variants = augment_canvas_features(sample["image"], int(sample_index))
-        features.extend(variants)
+        variants = augment_brush_crops(sample["image"], int(sample_index))
+        features.extend(extract_features(variant) for variant in variants)
         labels.extend([sample["label"]] * len(variants))
     X = np.asarray(features, dtype=np.float32)
     y = np.asarray(labels, dtype="U1")
@@ -296,8 +334,8 @@ def train_crops_and_report(data_dir: Path, output: Path, report_path: Path, seed
         "pruning": pruning,
         "validation_metrics": metrics,
         "augmentation": {
-            "variants_per_crop": 5,
-            "transforms": ["original", "horizontal shift -1px", "horizontal shift +1px", "vertical shift -1px", "vertical shift +1px"],
+            "variants_per_crop": 8,
+            "transforms": ["original", "erode/dilate 2x2 or 3x3", "rotation -7..+7 degrees", "horizontal shear +/-0.055", "white-border affine warp", "faint crossing lines", "tiny speckles", "deterministic mixed brush variant"],
             "validation_training_matrix_shape": list(augmented_shape),
             "final_training_matrix_shape": list(final_shape),
         },

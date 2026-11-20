@@ -17,6 +17,7 @@ second_bot/models/candidates/
 *.db-shm
 backups/
 *.tar.gz
+quarantined_crops/
 
 # Python artifacts and virtual environments
 __pycache__/

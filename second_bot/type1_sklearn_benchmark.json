@@ -1,15 +1,15 @@
 {
-  "dataset": "/home/ubuntu/Cosmo-Coins/digits_crops",
-  "total_usable_crops": 2038,
+  "dataset": "digits_crops",
+  "total_usable_crops": 1256,
   "skipped_outliers_by_digit": {
-    "0": 1,
+    "0": 0,
     "1": 0,
-    "2": 1,
+    "2": 0,
     "3": 0,
     "4": 0,
     "5": 0,
     "6": 1,
-    "7": 4,
+    "7": 1,
     "8": 0,
     "9": 0
   },
@@ -17,117 +17,126 @@
     "method": "StratifiedGroupKFold",
     "seed": 41,
     "validation_fraction_target": 0.2,
-    "training_captchas": 327,
-    "validation_captchas": 82,
-    "training_samples": 1630,
-    "validation_samples": 408,
+    "training_captchas": 297,
+    "validation_captchas": 74,
+    "training_samples": 1005,
+    "validation_samples": 251,
     "group_overlap": 0
   },
   "pruning": {
     "method": "disabled",
-    "before": 1630,
+    "before": 1005,
     "removed": 0,
-    "after": 1630
+    "after": 1005
   },
   "validation_metrics": {
-    "validation_samples": 408,
-    "overall_digit_accuracy": 0.7426470588235294,
+    "validation_samples": 251,
+    "overall_digit_accuracy": 0.9083665338645418,
     "per_digit_accuracy": {
       "0": {
-        "correct": 24,
-        "total": 33,
-        "accuracy": 0.7272727272727273
+        "correct": 16,
+        "total": 18,
+        "accuracy": 0.8888888888888888
       },
       "1": {
-        "correct": 34,
-        "total": 42,
-        "accuracy": 0.8095238095238095
+        "correct": 18,
+        "total": 21,
+        "accuracy": 0.8571428571428571
       },
       "2": {
-        "correct": 28,
-        "total": 37,
-        "accuracy": 0.7567567567567568
+        "correct": 15,
+        "total": 17,
+        "accuracy": 0.8823529411764706
       },
       "3": {
-        "correct": 26,
-        "total": 37,
-        "accuracy": 0.7027027027027027
+        "correct": 23,
+        "total": 23,
+        "accuracy": 1.0
       },
       "4": {
-        "correct": 32,
-        "total": 42,
-        "accuracy": 0.7619047619047619
+        "correct": 26,
+        "total": 29,
+        "accuracy": 0.896551724137931
       },
       "5": {
         "correct": 29,
-        "total": 42,
-        "accuracy": 0.6904761904761905
+        "total": 31,
+        "accuracy": 0.9354838709677419
       },
       "6": {
-        "correct": 37,
-        "total": 47,
-        "accuracy": 0.7872340425531915
+        "correct": 22,
+        "total": 25,
+        "accuracy": 0.88
       },
       "7": {
-        "correct": 38,
-        "total": 45,
-        "accuracy": 0.8444444444444444
+        "correct": 25,
+        "total": 27,
+        "accuracy": 0.9259259259259259
       },
       "8": {
-        "correct": 28,
-        "total": 43,
-        "accuracy": 0.6511627906976745
+        "correct": 32,
+        "total": 33,
+        "accuracy": 0.9696969696969697
       },
       "9": {
-        "correct": 27,
-        "total": 40,
-        "accuracy": 0.675
+        "correct": 22,
+        "total": 27,
+        "accuracy": 0.8148148148148148
       }
     },
-    "full_captcha_total": 80,
-    "full_captcha_correct": 36,
-    "full_captcha_accuracy": 0.45,
+    "full_captcha_total": 13,
+    "full_captcha_correct": 9,
+    "full_captcha_accuracy": 0.6923076923076923,
     "top_3_confused_pairs": [
       {
-        "true_digit": "3",
-        "predicted_digit": "9",
-        "count": 5
+        "true_digit": "9",
+        "predicted_digit": "3",
+        "count": 2
       },
       {
         "true_digit": "0",
-        "predicted_digit": "3",
-        "count": 4
+        "predicted_digit": "8",
+        "count": 1
       },
       {
-        "true_digit": "1",
-        "predicted_digit": "9",
-        "count": 4
+        "true_digit": "0",
+        "predicted_digit": "6",
+        "count": 1
       }
     ]
   },
   "augmentation": {
-    "variants_per_crop": 5,
+    "variants_per_crop": 8,
     "transforms": [
       "original",
-      "horizontal shift -1px",
-      "horizontal shift +1px",
-      "vertical shift -1px",
-      "vertical shift +1px"
+      "erode/dilate 2x2 or 3x3",
+      "rotation -7..+7 degrees",
+      "horizontal shear +/-0.055",
+      "white-border affine warp",
+      "faint crossing lines",
+      "tiny speckles",
+      "deterministic mixed brush variant"
     ],
     "validation_training_matrix_shape": [
-      8150,
+      8040,
       415
     ],
     "final_training_matrix_shape": [
-      10190,
+      10048,
       415
     ]
   },
   "classifier": "SVC(kernel='rbf', C=7.0, gamma='scale', probability=False)",
   "feature_length": 415,
-  "latency_ms": null,
-  "model_path": "/home/ubuntu/Cosmo-Coins/second_bot/models/type1_model.npz",
-  "model_size_bytes": 1678710,
+  "latency_ms": {
+    "mean": 29.1689731,
+    "median": 29.102907999998706,
+    "p95": 30.16523674995426,
+    "benchmark_images": 40,
+    "measurement": "recognize_type1 full CAPTCHA inference"
+  },
+  "model_path": "second_bot/models/type1_model.npz",
+  "model_size_bytes": 828075,
   "model_under_2mb": true,
   "pillow_version": "13.0.0"
 }
