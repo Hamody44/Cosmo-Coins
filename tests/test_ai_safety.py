@@ -133,6 +133,8 @@ class AISafetyTests(unittest.IsolatedAsyncioTestCase):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(contents, encoding="utf-8")
+            binary_without_known_extension = root / "assets/random.dat"
+            binary_without_known_extension.write_bytes(b"\x00\xff\x01")
 
             cog = object.__new__(GeminiAI)
             with patch("cogs.ai.PRIMARY_REPO_ROOT", root):
@@ -143,8 +145,14 @@ class AISafetyTests(unittest.IsolatedAsyncioTestCase):
                 inventory = cog.project_file_inventory()
                 context = cog.project_file_context("needle")
                 arabic_context = cog.project_file_context("روم التسليمات")
-                self.assertFalse(GeminiAI.is_primary_code_path(root / "second_bot/settings.yaml"))
-                self.assertFalse(GeminiAI.is_primary_code_path(root / "guilds_data/example.sqlite"))
+                self.assertTrue(GeminiAI.is_editable_project_path(root / "second_bot/settings.yaml"))
+                self.assertTrue(GeminiAI.is_editable_project_path(root / "second_bot/new-settings.toml"))
+                self.assertFalse(GeminiAI.is_editable_project_path(root / "config/.env.production"))
+                self.assertFalse(GeminiAI.is_editable_project_path(root / ".venv/lib/module.py"))
+                self.assertFalse(GeminiAI.is_editable_project_path(root / "tools/venv/lib/module.py"))
+                self.assertFalse(GeminiAI.is_editable_project_path(root / "assets/blob.bin"))
+                self.assertFalse(GeminiAI.is_editable_project_path(binary_without_known_extension))
+                self.assertFalse(GeminiAI.is_editable_project_path(root / "guilds_data/example.sqlite"))
 
             for relative in included:
                 self.assertIn(relative, inventory)
@@ -154,6 +162,51 @@ class AISafetyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(marker, context)
             self.assertIn("needle arbitrary extension", context)
             self.assertIn("إعداد روم التسليمات", arabic_context)
+
+    async def test_project_file_edit_is_owner_only(self):
+        cog = object.__new__(GeminiAI)
+        cog.classify_request = AsyncMock(return_value={"action": "code_change", "command": "", "summary": ""})
+        cog.generate_project_file_patch = AsyncMock(return_value="patch")
+        cog.apply_project_file_patch = Mock(return_value=(True, "تم التعديل"))
+        owner_ctx = SimpleNamespace(
+            author=SimpleNamespace(id=PRIMARY_OWNER_ID),
+            guild=None,
+            channel=SimpleNamespace(id=202),
+            send=AsyncMock(),
+        )
+
+        handled = await cog.handle_request(owner_ctx, "عدّل ملف إعدادات المشروع", "")
+
+        self.assertTrue(handled)
+        cog.generate_project_file_patch.assert_awaited_once_with("عدّل ملف إعدادات المشروع")
+        cog.apply_project_file_patch.assert_called_once_with("patch")
+        owner_ctx.send.assert_awaited_once_with("✅ تم التعديل")
+
+        member_ctx = SimpleNamespace(
+            author=SimpleNamespace(id=123456789),
+            guild=None,
+            channel=SimpleNamespace(id=202),
+            send=AsyncMock(),
+        )
+        denied = await cog.handle_request(member_ctx, "عدّل ملف إعدادات المشروع", "")
+        self.assertTrue(denied)
+        member_ctx.send.assert_awaited_once_with("⛔ تعديل ملفات المشروع متاح لمالك البوت فقط.")
+        self.assertEqual(cog.generate_project_file_patch.await_count, 1)
+
+    def test_project_file_editor_rejects_binary_patches(self):
+        cog = object.__new__(GeminiAI)
+        binary_patch = """diff --git a/assets/example.txt b/assets/example.txt
+index 0000000..1111111
+GIT binary patch
+literal 4
+test
+"""
+        with patch("cogs.ai.subprocess.run") as run:
+            success, message = cog.apply_project_file_patch(binary_patch)
+
+        self.assertFalse(success)
+        self.assertIn("الثنائية", message)
+        run.assert_not_called()
 
     async def test_project_file_read_is_owner_only_and_answers_from_file_context(self):
         cog = object.__new__(GeminiAI)
