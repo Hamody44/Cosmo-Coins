@@ -17,7 +17,6 @@ import math
 import sys
 from pathlib import Path
 from typing import Iterable
-import sys
 
 from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
@@ -25,19 +24,32 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
-    from .train_type1 import edit_distance, read_dataset, split_rows
     from ..type1_ocr.features import extract_feature as _feature
     from ..type1_ocr.image import load_image
     from ..type1_ocr.preprocessing import grayscale as _gray
     from ..type1_ocr.segmentation import segment_candidates
     from ..type1_ocr.types import CELL_COUNT
 except ImportError:  # direct execution with PYTHONPATH=second_bot
-    from tools.train_type1 import edit_distance, read_dataset, split_rows
     from type1_ocr.features import extract_feature as _feature
     from type1_ocr.image import load_image
     from type1_ocr.preprocessing import grayscale as _gray
     from type1_ocr.segmentation import segment_candidates
     from type1_ocr.types import CELL_COUNT
+
+
+def edit_distance(left: str, right: str) -> int:
+    """Return the Levenshtein distance without importing training utilities."""
+    previous = list(range(len(right) + 1))
+    for index, left_char in enumerate(left, 1):
+        current = [index]
+        for column, right_char in enumerate(right, 1):
+            current.append(min(
+                previous[column] + 1,
+                current[-1] + 1,
+                previous[column - 1] + (left_char != right_char),
+            ))
+        previous = current
+    return previous[-1]
 
 
 def channel_variants(image: Image.Image) -> list[tuple[str, Image.Image]]:
@@ -176,6 +188,12 @@ def main() -> int:
     parser.add_argument("--max-candidates", type=int, default=6)
     parser.add_argument("--variants", nargs="*", help="Optional subset of channel variant names")
     args = parser.parse_args()
+    # Training/data-splitting helpers pull scikit-learn; import them only when
+    # this offline evaluation CLI is explicitly run, never during bot startup.
+    if __package__:
+        from .train_type1 import read_dataset, split_rows
+    else:
+        from tools.train_type1 import read_dataset, split_rows
     if args.max_candidates < 1 or args.max_candidates > 18:
         parser.error("--max-candidates must be between 1 and 18")
     try:
