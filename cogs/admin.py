@@ -418,7 +418,13 @@ class SetupView(discord.ui.View):
             return await interaction.response.send_message("اختر نوع الروم والروم نفسه أولًا.", ephemeral=True)
         _label, _description, table, column = SETUP_CHANNELS[self.selected_purpose]
         conn, cur = get_guild_db(self.guild.id)
+        setting_column = "announcement_channel_id" if table == "leveling_config" else column
+        previous_channel_id = None
         try:
+            previous = cur.execute(
+                f"SELECT {setting_column} FROM {table} WHERE guild_id = ?", (self.guild.id,)
+            ).fetchone()
+            previous_channel_id = previous[0] if previous else None
             if table == "leveling_config":
                 cur.execute(
                     "INSERT INTO leveling_config (guild_id, announcement_channel_id) VALUES (?, ?) "
@@ -434,6 +440,16 @@ class SetupView(discord.ui.View):
             conn.commit()
         finally:
             conn.close()
+        record_audit(
+            "server_channel_setting_changed",
+            guild_id=self.guild.id,
+            actor_id=interaction.user.id,
+            actor_name=getattr(interaction.user, "display_name", getattr(interaction.user, "name", str(interaction.user.id))),
+            reason="setup panel channel configuration",
+            before={"setting": setting_column, "channel_id": previous_channel_id},
+            after={"setting": setting_column, "channel_id": self.selected_channel_id},
+            source="discord",
+        )
         self.selected_purpose = None
         self.selected_channel_id = None
         await interaction.response.edit_message(content=_setup_summary(self.guild), view=self)
@@ -1286,12 +1302,26 @@ class Admin(commands.Cog):
         if not can_manage_bot(ctx):
             return await ctx.send("⛔ ليس لديك صلاحية.")
         g_conn, g_cur = get_guild_db(ctx.guild.id)
+        previous = g_cur.execute(
+            "SELECT delivery_log FROM settings WHERE guild_id = ?", (ctx.guild.id,)
+        ).fetchone()
+        previous_channel_id = previous[0] if previous else None
         g_cur.execute(
             "INSERT INTO settings (guild_id, delivery_log) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET delivery_log = excluded.delivery_log",
             (ctx.guild.id, channel.id)
         )
         g_conn.commit()
         g_conn.close()
+        record_audit(
+            "server_channel_setting_changed",
+            guild_id=ctx.guild.id,
+            actor_id=ctx.author.id,
+            actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))),
+            reason="set delivery log channel",
+            before={"setting": "delivery_log", "channel_id": previous_channel_id},
+            after={"setting": "delivery_log", "channel_id": channel.id},
+            source="discord",
+        )
         await ctx.send(f"✅ تم ضبط روم تسليمات التبديل لهذا السيرفر على: {channel.mention}")
 
     @commands.hybrid_command(name="set_exchange_room", aliases=["روم_التبديل"], description="تحديد القناة الوحيدة المسموح فيها بطلبات exchange لهذا السيرفر")

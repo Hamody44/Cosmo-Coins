@@ -5,7 +5,7 @@ import tempfile
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import discord
 from discord.ext import commands
@@ -29,21 +29,6 @@ if not has_google_genai:
     sys.modules["google.genai.types"] = genai_types_module
 
 from cogs.ai import GeminiAI
-
-
-class _FakeChat:
-    async def send_message(self, prompt):
-        return SimpleNamespace(text=prompt)
-
-
-class _FakeChats:
-    def __init__(self):
-        self.created = []
-
-    def create(self, **kwargs):
-        chat = _FakeChat()
-        self.created.append((kwargs, chat))
-        return chat
 
 
 class AISafetyTests(unittest.IsolatedAsyncioTestCase):
@@ -112,10 +97,11 @@ class AISafetyTests(unittest.IsolatedAsyncioTestCase):
                 os.chdir(original_cwd)
 
     async def test_chat_context_is_separated_by_guild_channel_and_user(self):
-        chats = _FakeChats()
         cog = object.__new__(GeminiAI)
-        cog.client = SimpleNamespace(aio=SimpleNamespace(chats=chats))
+        cog.client = object()
+        cog.cerebras_client = None
         cog.backup_client = None
+        cog.ask_gemini_ai = AsyncMock(side_effect=("أول", "ثاني", "ثالث", "متابعة"))
         cog.user_chats = {}
 
         first = await cog.generate_response(7, "أول", 100, 200)
@@ -124,8 +110,38 @@ class AISafetyTests(unittest.IsolatedAsyncioTestCase):
         repeated = await cog.generate_response(7, "متابعة", 100, 200)
 
         self.assertEqual((first, second, third, repeated), ("أول", "ثاني", "ثالث", "متابعة"))
-        self.assertEqual(len(chats.created), 3)
+        self.assertEqual(cog.ask_gemini_ai.await_count, 4)
         self.assertEqual(set(cog.user_chats), {(100, 200, 7), (100, 201, 7), (101, 200, 7)})
+
+    async def test_server_context_hides_configured_channels_without_view_permission(self):
+        visible = SimpleNamespace(
+            name="general", id=1001,
+            permissions_for=lambda _member: SimpleNamespace(view_channel=True),
+        )
+        hidden = SimpleNamespace(
+            name="private-deliveries", id=987654321,
+            permissions_for=lambda _member: SimpleNamespace(view_channel=False),
+        )
+        channels = {visible.id: visible, hidden.id: hidden}
+        guild = SimpleNamespace(
+            id=123, name="Example Guild", text_channels=[visible, hidden],
+            get_channel=lambda channel_id: channels.get(channel_id),
+        )
+        settings = {key: None for key in (
+            "transfer_log", "exchange_request_log", "exchange_success_log", "delivery_log",
+            "exchange_room", "balance_log", "ticket_log", "invite_log",
+            "boost_log_channel", "announcement_channel_id",
+        )}
+        settings["delivery_log"] = hidden.id
+
+        with patch.object(GeminiAI, "_read_server_configuration", return_value=(settings, [])):
+            context = await object.__new__(GeminiAI).get_server_data_context(guild, object())
+
+        self.assertIn("#general", context)
+        self.assertIn("روم التسليمات وإثباتات التسليم", context)
+        self.assertIn("مضبوط على قناة لا يملك صاحب السؤال صلاحية رؤيتها", context)
+        self.assertNotIn("private-deliveries", context)
+        self.assertNotIn(str(hidden.id), context)
 
     async def test_reset_chat_clears_only_current_conversation(self):
         cog = object.__new__(GeminiAI)
