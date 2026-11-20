@@ -54,16 +54,16 @@ class GeminiAI(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-        # Groq is the primary provider; Gemini is the first fallback.
-        groq_key = os.getenv("GROQ_API_KEY")
-        self.groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
-        self.groq_client = None
-        if not groq_key:
-            print("⚠️ [Groq] لم يتم العثور على GROQ_API_KEY في ملف .env")
+        # Cerebras is the primary provider; Gemini is the first fallback.
+        cerebras_key = os.getenv("CEREBRAS_API_KEY")
+        self.cerebras_model = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b").strip() or "gpt-oss-120b"
+        self.cerebras_client = None
+        if not cerebras_key:
+            print("⚠️ [Cerebras] لم يتم العثور على CEREBRAS_API_KEY في ملف .env")
         else:
-            self.groq_client = AsyncOpenAI(
-                api_key=groq_key,
-                base_url="https://api.groq.com/openai/v1",
+            self.cerebras_client = AsyncOpenAI(
+                api_key=cerebras_key,
+                base_url="https://api.cerebras.ai/v1",
             )
 
         # Gemini fallback
@@ -154,11 +154,11 @@ class GeminiAI(commands.Cog):
         ]
 
         # Try providers in priority order; invalid output also triggers fallback.
-        for provider in ("Groq", "Gemini", "OpenRouter"):
+        for provider in ("Cerebras", "Gemini", "OpenRouter"):
             try:
-                if provider == "Groq" and self.groq_client:
-                    response = await self.groq_client.chat.completions.create(
-                        model=self.groq_model,
+                if provider == "Cerebras" and self.cerebras_client:
+                    response = await self.cerebras_client.chat.completions.create(
+                        model=self.cerebras_model,
                         messages=messages,
                         response_format={"type": "json_object"},
                         temperature=0.1,
@@ -240,10 +240,10 @@ class GeminiAI(commands.Cog):
 السياق المتاح:
 {self.primary_code_context(prompt)}
 """
-        if self.groq_client:
+        if self.cerebras_client:
             try:
-                response = await self.groq_client.chat.completions.create(
-                    model=self.groq_model,
+                response = await self.cerebras_client.chat.completions.create(
+                    model=self.cerebras_model,
                     messages=[{"role": "user", "content": instruction}],
                     temperature=0.1,
                     max_tokens=4000,
@@ -252,7 +252,7 @@ class GeminiAI(commands.Cog):
                 if patch:
                     return patch
             except Exception as exc:
-                print(f"[DEBUG] Groq code generation failed; trying Gemini: {exc}")
+                print(f"[DEBUG] Cerebras code generation failed; trying Gemini: {exc}")
         if self.client:
             try:
                 response = await self.client.aio.models.generate_content(
@@ -358,11 +358,11 @@ class GeminiAI(commands.Cog):
             return True
 
     async def ask_backup_ai(self, prompt: str) -> str:
-        """Use OpenRouter as an optional third provider after Groq and Gemini."""
+        """Use OpenRouter as an optional third provider after Cerebras and Gemini."""
         if not self.backup_client:
-            return "⚠️ تعذر توليد الرد من Groq وGemini، كما أن OPENROUTER_API_KEY غير مضبوط للمزوّد الثالث."
+            return "⚠️ تعذر توليد الرد من Cerebras وGemini، كما أن OPENROUTER_API_KEY غير مضبوط للمزوّد الثالث."
         try:
-            print("🔄 [Fallback] Groq وGemini غير متاحين؛ جاري تجربة OpenRouter...")
+            print("🔄 [Fallback] Cerebras وGemini غير متاحين؛ جاري تجربة OpenRouter...")
             response = await self.backup_client.chat.completions.create(
                 model="meta-llama/llama-3.3-70b-instruct:free",
                 messages=[
@@ -381,7 +381,7 @@ class GeminiAI(commands.Cog):
             return f"⚠️ خطأ أثناء توليد الرد من الخادم البديل: {e}"
 
     async def ask_gemini_ai(self, prompt: str, *, temperature: float = 0.7) -> str:
-        """Generate a response from Gemini after the primary Groq provider fails."""
+        """Generate a response from Gemini after the primary Cerebras provider fails."""
         response = await self.client.aio.models.generate_content(
             model="gemini-3.8-flash",
             contents=prompt,
@@ -396,7 +396,7 @@ class GeminiAI(commands.Cog):
         self, user_id: int, prompt: str, guild_id: int | None = None, channel_id: int | None = None
     ) -> str:
         conversation_key = (int(guild_id or 0), int(channel_id or 0), int(user_id))
-        if not self.groq_client and not self.client and not self.backup_client:
+        if not self.cerebras_client and not self.client and not self.backup_client:
             return "❌ خدمة الذكاء الاصطناعي غير مفعلة؛ يرجى التأكد من وضع المفاتيح في ملف `.env`."
 
         history = self.user_chats.setdefault(
@@ -410,10 +410,10 @@ class GeminiAI(commands.Cog):
             if item["role"] != "system"
         )
 
-        if self.groq_client:
+        if self.cerebras_client:
             try:
-                response = await self.groq_client.chat.completions.create(
-                    model=self.groq_model,
+                response = await self.cerebras_client.chat.completions.create(
+                    model=self.cerebras_model,
                     messages=history,
                     temperature=0.7,
                     max_tokens=1500,
@@ -423,7 +423,7 @@ class GeminiAI(commands.Cog):
                     history.append({"role": "assistant", "content": answer})
                     return answer
             except Exception as exc:
-                print(f"[DEBUG] Groq Error; trying Gemini fallback: {exc}")
+                print(f"[DEBUG] Cerebras Error; trying Gemini fallback: {exc}")
 
         if self.client:
             try:
@@ -443,7 +443,7 @@ class GeminiAI(commands.Cog):
             return answer
 
         history.pop()
-        return "⚠️ تعذر توليد الرد من Groq وGemini. تحقق من مفاتيح API وحالة المزوّدين."
+        return "⚠️ تعذر توليد الرد من Cerebras وGemini. تحقق من مفاتيح API وحالة المزوّدين."
 
     async def send_split_message(self, target, text: str):
         chunks = [text[i:i + 1900] for i in range(0, len(text), 1900)]
