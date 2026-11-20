@@ -6,7 +6,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 from discord.ext import commands
@@ -29,7 +29,7 @@ if not has_google_genai:
     sys.modules["google.genai"] = genai_module
     sys.modules["google.genai.types"] = genai_types_module
 
-from cogs.ai import GeminiAI
+from cogs.ai import GeminiAI, PRIMARY_OWNER_ID
 
 
 class AISafetyTests(unittest.IsolatedAsyncioTestCase):
@@ -154,6 +154,42 @@ class AISafetyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(marker, context)
             self.assertIn("needle arbitrary extension", context)
             self.assertIn("إعداد روم التسليمات", arabic_context)
+
+    async def test_project_file_read_is_owner_only_and_answers_from_file_context(self):
+        cog = object.__new__(GeminiAI)
+        cog.classify_request = AsyncMock(return_value={"action": "file_read", "command": "", "summary": ""})
+        cog.project_file_context = Mock(return_value="محتوى ملف الإعدادات")
+        cog.generate_response = AsyncMock(return_value="الإعداد موجود في الملف.")
+        cog.send_split_message = AsyncMock()
+        owner_ctx = SimpleNamespace(
+            author=SimpleNamespace(id=PRIMARY_OWNER_ID, mention="<@owner>"),
+            guild=None,
+            channel=SimpleNamespace(id=202),
+            interaction=None,
+            send=AsyncMock(),
+        )
+
+        handled = await cog.handle_request(owner_ctx, "اقرأ ملف الإعدادات", "")
+
+        self.assertTrue(handled)
+        cog.generate_response.assert_awaited_once()
+        self.assertEqual(
+            cog.generate_response.await_args.kwargs["project_context"],
+            "محتوى ملف الإعدادات",
+        )
+        cog.send_split_message.assert_awaited_once()
+
+        other_ctx = SimpleNamespace(
+            author=SimpleNamespace(id=123456789, mention="<@member>"),
+            guild=None,
+            channel=SimpleNamespace(id=202),
+            interaction=None,
+            send=AsyncMock(),
+        )
+        denied = await cog.handle_request(other_ctx, "اقرأ ملف الإعدادات", "")
+        self.assertTrue(denied)
+        other_ctx.send.assert_awaited_once_with("⛔ الاطلاع على ملفات المستودع متاح لمالك البوت فقط.")
+        self.assertEqual(cog.project_file_context.call_count, 1)
 
     async def test_server_context_hides_configured_channels_without_view_permission(self):
         visible = SimpleNamespace(
