@@ -1,6 +1,7 @@
 """Reusable local Type1 OCR library built with Pillow and NumPy."""
 import importlib
 import sys
+import numpy as np
 
 # Register the import alias before api.py loads package-local OCR modules when
 # this package is imported as ``second_bot.type1_ocr`` from the repository root.
@@ -13,7 +14,14 @@ if __name__ != "type1_ocr":
 from .api import predict_with_confidence, recognize, recognize_type1
 from .confidence import is_confident, safe_consensus, score_confidence
 from .errors import ImageDecodeError, ModelFormatError, Type1OCRError
-from .features import extract_features
+try:
+    from .features import extract_features
+except ImportError:  # compatibility with older deployments exposing only extract_feature
+    from .features import extract_feature as _extract_feature
+
+    def extract_features(crop):
+        return np.asarray(_extract_feature(crop), dtype=np.float32)
+
 from .features_type1 import FEATURE_LENGTH as TYPE1_FEATURE_LENGTH, extract_features as extract_features_type1
 from .image import load_image
 from .templates import build_model, load_model, save_model

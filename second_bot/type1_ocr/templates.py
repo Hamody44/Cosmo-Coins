@@ -10,7 +10,14 @@ import numpy as np
 from PIL import Image
 
 from .errors import ModelFormatError
-from .features import extract_features
+try:
+    from .features import extract_features
+except ImportError:  # compatibility with older deployments exposing only extract_feature
+    from .features import extract_feature as _extract_feature
+
+    def extract_features(crop: Image.Image) -> np.ndarray:
+        return np.asarray(_extract_feature(crop), dtype=np.float32)
+
 from .features_type1 import FEATURE_LENGTH as TYPE1_FEATURE_LENGTH, extract_features as extract_features_type1
 from .image import load_image
 from .preprocessing import preprocessing_variants
