@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -112,6 +113,47 @@ class AISafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((first, second, third, repeated), ("أول", "ثاني", "ثالث", "متابعة"))
         self.assertEqual(cog.ask_gemini_ai.await_count, 4)
         self.assertEqual(set(cog.user_chats), {(100, 200, 7), (100, 201, 7), (101, 200, 7)})
+
+    def test_project_read_access_includes_all_files_except_env_and_venv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            included = {
+                "second_bot/settings.yaml": "needle second bot settings\nإعداد روم التسليمات",
+                "guilds_data/example.sqlite": "needle database contents",
+                "assets/blob.bin": "needle arbitrary extension",
+                "cogs/example.py": "needle source code",
+            }
+            excluded = {
+                ".env": "secret",
+                "config/.env.production": "secret",
+                ".venv/lib/module.py": "private virtual env",
+                "tools/venv/lib/module.py": "private virtual env",
+            }
+            for relative, contents in {**included, **excluded}.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents, encoding="utf-8")
+
+            cog = object.__new__(GeminiAI)
+            with patch("cogs.ai.PRIMARY_REPO_ROOT", root):
+                for relative in included:
+                    self.assertTrue(GeminiAI.is_readable_project_file(root / relative))
+                for relative in excluded:
+                    self.assertFalse(GeminiAI.is_readable_project_file(root / relative))
+                inventory = cog.project_file_inventory()
+                context = cog.project_file_context("needle")
+                arabic_context = cog.project_file_context("روم التسليمات")
+                self.assertFalse(GeminiAI.is_primary_code_path(root / "second_bot/settings.yaml"))
+                self.assertFalse(GeminiAI.is_primary_code_path(root / "guilds_data/example.sqlite"))
+
+            for relative in included:
+                self.assertIn(relative, inventory)
+            for relative in excluded:
+                self.assertNotIn(relative, inventory)
+            for marker in ("secret", "private virtual env"):
+                self.assertNotIn(marker, context)
+            self.assertIn("needle arbitrary extension", context)
+            self.assertIn("إعداد روم التسليمات", arabic_context)
 
     async def test_server_context_hides_configured_channels_without_view_permission(self):
         visible = SimpleNamespace(

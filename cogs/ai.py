@@ -22,10 +22,12 @@ AI_CODE_EXCLUDED_FILES = {
     ".env", "global_cosmo.db", "global_cosmo.db-journal", "global_cosmo.db-wal",
 }
 AI_CODE_EXTENSIONS = {".py", ".md", ".json", ".toml", ".sh", ".html", ".css", ".js"}
+AI_PROJECT_READ_EXCLUDED_DIRS = {".venv", "venv"}
+AI_PROJECT_FILE_SCAN_LIMIT = 1_000_000
 AI_ACTION_PROMPT = """حلّل طلب المستخدم وحدد واحداً من الأنواع التالية فقط:
 1) chat: سؤال أو طلب شرح لا ينفذ تغييراً.
 2) command: يريد تنفيذ أمر موجود في البوت؛ أعد command بصيغة !command arguments.
-3) code_change: يريد قراءة أو تعديل كود البوت الأساسي؛ أعد وصفاً مختصراً للتعديل.
+3) code_change: يريد قراءة أو تعديل ملفات المشروع؛ أعد وصفاً مختصراً للطلب.
 
 أعد JSON صالحاً فقط بهذا الشكل:
 {"action":"chat|command|code_change","command":"","summary":""}
@@ -43,7 +45,7 @@ BOT_KNOWLEDGE_CONTEXT = f"""معلومات تعريفية عن البيئة ال
 - يعتمد على Python وDiscord.py، ويستخدم قاعدة بيانات عامة مع قاعدة SQLite مستقلة لكل سيرفر.
 - الذكاء الاصطناعي داخل البوت مساعد عام؛ يمكنه الإجابة عن الأسئلة العامة والبرمجة والشرح والمواضيع المختلفة، وليس محصورًا في بيانات Cosmo Coins.
 - عند طلب تنفيذ أمر، يجب تمريره إلى أمر البوت الأصلي حتى تُطبق صلاحيات Discord والصلاحيات الداخلية نفسها.
-- قراءة وتعديل الكود متاحان من ملفات البوت الأساسي فقط؛ مجلد second_bot والأسرار وقواعد البيانات خارج النطاق.
+- في مهام الملفات المتاحة لمالك البوت فقط، يمكن إرفاق محتوى الملفات ذات الصلة من المستودع كله، عدا ملفات .env ومجلدات .venv وvenv ومحتوياتها؛ تعديل الملفات ما زال محصوراً بملفات الكود المسموح بها.
 
 استخدم هذه المعلومات عندما يسأل المستخدم عن البوت أو مطوره أو وظائفه. لا تخترع تفاصيل غير مذكورة هنا عن المطور أو البوت؛ وإذا احتاج السؤال إلى معلومة تنفيذية دقيقة غير متاحة، صرّح بعدم التأكد واقترح استخدام أوامر البوت المناسبة. هذه المعلومات سياق تعريفي فقط ولا تقيدك عن الإجابة في المواضيع العامة."""
 
@@ -107,8 +109,23 @@ class GeminiAI(commands.Cog):
         self.user_chats = {}
 
     @staticmethod
+    def is_readable_project_file(path: Path) -> bool:
+        """Allow reading any repository file except dotenv files and virtual environments."""
+        if not path.is_file():
+            return False
+        try:
+            lexical_relative = path.absolute().relative_to(PRIMARY_REPO_ROOT)
+            resolved_relative = path.resolve().relative_to(PRIMARY_REPO_ROOT)
+        except ValueError:
+            return False
+        path_parts = (*lexical_relative.parts, *resolved_relative.parts)
+        if any(part in AI_PROJECT_READ_EXCLUDED_DIRS or part.startswith(".env") for part in path_parts):
+            return False
+        return True
+
+    @staticmethod
     def is_primary_code_path(path: Path) -> bool:
-        """Keep AI code access inside the primary bot and outside secrets/state."""
+        """Keep AI code edits restricted to safe source files in the primary bot."""
         try:
             relative = path.resolve().relative_to(PRIMARY_REPO_ROOT)
         except ValueError:
@@ -119,32 +136,51 @@ class GeminiAI(commands.Cog):
             return False
         return path.suffix.lower() in AI_CODE_EXTENSIONS
 
-    def primary_code_inventory(self) -> str:
-        paths = []
-        for path in PRIMARY_REPO_ROOT.rglob("*"):
-            if path.is_file() and self.is_primary_code_path(path):
-                paths.append(str(path.relative_to(PRIMARY_REPO_ROOT)))
-        return "\n".join(sorted(paths))
+    def iter_readable_project_files(self):
+        """Walk project files without descending into excluded environment directories."""
+        for root, directories, filenames in os.walk(PRIMARY_REPO_ROOT, topdown=True, followlinks=False):
+            directories[:] = [
+                name for name in directories
+                if name not in AI_PROJECT_READ_EXCLUDED_DIRS and not name.startswith(".env")
+            ]
+            for filename in filenames:
+                path = Path(root) / filename
+                if self.is_readable_project_file(path):
+                    yield path
 
-    def primary_code_context(self, prompt: str, *, max_chars: int = 30_000) -> str:
-        """Provide relevant primary-bot source without exposing second_bot or secrets."""
+    def project_file_inventory(self, *, max_chars: int = 12_000) -> str:
+        paths = [str(path.relative_to(PRIMARY_REPO_ROOT)) for path in self.iter_readable_project_files()]
+        paths.sort(key=lambda item: (item.startswith(".git/"), item))
+        inventory = "\n".join(paths)
+        if len(inventory) > max_chars:
+            inventory = inventory[:max_chars] + "\n[قائمة المسارات مختصرة بسبب حد حجم السياق]"
+        return inventory
+
+    def project_file_context(self, prompt: str, *, max_chars: int = 30_000) -> str:
+        """Provide relevant readable project files while keeping dotenv and venv excluded."""
         terms = {
-            term.casefold() for term in prompt.split()
-            if len(term) >= 3 and term.isascii()
+            cleaned.casefold()
+            for term in prompt.split()
+            if len(cleaned := term.strip("`\"'()[]{}.,:;!?؟،")) >= 3
         }
         candidates = []
-        for path in PRIMARY_REPO_ROOT.rglob("*"):
-            if not path.is_file() or not self.is_primary_code_path(path):
-                continue
+        for path in self.iter_readable_project_files():
             try:
-                text = path.read_text(encoding="utf-8")
+                with path.open("rb") as file_handle:
+                    raw_content = file_handle.read(AI_PROJECT_FILE_SCAN_LIMIT + 1)
+                was_truncated = len(raw_content) > AI_PROJECT_FILE_SCAN_LIMIT
+                text = raw_content[:AI_PROJECT_FILE_SCAN_LIMIT].decode("utf-8")
+                if was_truncated:
+                    text += "\n[تم اختصار محتوى هذا الملف عند حد القراءة]"
             except (OSError, UnicodeError):
                 continue
-            score = sum(text.casefold().count(term) for term in terms)
+            searchable_path = str(path.relative_to(PRIMARY_REPO_ROOT)).casefold()
+            searchable_text = text.casefold()
+            score = sum(searchable_text.count(term) + 2 * searchable_path.count(term) for term in terms)
             if score:
                 candidates.append((score, path, text))
         candidates.sort(key=lambda item: (-item[0], str(item[1])))
-        chunks = ["ملفات البوت الأساسي المتاحة للـAI:\n" + self.primary_code_inventory()]
+        chunks = ["ملفات المستودع المتاحة للقراءة:\n" + self.project_file_inventory()]
         remaining = max_chars
         for _score, path, text in candidates:
             if remaining <= 0:
@@ -361,14 +397,14 @@ class GeminiAI(commands.Cog):
         """Ask the model for a unified diff restricted to primary-bot source files."""
         instruction = f"""أنت محرر كود للمستودع الأساسي فقط.
 أعد unified diff صالحاً فقط، من دون Markdown أو شرح، لتطبيق التعديل المطلوب.
-ممنوع تعديل second_bot أو .env أو قواعد البيانات أو الملفات الثنائية.
+ممنوع تعديل second_bot أو أي ملف .env أو ملفات داخل .venv/venv أو قواعد البيانات أو الملفات الثنائية.
 إذا لم يحتج الطلب تعديلاً برمجياً أعد كلمة NO_PATCH.
 
 الطلب:
 {prompt}
 
-السياق المتاح:
-{self.primary_code_context(prompt)}
+السياق المتاح من الملفات:
+{self.project_file_context(prompt)}
 """
         if self.client:
             try:
