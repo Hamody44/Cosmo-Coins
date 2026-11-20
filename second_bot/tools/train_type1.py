@@ -144,7 +144,7 @@ def split_crop_samples(samples: list[dict[str, Any]], seed: int = 41) -> tuple[n
 
 def make_classifier():
     """Construct the fast uncalibrated RBF SVC; confidence uses margins."""
-    return SVC(kernel="rbf", C=7.0, gamma="scale", probability=False, random_state=41)
+    return SVC(kernel="rbf", C=0.5, gamma="scale", probability=False, random_state=41)
 
 
 def _softmax_confidence(decision: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -339,7 +339,7 @@ def train_crops_and_report(data_dir: Path, output: Path, report_path: Path, seed
             "validation_training_matrix_shape": list(augmented_shape),
             "final_training_matrix_shape": list(final_shape),
         },
-        "classifier": "SVC(kernel='rbf', C=7.0, gamma='scale', probability=False)",
+        "classifier": "SVC(kernel='rbf', C=0.5, gamma='scale', probability=False)",
         "feature_length": FEATURE_LENGTH,
         "latency_ms": None,
         "model_path": str(output),

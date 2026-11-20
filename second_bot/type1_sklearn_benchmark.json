@@ -34,14 +34,14 @@
     "overall_digit_accuracy": 0.9083665338645418,
     "per_digit_accuracy": {
       "0": {
-        "correct": 16,
+        "correct": 15,
         "total": 18,
-        "accuracy": 0.8888888888888888
+        "accuracy": 0.8333333333333334
       },
       "1": {
-        "correct": 18,
+        "correct": 19,
         "total": 21,
-        "accuracy": 0.8571428571428571
+        "accuracy": 0.9047619047619048
       },
       "2": {
         "correct": 15,
@@ -64,14 +64,14 @@
         "accuracy": 0.9354838709677419
       },
       "6": {
-        "correct": 22,
+        "correct": 23,
         "total": 25,
-        "accuracy": 0.88
+        "accuracy": 0.92
       },
       "7": {
-        "correct": 25,
+        "correct": 23,
         "total": 27,
-        "accuracy": 0.9259259259259259
+        "accuracy": 0.8518518518518519
       },
       "8": {
         "correct": 32,
@@ -79,29 +79,29 @@
         "accuracy": 0.9696969696969697
       },
       "9": {
-        "correct": 22,
+        "correct": 23,
         "total": 27,
-        "accuracy": 0.8148148148148148
+        "accuracy": 0.8518518518518519
       }
     },
     "full_captcha_total": 13,
-    "full_captcha_correct": 9,
-    "full_captcha_accuracy": 0.6923076923076923,
+    "full_captcha_correct": 11,
+    "full_captcha_accuracy": 0.8461538461538461,
     "top_3_confused_pairs": [
-      {
-        "true_digit": "9",
-        "predicted_digit": "3",
-        "count": 2
-      },
-      {
-        "true_digit": "0",
-        "predicted_digit": "8",
-        "count": 1
-      },
       {
         "true_digit": "0",
         "predicted_digit": "6",
-        "count": 1
+        "count": 2
+      },
+      {
+        "true_digit": "4",
+        "predicted_digit": "2",
+        "count": 2
+      },
+      {
+        "true_digit": "7",
+        "predicted_digit": "9",
+        "count": 2
       }
     ]
   },
@@ -126,17 +126,17 @@
       415
     ]
   },
-  "classifier": "SVC(kernel='rbf', C=7.0, gamma='scale', probability=False)",
+  "classifier": "SVC(kernel='rbf', C=0.5, gamma='scale', probability=False)",
   "feature_length": 415,
   "latency_ms": {
-    "mean": 29.1689731,
-    "median": 29.102907999998706,
-    "p95": 30.16523674995426,
+    "mean": 37.360945474983964,
+    "median": 37.19085800003086,
+    "p95": 39.398924600118335,
     "benchmark_images": 40,
     "measurement": "recognize_type1 full CAPTCHA inference"
   },
   "model_path": "second_bot/models/type1_model.npz",
-  "model_size_bytes": 828075,
+  "model_size_bytes": 1295431,
   "model_under_2mb": true,
   "pillow_version": "13.0.0"
 }
