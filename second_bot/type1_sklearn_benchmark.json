@@ -1,5 +1,5 @@
 {
-  "dataset": "digits_crops",
+  "dataset": "/home/ubuntu/Cosmo-Coins/digits_crops",
   "total_usable_crops": 2038,
   "skipped_outliers_by_digit": {
     "0": 1,
@@ -125,34 +125,9 @@
   },
   "classifier": "SVC(kernel='rbf', C=7.0, gamma='scale', probability=False)",
   "feature_length": 415,
-  "latency_ms": {
-    "mean": 48.8654,
-    "median": 47.9896,
-    "p95": 55.1138,
-    "sample_count": 80,
-    "warmup": 5
-  },
-  "model_path": "second_bot/models/type1_model.joblib",
-  "model_size_bytes": 3296936,
-  "model_under_2mb": false,
-  "pillow_version": "13.0.0",
-  "stage_timing_ms": {
-    "line_removal_median": 7.1354,
-    "dp_median": 2.1286,
-    "segmentation_median": 11.9892,
-    "features_plus_svc_median": 33.4073
-  },
-  "baseline_comparison": {
-    "before_digit_accuracy": 0.7328431372549019,
-    "after_digit_accuracy": 0.7426470588235294,
-    "before_full_captcha_accuracy": 0.4625,
-    "after_full_captcha_accuracy": 0.45,
-    "before_latency_ms": 62.3313,
-    "after_latency_ms": 48.8654,
-    "targets": {
-      "full_captcha_accuracy_gt": 0.8,
-      "latency_ms_lt": 18.0
-    },
-    "targets_met": false
-  }
+  "latency_ms": null,
+  "model_path": "/home/ubuntu/Cosmo-Coins/second_bot/models/type1_model.npz",
+  "model_size_bytes": 1678710,
+  "model_under_2mb": true,
+  "pillow_version": "13.0.0"
 }

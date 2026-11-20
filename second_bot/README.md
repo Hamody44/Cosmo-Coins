@@ -45,7 +45,7 @@ second_bot/.venv/bin/python -m pip install --upgrade pip
 second_bot/.venv/bin/python -m pip install -r second_bot/cosmo_second_requirements.lock
 ```
 
-يعمل مسار OCR المستخدم حاليًا للنوع الثاني باستخدام Pillow فقط، ولا يحتاج إلى OpenCV أو NumPy. تتضمن وحدة Type1 المحلية نموذجًا اختياريًا بـscikit-learn، مع بقاء مسار Type1 الهجين في `main.py` منفصلًا وعدم تغيير سلوك Type2.
+يعمل OCR المحلي لكل من Type1 وType2 دون scikit-learn أو SciPy أو joblib. يحمّل Type1 نموذج RBF SVC محفوظًا كـNPZ ويحسب النواة وتصويت one-vs-one بـNumPy؛ أما تدريب النموذج فيبقى أداة غير متصلة بالإنترنت تتطلب scikit-learn.
 
 قبل التشغيل، أنشئ أيضًا ملف `.env` الخاص ببوت Cosmo-Coins في جذر المستودع وفق إعداداته الحالية، إن لم يكن موجودًا بالفعل. لا تستبدل ملف `.env` قائمًا.
 
@@ -120,9 +120,9 @@ PYTHONPATH=second_bot python3 second_bot/evaluate_type1_rgb.py \
 
 ## مكتبة OCR المحلية المستقلة لـType1
 
-توفر `type1_ocr/` واجهة محلية قابلة لإعادة الاستخدام. يحتفظ `recognize_type1(source, model=None, *, model_path=..., max_distance=..., minimum_confidence=...)` بتوقيعه ونتيجته `Type1Result`، وتعيد `predict_with_confidence(image)` النص وثقة أضعف خانة وثقات الخانات الخمس. عند وجود `models/type1_model.joblib` تحمّل المكتبة نموذج scikit-learn مرة واحدة عند الاستيراد. يظل مسار OCR الهجين الموجود في `main.py` منفصلًا؛ هذا النموذج متاح عبر وحدة Type1 وواجهاتها المتوافقة ولا يغيّر مسار `$numbers` تلقائيًا.
+توفر `type1_ocr/` واجهة محلية قابلة لإعادة الاستخدام. يحتفظ `recognize_type1(source, model=None, *, model_path=..., max_distance=..., minimum_confidence=...)` بتوقيعه ونتيجته `Type1Result`، وتعيد `predict_with_confidence(image)` النص وثقة أضعف خانة وثقات الخانات الخمس. عند وجود `models/type1_model.npz` تحمّل المكتبة معاملات SVC مرة واحدة، ثم تنفذ الاستدلال بـNumPy فقط. يظل مسار OCR الهجين الموجود في `main.py` منفصلًا ولا يغيّر مسار `$numbers` تلقائيًا.
 
-يتشارك مولّد `digits_crops/` والاستدلال خوارزمية RGB threshold وإزالة الخطوط وتقسيم الخانات الخمس. يستبعد قارئ القصّات الصور ذات الارتفاع الأصلي الأقل من 20px أو العرض الأقل من 5px، ويستخرج 1155 ميزة لكل خانة: لوحة 32×32 مع الحفاظ على نسبة الأبعاد وهامش 2px، متوسطات 8×8، إسقاطات أفقية/عمودية، وثلاث ميزات وصفية. يحتفظ `read_dataset` ودوال التدريب القديمة بتوافقها مع `samples/label.csv`.
+يتشارك مولّد `digits_crops/` والاستدلال خوارزمية RGB threshold وإزالة الخطوط وتقسيم الخانات الخمس. يستبعد قارئ القصّات الصور ذات الارتفاع الأصلي الأقل من 20px أو العرض الأقل من 5px، ويستخرج 415 ميزة لكل خانة من canvas بحجم 28×28 مع الحفاظ على نسبة الأبعاد، وميزات gradients/topology وبيانات وصفية. يحتفظ `read_dataset` ودوال التدريب القديمة بتوافقها مع `samples/label.csv`.
 
 لتدريب نموذج القصّات والتحقق منه ثم إعادة تدريبه على كامل البيانات:
 
@@ -130,7 +130,7 @@ PYTHONPATH=second_bot python3 second_bot/evaluate_type1_rgb.py \
 python3 second_bot/tools/train_type1.py --data digits_crops
 ```
 
-يستخدم التدريب تقسيمًا stratified بخمس طيات ومجموعات حسب صورة CAPTCHA، لذلك لا تتسرب قصّات الصورة الواحدة بين التدريب والتحقق. يطبّق أربع نسخ خفيفة لكل قصّة، ويطبع دقة كل رقم والدقة الإجمالية ودقة CAPTCHA كاملة وأعلى ثلاثة التباسات، ثم يحفظ pipeline `StandardScaler + RBF SVC` بضغط joblib. يحفظ تقرير التحقق في `second_bot/type1_sklearn_benchmark.json` دون استبدال التقرير التاريخي. للاستمرار في أدوات مجموعة البيانات القديمة:
+يستخدم التدريب تقسيمًا stratified بخمس طيات ومجموعات حسب صورة CAPTCHA، لذلك لا تتسرب قصّات الصورة الواحدة بين التدريب والتحقق. يطبّق أربع إزاحات خفيفة لكل قصّة، ويطبع دقة كل رقم والدقة الإجمالية ودقة CAPTCHA كاملة وأعلى ثلاثة التباسات، ثم يصدّر support vectors وdual coefficients وintercepts وgamma والفئات في `type1_model.npz`. تُكمّم متجهات الدعم إلى uint8 مع مقاييس لكل ميزة لإبقاء الملف دون 2 MB؛ يحفظ تقرير التحقق في `second_bot/type1_sklearn_benchmark.json`. يتطلب التدريب scikit-learn محليًا فقط، بينما لا تحتاج الاستضافة إلى أكثر من `second_bot/requirements.txt`. للاستمرار في أدوات مجموعة البيانات القديمة:
 
 ```bash
 python3 second_bot/tools/inspect_type1_dataset.py --data samples

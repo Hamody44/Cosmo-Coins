@@ -31,7 +31,7 @@ def _cloud_fallback(source: ImageSource) -> Type1Result | None:
 
 
 def _candidate_segments(image, model=None):
-    if hasattr(model, "decision_function") and getattr(model, "n_features_in_", None) == 415:
+    if isinstance(model, dict) and model.get("model_kind") == "rbf_ovo":
         segments = segment_type1_image(image)
         return [segments] if len(segments) == CELL_COUNT else []
     segments = _best_segments(image)

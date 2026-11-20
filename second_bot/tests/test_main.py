@@ -483,7 +483,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
     def test_type1_dataset_reader_loads_only_labeled_type1_images(self):
         sample_dir = Path(__file__).resolve().parents[2] / "samples"
         samples = main.load_type1_test_samples(sample_dir)
-        self.assertEqual(len(samples), 309)
+        self.assertEqual(len(samples), 409)
         self.assertTrue(all(row["type"] == "type1" for row in samples))
 
     def test_preprocessing_update_invalidates_old_testall_checkpoint(self):

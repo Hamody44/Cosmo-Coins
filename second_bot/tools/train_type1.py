@@ -12,8 +12,6 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-import pickle
-import lzma
 import numpy as np
 from PIL import __version__ as PILLOW_VERSION
 from sklearn.model_selection import StratifiedGroupKFold
@@ -28,12 +26,10 @@ try:
         augment_canvas_features,
         load_labeled_crops,
     )
-    from ..type1_ocr.templates import pack_type1_pipeline
     from ..type1_ocr.types import CELL_COUNT
 except ImportError:
     from type1_ocr import build_model, recognize_type1, save_model
     from type1_ocr.features_type1 import FEATURE_LENGTH, augment_canvas_features, load_labeled_crops
-    from type1_ocr.templates import pack_type1_pipeline
     from type1_ocr.types import CELL_COUNT
 
 
@@ -252,6 +248,29 @@ def evaluate_crop_model(classifier, samples: list[dict[str, Any]], indices: np.n
     }
 
 
+def export_svc_artifact(classifier: SVC, output: Path) -> int:
+    """Export RBF SVC parameters, quantizing support vectors for low storage."""
+    support_vectors = np.asarray(classifier.support_vectors_, dtype=np.float32)
+    feature_min = support_vectors.min(axis=0)
+    feature_span = support_vectors.max(axis=0) - feature_min
+    feature_scale = np.where(feature_span > 0, feature_span / 255.0, 1.0).astype(np.float32)
+    quantized_vectors = np.rint((support_vectors - feature_min) / feature_scale).clip(0, 255).astype(np.uint8)
+    arrays = {
+        "support_vectors_": quantized_vectors,
+        "_support_vector_scale_": feature_scale,
+        "_support_vector_min_": feature_min.astype(np.float32),
+        "dual_coef_": np.asarray(classifier.dual_coef_, dtype=np.float32),
+        "intercept_": np.asarray(classifier.intercept_, dtype=np.float64),
+        "_gamma": np.asarray(classifier._gamma, dtype=np.float64),
+        "classes_": np.asarray(classifier.classes_, dtype="U1"),
+        "n_support_": np.asarray(classifier.n_support_, dtype=np.int32),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    return output.stat().st_size
+
+
 def train_crops_and_report(data_dir: Path, output: Path, report_path: Path, seed: int = 41) -> dict[str, Any]:
     samples, skipped = load_labeled_crops(data_dir)
     if not samples:
@@ -267,10 +286,7 @@ def train_crops_and_report(data_dir: Path, output: Path, report_path: Path, seed
 
     final_indices = range(len(samples))
     final_classifier, final_shape = fit_augmented(samples, final_indices)
-    final_classifier = pack_type1_pipeline(final_classifier)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(lzma.compress(pickle.dumps(final_classifier, protocol=pickle.HIGHEST_PROTOCOL), preset=9))
-    model_size = output.stat().st_size
+    model_size = export_svc_artifact(final_classifier, output)
 
     report = {
         "dataset": str(data_dir),
@@ -331,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(__file__).resolve().parents[2]
     package_dir = Path(__file__).resolve().parents[1]
     parser.add_argument("--data", type=Path, default=root / "digits_crops")
-    parser.add_argument("--output", type=Path, default=package_dir / "models" / "type1_model.joblib")
+    parser.add_argument("--output", type=Path, default=package_dir / "models" / "type1_model.npz")
     parser.add_argument("--report", type=Path, default=package_dir / "type1_sklearn_benchmark.json")
     parser.add_argument("--baseline", type=Path, default=root / "baseline_type1_benchmark.json")
     parser.add_argument("--seed", type=int, default=41)

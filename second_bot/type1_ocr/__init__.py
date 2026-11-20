@@ -1,11 +1,9 @@
-"""Reusable local Type1 OCR library built with Pillow, NumPy, and scikit-learn."""
+"""Reusable local Type1 OCR library built with Pillow and NumPy."""
 import importlib
 import sys
 
-# The model artifact is also used from second_bot's working directory, where
-# its estimator class is serialized as ``type1_ocr.templates.PackedType1SVC``.
-# Register that import alias before api.py loads the persisted model when this
-# package itself was imported as ``second_bot.type1_ocr`` from the repo root.
+# Register the import alias before api.py loads package-local OCR modules when
+# this package is imported as ``second_bot.type1_ocr`` from the repository root.
 if __name__ != "type1_ocr":
     _package_alias = sys.modules.setdefault("type1_ocr", sys.modules[__name__])
     if _package_alias is sys.modules[__name__]:

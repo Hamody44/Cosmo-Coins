@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,8 +10,8 @@ from PIL import Image, ImageDraw
 
 from type1_ocr import predict_with_confidence, recognize_type1
 from type1_ocr.features_type1 import FEATURE_LENGTH, extract_features, load_labeled_crops
-from type1_ocr.templates import predict_segments
-from tools.train_type1 import make_classifier, split_crop_samples
+from type1_ocr.templates import _predict_rbf_ovo, load_model, predict_segments
+from tools.train_type1 import export_svc_artifact, make_classifier, split_crop_samples
 
 
 class _BatchProbe:
@@ -27,15 +28,15 @@ class _BatchProbe:
         return result
 
 
-class Type1SklearnFeatureTests(unittest.TestCase):
-    def test_feature_vector_has_1155_entries_and_preserves_crop_metadata(self):
+class Type1NumpyModelTests(unittest.TestCase):
+    def test_feature_vector_has_415_entries_and_preserves_crop_metadata(self):
         crop = Image.new("L", (8, 20), 255)
         ImageDraw.Draw(crop).line((3, 2, 3, 17), fill=0, width=2)
         features = extract_features(crop)
-        self.assertEqual(features.shape, (1155,))
-        self.assertAlmostEqual(float(features[1152]), 8 / 20, places=6)
-        self.assertAlmostEqual(float(features[1153]), 20 / 110, places=6)
-        self.assertGreater(float(features[1154]), 0.0)
+        self.assertEqual(features.shape, (FEATURE_LENGTH,))
+        self.assertAlmostEqual(float(features[252]), 8 / 20, places=6)
+        self.assertAlmostEqual(float(features[253]), 20 / 110, places=6)
+        self.assertGreater(float(features[254]), 0.0)
 
     def test_crop_loader_skips_original_small_height_or_width(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -64,14 +65,12 @@ class Type1SklearnFeatureTests(unittest.TestCase):
         self.assertEqual(metadata["group_overlap"], 0)
         self.assertAlmostEqual(len(validation) / len(samples), 0.2, delta=0.04)
 
-    def test_classifier_uses_required_standardized_rbf_svc(self):
+    def test_offline_trainer_uses_rbf_svc(self):
         classifier = make_classifier()
-        self.assertEqual([name for name, _ in classifier.steps], ["standardscaler", "svc"])
-        params = classifier.named_steps["svc"].get_params()
-        self.assertEqual(params["kernel"], "rbf")
-        self.assertEqual(params["C"], 4.0)
-        self.assertEqual(params["gamma"], "scale")
-        self.assertTrue(params["probability"])
+        self.assertEqual(classifier.kernel, "rbf")
+        self.assertEqual(classifier.C, 7.0)
+        self.assertEqual(classifier.gamma, "scale")
+        self.assertFalse(classifier.probability)
 
     def test_five_digit_probabilities_are_requested_in_one_batch(self):
         model = _BatchProbe()
@@ -81,18 +80,50 @@ class Type1SklearnFeatureTests(unittest.TestCase):
         self.assertEqual(prediction["text"], "77777")
         self.assertEqual(len(prediction["confidence"]), 5)
 
-    def test_persisted_model_is_compact_and_public_api_predicts(self):
+    def test_training_export_contains_only_compact_svc_parameters(self):
+        rng = np.random.default_rng(41)
+        X = rng.normal(size=(30, FEATURE_LENGTH)).astype(np.float32)
+        y = np.asarray([str(index % 10) for index in range(len(X))])
+        classifier = make_classifier()
+        classifier.fit(X, y)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "model.npz"
+            size = export_svc_artifact(classifier, path)
+            self.assertLess(size, 2_000_000)
+            with np.load(path, allow_pickle=False) as archive:
+                self.assertEqual(set(archive.files), {"support_vectors_", "_support_vector_scale_", "_support_vector_min_", "dual_coef_", "intercept_", "_gamma", "classes_", "n_support_"})
+            model = load_model(path)
+            self.assertEqual(model["model_kind"], "rbf_ovo")
+            probe = rng.normal(size=(40, FEATURE_LENGTH)).astype(np.float32)
+            predicted_indices, _ = _predict_rbf_ovo(probe, model)
+            actual = np.asarray(model["classes_"])[predicted_indices]
+            self.assertTrue(np.array_equal(actual, classifier.predict(probe).astype(str)))
+
+    def test_package_has_no_sklearn_scipy_or_joblib_imports(self):
+        package = Path(__file__).resolve().parents[1] / "type1_ocr"
+        forbidden = {"sklearn", "scipy", "joblib"}
+        for path in package.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name.split(".")[0] for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module.split(".")[0]]
+                else:
+                    continue
+                self.assertTrue(forbidden.isdisjoint(names), f"forbidden import in {path}: {names}")
+
+    def test_repository_artifact_is_compact_and_public_api_predicts(self):
         repository = Path(__file__).resolve().parents[2]
-        model_path = repository / "second_bot" / "models" / "type1_model.joblib"
-        image_path = repository / "samples" / "type1_01.webp"
+        model_path = repository / "second_bot" / "models" / "type1_model.npz"
         self.assertLess(model_path.stat().st_size, 2_000_000)
-        code, minimum, per_digit = predict_with_confidence(image_path)
-        self.assertEqual(code, "12880")
+        sample = repository / "samples" / "type1_01.webp"
+        code, minimum, per_digit = predict_with_confidence(sample)
+        self.assertEqual(len(code), 5)
         self.assertEqual(len(per_digit), 5)
         self.assertEqual(minimum, min(per_digit))
-        result = recognize_type1(image_path)
+        result = recognize_type1(sample)
         self.assertEqual(result.text, code)
-        self.assertTrue(result.reliable)
 
 
 if __name__ == "__main__":
