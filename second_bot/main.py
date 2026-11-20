@@ -40,6 +40,10 @@ from evaluate_type1_rgb import channel_variants, mask_variants
 from type1_local_ocr import _feature, segment_candidates
 from type1 import load_template_bank, recognize_bmp
 try:
+    from second_bot.type1_ocr.api import recognize_type1
+except ImportError:  # direct execution from second_bot/
+    from type1_ocr.api import recognize_type1
+try:
     from second_bot.auto_delivery import (
         HANDOFF_PREFIX,
         build_delivery_result_message,
@@ -1412,6 +1416,22 @@ async def extract_type1_hybrid(
     OCR.Space is never accepted as an independent answer: it must equal the
     red or blue local candidate.  AI is called only after that evidence fails.
     """
+    # The compact NumPy-only classifier is the primary runtime Type1 path.
+    # Keep the older local/provider chain below as an explicit compatibility
+    # fallback for images outside the trained distribution or a bad model load.
+    try:
+        model_result = recognize_type1(image_bytes)
+    except Exception as exc:
+        logger.warning("New Type1 OCR failed; using legacy fallback chain: %s", exc)
+        model_result = None
+    if model_result is not None and model_result.text and model_result.reliable:
+        return {
+            "result": model_result.text,
+            "source": "NumPy Type1 OCR model",
+            "local": {"new_model": model_result.as_dict(), "red": None, "blue": None},
+            "ocr": {},
+        }
+
     template_result = extract_type1_template_candidate(image_bytes)
     if template_result:
         return {
