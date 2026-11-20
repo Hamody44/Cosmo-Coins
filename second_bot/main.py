@@ -78,6 +78,7 @@ AUTO_DELIVERY_STATE_PATH = BASE_DIR / ".runtime" / "auto_delivery_state.json"
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 pending_currency_confirmations: dict[int, str] = {}
 AUTO_DELIVERY_LOCK = asyncio.Lock()
+WALLET_LOCK = asyncio.Lock()
 AUTO_JOIN_INTERVAL_SECONDS = 60
 auto_join_next_allowed_at = 0.0
 DISCORD_INVITE_PATTERN = re.compile(
@@ -1835,7 +1836,8 @@ async def set_wallet(ctx: commands.Context, credit: str, adamc: str, rob: str) -
         await ctx.send("❌ لا يمكن أن تكون أرصدة العملات أرقامًا سالبة.")
         return
 
-    save_wallet_balances(values)
+    async with WALLET_LOCK:
+        save_wallet_balances(values)
     await ctx.send(
         "✅ تم حفظ أرصدتك:\n"
         f"• Credit: `{values['credit']:,}`\n"
@@ -2148,8 +2150,9 @@ async def send_currency_command(
     amount: str,
     command: str,
     confirmation_type: str | None,
+    wallet_currency: str | None = None,
 ) -> None:
-    """Send an external-currency command and optionally arm image confirmation."""
+    """Send an external-currency command and optionally debit its local wallet."""
     amount = amount.strip()
     try:
         parsed_amount = parse_wallet_amount(amount)
@@ -2162,12 +2165,48 @@ async def send_currency_command(
         return
 
     channel_id = getattr(ctx.channel, "id", None)
+    previous_confirmation = pending_currency_confirmations.get(channel_id) if channel_id is not None else None
     if confirmation_type and channel_id is not None:
         pending_currency_confirmations[channel_id] = confirmation_type
-    await ctx.send(
-        f"{command} {target.mention} {amount}",
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
+    if wallet_currency is None:
+        await ctx.send(
+            f"{command} {target.mention} {amount}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    async with WALLET_LOCK:
+        balances = load_wallet_balances()
+        available = balances[wallet_currency]
+        if parsed_amount > available:
+            if channel_id is not None:
+                if previous_confirmation is None:
+                    pending_currency_confirmations.pop(channel_id, None)
+                else:
+                    pending_currency_confirmations[channel_id] = previous_confirmation
+            await send_notice(
+                ctx,
+                f"❌ رصيد {wallet_currency.upper()} غير كافٍ. المتاح `{available:,}` والمطلوب `{parsed_amount:,}`.",
+            )
+            return
+
+        balances[wallet_currency] -= parsed_amount
+        save_wallet_balances(balances)
+        try:
+            await ctx.send(
+                f"{command} {target.mention} {amount}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            restored = load_wallet_balances()
+            restored[wallet_currency] += parsed_amount
+            save_wallet_balances(restored)
+            if channel_id is not None:
+                if previous_confirmation is None:
+                    pending_currency_confirmations.pop(channel_id, None)
+                else:
+                    pending_currency_confirmations[channel_id] = previous_confirmation
+            raise
 
 
 @bot.command(name="tc")
@@ -2181,7 +2220,7 @@ async def transfer_credit(ctx: commands.Context, target: discord.Member, amount:
 @commands.check(check_control_owner)
 async def transfer_adamc(ctx: commands.Context, target: discord.Member, amount: str) -> None:
     """Send an AdamC command and prepare for a type2 confirmation image."""
-    await send_currency_command(ctx, target, amount, "T", "type2")
+    await send_currency_command(ctx, target, amount, "T", "type2", wallet_currency="adamc")
 
 
 @bot.command(name="tr")

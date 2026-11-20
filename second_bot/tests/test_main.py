@@ -1,6 +1,7 @@
 """Unit tests for the standalone Discord bot; no Discord connection is made."""
 from __future__ import annotations
 
+import asyncio
 import os
 import json
 import tempfile
@@ -977,6 +978,71 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
                 conn.execute("SELECT status, delivery_status FROM exchange_logs WHERE id = 81").fetchone(),
                 ("تم القبول", "تسليم تلقائي"),
             )
+
+
+class AdamCWalletTransferTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.wallet_path = Path(self.temp_dir.name) / "wallet_balances.json"
+        self.wallet_patch = patch.object(main, "WALLET_STATE_PATH", self.wallet_path)
+        self.wallet_patch.start()
+        self.addCleanup(self.wallet_patch.stop)
+        self.addCleanup(self.temp_dir.cleanup)
+        self.addCleanup(main.pending_currency_confirmations.clear)
+        main.pending_currency_confirmations.clear()
+        main.save_wallet_balances({"credit": 0, "adamc": 2_000_000, "rob": 0})
+
+    def make_context(self, channel_id=555, *, send=None):
+        return SimpleNamespace(
+            channel=SimpleNamespace(id=channel_id),
+            send=send or AsyncMock(),
+        )
+
+    async def test_ta_deducts_adamc_only_after_command_is_sent(self):
+        ctx = self.make_context()
+        target = SimpleNamespace(mention="<@123>")
+
+        await main.transfer_adamc.callback(ctx, target, "1m")
+
+        self.assertEqual(main.load_wallet_balances()["adamc"], 1_000_000)
+        self.assertEqual(ctx.send.await_args.args[0], "T <@123> 1m")
+        self.assertEqual(main.pending_currency_confirmations[555], "type2")
+
+    async def test_ta_refuses_to_send_when_adamc_balance_is_insufficient(self):
+        main.save_wallet_balances({"credit": 0, "adamc": 500_000, "rob": 0})
+        ctx = self.make_context()
+        target = SimpleNamespace(mention="<@123>")
+
+        await main.transfer_adamc.callback(ctx, target, "1m")
+
+        self.assertEqual(main.load_wallet_balances()["adamc"], 500_000)
+        self.assertIn("غير كافٍ", ctx.send.await_args.args[0])
+        self.assertNotIn(555, main.pending_currency_confirmations)
+
+    async def test_ta_restores_wallet_if_discord_rejects_command_message(self):
+        ctx = self.make_context(send=AsyncMock(side_effect=RuntimeError("send failed")))
+        target = SimpleNamespace(mention="<@123>")
+
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            await main.transfer_adamc.callback(ctx, target, "1m")
+
+        self.assertEqual(main.load_wallet_balances()["adamc"], 2_000_000)
+        self.assertNotIn(555, main.pending_currency_confirmations)
+
+    async def test_concurrent_ta_commands_cannot_spend_the_same_balance_twice(self):
+        main.save_wallet_balances({"credit": 0, "adamc": 1_000_000, "rob": 0})
+        first = self.make_context(channel_id=555)
+        second = self.make_context(channel_id=556)
+        target = SimpleNamespace(mention="<@123>")
+
+        await asyncio.gather(
+            main.transfer_adamc.callback(first, target, "1m"),
+            main.transfer_adamc.callback(second, target, "1m"),
+        )
+
+        sent_messages = [first.send.await_args.args[0], second.send.await_args.args[0]]
+        self.assertEqual(sum(message.startswith("T ") for message in sent_messages), 1)
+        self.assertEqual(main.load_wallet_balances()["adamc"], 0)
 
 
 if __name__ == "__main__":
