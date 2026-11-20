@@ -53,16 +53,28 @@ AI_SYSTEM_INSTRUCTION = f"""أنت مساعد ذكي عام مدمج داخل س
 class GeminiAI(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        
-        # 1. تهيئة عميل Gemini الأساسي
+
+        # Groq is the primary provider; Gemini is the first fallback.
+        groq_key = os.getenv("GROQ_API_KEY")
+        self.groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+        self.groq_client = None
+        if not groq_key:
+            print("⚠️ [Groq] لم يتم العثور على GROQ_API_KEY في ملف .env")
+        else:
+            self.groq_client = AsyncOpenAI(
+                api_key=groq_key,
+                base_url="https://api.groq.com/openai/v1",
+            )
+
+        # Gemini fallback
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             print("⚠️ [GeminiAI] لم يتم العثور على GEMINI_API_KEY في ملف .env")
             self.client = None
         else:
             self.client = genai.Client(api_key=api_key)
-        
-        # 2. تهيئة عميل OpenRouter الاحتياطي المجاني
+
+        # Optional third fallback through OpenRouter
         openrouter_key = os.getenv("OPENROUTER_API_KEY")
         if not openrouter_key:
             print("⚠️ [OpenRouter] لم يتم العثور على OPENROUTER_API_KEY في ملف .env")
@@ -136,42 +148,59 @@ class GeminiAI(commands.Cog):
             f"{AI_ACTION_PROMPT}\n\nالأوامر الموجودة فعلياً:\n{command_catalog}\n\n"
             f"طلب المستخدم:\n{prompt}"
         )
-        raw = ""
-        try:
-            if self.client:
-                response = await self.client.aio.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=classifier_prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0,
-                    ),
-                )
-                raw = response.text or ""
-            elif self.backup_client:
-                response = await self.backup_client.chat.completions.create(
-                    model="meta-llama/llama-3.3-70b-instruct:free",
-                    messages=[
-                        {"role": "system", "content": AI_ACTION_PROMPT},
-                        {"role": "user", "content": classifier_prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0,
-                    max_tokens=300,
-                )
-                raw = response.choices[0].message.content or ""
-            result = json.loads(raw.strip().strip("`").replace("json\n", "", 1))
-            action = result.get("action")
-            if action not in {"chat", "command", "code_change"}:
-                return {"action": "chat", "command": "", "summary": ""}
-            return {
-                "action": action,
-                "command": str(result.get("command") or "").strip(),
-                "summary": str(result.get("summary") or "").strip(),
-            }
-        except Exception as exc:
-            print(f"[DEBUG] AI request classification failed: {exc}")
-            return {"action": "chat", "command": "", "summary": ""}
+        messages = [
+            {"role": "system", "content": AI_ACTION_PROMPT},
+            {"role": "user", "content": classifier_prompt},
+        ]
+
+        # Try providers in priority order; invalid output also triggers fallback.
+        for provider in ("Groq", "Gemini", "OpenRouter"):
+            try:
+                if provider == "Groq" and self.groq_client:
+                    response = await self.groq_client.chat.completions.create(
+                        model=self.groq_model,
+                        messages=messages,
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                        max_tokens=300,
+                    )
+                    raw = response.choices[0].message.content or ""
+                elif provider == "Gemini" and self.client:
+                    response = await self.client.aio.models.generate_content(
+                        model="gemini-3.8-flash",
+                        contents=classifier_prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=AI_ACTION_PROMPT,
+                            response_mime_type="application/json",
+                            temperature=0,
+                        ),
+                    )
+                    raw = response.text or ""
+                elif provider == "OpenRouter" and self.backup_client:
+                    response = await self.backup_client.chat.completions.create(
+                        model="meta-llama/llama-3.3-70b-instruct:free",
+                        messages=messages,
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                        max_tokens=300,
+                    )
+                    raw = response.choices[0].message.content or ""
+                else:
+                    continue
+
+                result = json.loads(raw.strip().strip("`").replace("json\n", "", 1))
+                action = result.get("action")
+                if action not in {"chat", "command", "code_change"}:
+                    raise ValueError("AI returned an unsupported action")
+                return {
+                    "action": action,
+                    "command": str(result.get("command") or "").strip(),
+                    "summary": str(result.get("summary") or "").strip(),
+                }
+            except Exception as exc:
+                print(f"[DEBUG] {provider} request classification failed: {exc}")
+
+        return {"action": "chat", "command": "", "summary": ""}
 
     async def invoke_existing_command(self, ctx: commands.Context, command_text: str) -> bool:
         """Invoke a real bot command so its normal checks and inline guards still run."""
@@ -211,13 +240,31 @@ class GeminiAI(commands.Cog):
 السياق المتاح:
 {self.primary_code_context(prompt)}
 """
+        if self.groq_client:
+            try:
+                response = await self.groq_client.chat.completions.create(
+                    model=self.groq_model,
+                    messages=[{"role": "user", "content": instruction}],
+                    temperature=0.1,
+                    max_tokens=4000,
+                )
+                patch = response.choices[0].message.content or ""
+                if patch:
+                    return patch
+            except Exception as exc:
+                print(f"[DEBUG] Groq code generation failed; trying Gemini: {exc}")
         if self.client:
-            response = await self.client.aio.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=instruction,
-                config=types.GenerateContentConfig(temperature=0.1),
-            )
-            return response.text or ""
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=instruction,
+                    config=types.GenerateContentConfig(temperature=0.1),
+                )
+                patch = response.text or ""
+                if patch:
+                    return patch
+            except Exception as exc:
+                print(f"[DEBUG] Gemini code generation failed; trying OpenRouter: {exc}")
         return await self.ask_backup_ai(instruction)
 
     def apply_primary_code_patch(self, patch_text: str) -> tuple[bool, str]:
@@ -310,26 +357,12 @@ class GeminiAI(commands.Cog):
             print(f"[DEBUG] خطأ أثناء فحص حالة الذكاء الاصطناعي: {e}")
             return True
 
-    async def get_user_chat(self, conversation_key):
-        if not self.client:
-            return None
-        if conversation_key not in self.user_chats:
-            config = types.GenerateContentConfig(
-                system_instruction=AI_SYSTEM_INSTRUCTION,
-                temperature=0.7,
-            )
-            self.user_chats[conversation_key] = self.client.aio.chats.create(
-                model="gemini-3.8-flash",
-                config=config
-            )
-        return self.user_chats[conversation_key]
-
     async def ask_backup_ai(self, prompt: str) -> str:
-        """استدعاء الموديل الاحتياطي المجاني عبر OpenRouter"""
+        """Use OpenRouter as an optional third provider after Groq and Gemini."""
         if not self.backup_client:
-            return "⚠️ تعذر توليد الرد من كلا الخادمين (Gemini مضغوط و OPENROUTER_API_KEY غير موجود)."
+            return "⚠️ تعذر توليد الرد من Groq وGemini، كما أن OPENROUTER_API_KEY غير مضبوط للمزوّد الثالث."
         try:
-            print("🔄 [Fallback] جاري التبديل للمزود الاحتياطي المجاني...")
+            print("🔄 [Fallback] Groq وGemini غير متاحين؛ جاري تجربة OpenRouter...")
             response = await self.backup_client.chat.completions.create(
                 model="meta-llama/llama-3.3-70b-instruct:free",
                 messages=[
@@ -347,27 +380,70 @@ class GeminiAI(commands.Cog):
             print(f"[DEBUG] خطأ أثناء توليد الرد من المزود الاحتياطي: {e}")
             return f"⚠️ خطأ أثناء توليد الرد من الخادم البديل: {e}"
 
+    async def ask_gemini_ai(self, prompt: str, *, temperature: float = 0.7) -> str:
+        """Generate a response from Gemini after the primary Groq provider fails."""
+        response = await self.client.aio.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=AI_SYSTEM_INSTRUCTION,
+                temperature=temperature,
+            ),
+        )
+        return response.text or ""
+
     async def generate_response(
         self, user_id: int, prompt: str, guild_id: int | None = None, channel_id: int | None = None
     ) -> str:
         conversation_key = (int(guild_id or 0), int(channel_id or 0), int(user_id))
-        if not self.client:
-            if self.backup_client:
-                return await self.ask_backup_ai(prompt)
+        if not self.groq_client and not self.client and not self.backup_client:
             return "❌ خدمة الذكاء الاصطناعي غير مفعلة؛ يرجى التأكد من وضع المفاتيح في ملف `.env`."
-        
-        try:
-            chat = await self.get_user_chat(conversation_key)
-            response = await chat.send_message(prompt)
-            return response.text or "عذراً، لم أستطع استخراج إجابة."
-        except Exception as e:
-            err_str = str(e)
-            print(f"[DEBUG] Gemini Error: {err_str}")
-            self.user_chats.pop(conversation_key, None)
 
-            # عند حدوث 503 أو أي خطأ في جيميناي يتم التحويل تلقائياً
-            print("⚠️ تعثر رد Gemini، جاري التبديل التلقائي إلى المزود الاحتياطي...")
-            return await self.ask_backup_ai(prompt)
+        history = self.user_chats.setdefault(
+            conversation_key,
+            [{"role": "system", "content": AI_SYSTEM_INSTRUCTION}],
+        )
+        history.append({"role": "user", "content": prompt})
+        fallback_prompt = "\n\n".join(
+            f"{'المستخدم' if item['role'] == 'user' else 'المساعد'}: {item['content']}"
+            for item in history
+            if item["role"] != "system"
+        )
+
+        if self.groq_client:
+            try:
+                response = await self.groq_client.chat.completions.create(
+                    model=self.groq_model,
+                    messages=history,
+                    temperature=0.7,
+                    max_tokens=1500,
+                )
+                answer = response.choices[0].message.content or ""
+                if answer:
+                    history.append({"role": "assistant", "content": answer})
+                    return answer
+            except Exception as exc:
+                print(f"[DEBUG] Groq Error; trying Gemini fallback: {exc}")
+
+        if self.client:
+            try:
+                answer = await self.ask_gemini_ai(fallback_prompt)
+                if answer:
+                    history.append({"role": "assistant", "content": answer})
+                    return answer
+            except Exception as exc:
+                print(f"[DEBUG] Gemini Error; trying OpenRouter fallback: {exc}")
+
+        if self.backup_client:
+            answer = await self.ask_backup_ai(fallback_prompt)
+            if not answer.startswith("⚠️"):
+                history.append({"role": "assistant", "content": answer})
+                return answer
+            history.pop()
+            return answer
+
+        history.pop()
+        return "⚠️ تعذر توليد الرد من Groq وGemini. تحقق من مفاتيح API وحالة المزوّدين."
 
     async def send_split_message(self, target, text: str):
         chunks = [text[i:i + 1900] for i in range(0, len(text), 1900)]
