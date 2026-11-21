@@ -859,6 +859,11 @@ async def extract_numbers_with_ocr_space_variants(
     rate_limited = False
     for label, payload in variants:
         for engine in OCR_SPACE_ENGINES:
+            logger.info(
+                "Type1 OCR attempt started: source=OCR.Space variant=%s engine=%s",
+                label,
+                engine,
+            )
             try:
                 result = await extract_numbers_with_ocr_space(
                     payload,
@@ -866,9 +871,28 @@ async def extract_numbers_with_ocr_space_variants(
                     api_key=api_key,
                     engine=engine,
                 )
-                results[(label, engine)] = result[0] if result else None
+                text = result[0] if result else None
+                results[(label, engine)] = text
+                if text:
+                    logger.info(
+                        "Type1 OCR attempt succeeded: source=OCR.Space variant=%s engine=%s text=%s",
+                        label,
+                        engine,
+                        text,
+                    )
+                else:
+                    logger.info(
+                        "Type1 OCR attempt returned no valid result: source=OCR.Space variant=%s engine=%s",
+                        label,
+                        engine,
+                    )
             except RuntimeError as exc:
-                logger.warning("OCR.Space %s engine=%s attempt failed: %s", label, engine, exc)
+                logger.warning(
+                    "Type1 OCR attempt failed: source=OCR.Space variant=%s engine=%s reason=%s",
+                    label,
+                    engine,
+                    exc,
+                )
                 failures.append(f"{label}/engine{engine}: {exc}")
                 results[(label, engine)] = None
                 if isinstance(exc, OCRSpaceRateLimitError):
@@ -1415,8 +1439,10 @@ async def extract_type1_hybrid(
     """Try Type1 providers in order: Gemini 3.5, Gemini 3.8, OCR.Space, local OCR."""
     failures: list[str] = []
     gemini_key, _configured_model = load_vision_config()
+    logger.info("Starting Type1 OCR chain: Gemini models, OCR.Space, then local OCR.")
     if gemini_key:
         for model_name in TYPE1_GEMINI_MODELS:
+            logger.info("Type1 OCR attempt started: source=Gemini model=%s", model_name)
             try:
                 ai_values = await asyncio.wait_for(
                     extract_numbers_from_image(
@@ -1429,25 +1455,46 @@ async def extract_type1_hybrid(
                 )
                 ai_result = first_five_digit_result(ai_values)
                 if ai_result and re.fullmatch(r"[0-9]{5}", ai_result):
-                    logger.info("Using %s for type1 image: %s", model_name, ai_result)
+                    logger.info(
+                        "Type1 OCR attempt succeeded: source=Gemini model=%s text=%s",
+                        model_name,
+                        ai_result,
+                    )
                     return {
                         "result": ai_result,
                         "source": f"Gemini ({model_name})",
                         "local": {"red": None, "blue": None},
                         "ocr": {},
                     }
-                failures.append(f"{model_name} returned no valid ASCII five-digit result")
+                failure = "provider returned no valid ASCII five-digit result"
+                failures.append(f"{model_name}: {failure}")
+                logger.warning(
+                    "Type1 OCR attempt failed: source=Gemini model=%s reason=%s",
+                    model_name,
+                    failure,
+                )
             except asyncio.TimeoutError:
-                failures.append(f"{model_name} timed out after {_type1_ai_timeout():g} seconds")
+                failure = f"timed out after {_type1_ai_timeout():g} seconds"
+                failures.append(f"{model_name}: {failure}")
+                logger.warning(
+                    "Type1 OCR attempt failed: source=Gemini model=%s reason=%s",
+                    model_name,
+                    failure,
+                )
             except Exception as exc:
                 failures.append(f"{model_name}: {exc}")
-            logger.warning("Type1 Gemini model %s failed; trying the next provider.", model_name)
+                logger.warning(
+                    "Type1 OCR attempt failed: source=Gemini model=%s reason=%s",
+                    model_name,
+                    exc,
+                )
     else:
         failures.append("GEMINI_API_KEY is missing")
-        logger.info("GEMINI_API_KEY is not configured; skipping Gemini type1 providers.")
+        logger.info("Type1 OCR provider skipped: source=Gemini reason=GEMINI_API_KEY is missing.")
 
     ocr_results: dict[tuple[str, str], str | None] = {}
     if ocr_space_key:
+        logger.info("Type1 OCR attempt started: source=OCR.Space variants=%s", len(TYPE1_TEST_VARIANTS))
         try:
             ocr_results = await extract_numbers_with_ocr_space_variants(
                 image_bytes,
@@ -1455,29 +1502,44 @@ async def extract_type1_hybrid(
             )
             consensus = select_ocr_consensus(ocr_results)
             if consensus:
-                logger.info("Using OCR.Space consensus for type1 image: %s", consensus)
+                logger.info(
+                    "Type1 OCR attempt succeeded: source=OCR.Space consensus text=%s results=%s",
+                    consensus,
+                    ocr_results,
+                )
                 return {
                     "result": consensus,
                     "source": "OCR.Space consensus",
                     "local": {"red": None, "blue": None},
                     "ocr": ocr_results,
                 }
-            failures.append("OCR.Space did not produce a two-variant consensus")
+            failure = "OCR.Space did not produce a two-variant consensus"
+            failures.append(failure)
+            logger.warning(
+                "Type1 OCR attempt failed: source=OCR.Space reason=%s results=%s",
+                failure,
+                ocr_results,
+            )
         except Exception as exc:
             failures.append(f"OCR.Space: {exc}")
-            logger.warning("OCR.Space failed in type1 path; trying local OCR: %s", exc)
+            logger.warning("Type1 OCR attempt failed: source=OCR.Space reason=%s", exc)
     else:
         failures.append("OCR_SPACE_API_KEY is missing")
-        logger.info("OCR_SPACE_API_KEY is missing; skipping OCR.Space for type1.")
+        logger.info("Type1 OCR provider skipped: source=OCR.Space reason=OCR_SPACE_API_KEY is missing.")
 
     # Local OCR is deliberately last: the trained classifier, then template bank,
     # followed by the older red/blue local candidate recognizer.
+    logger.info("Type1 OCR attempt started: source=NumPy Type1 OCR model")
     try:
         model_result = recognize_type1(image_bytes)
     except Exception as exc:
-        logger.warning("NumPy Type1 OCR failed: %s", exc)
+        logger.warning("Type1 OCR attempt failed: source=NumPy Type1 OCR model reason=%s", exc)
         model_result = None
     if model_result is not None and model_result.text and model_result.reliable:
+        logger.info(
+            "Type1 OCR attempt succeeded: source=NumPy Type1 OCR model text=%s",
+            model_result.text,
+        )
         return {
             "result": model_result.text,
             "source": "NumPy Type1 OCR model",
@@ -1485,8 +1547,17 @@ async def extract_type1_hybrid(
             "ocr": ocr_results,
         }
 
+    logger.info(
+        "Type1 OCR attempt produced no reliable result: source=NumPy Type1 OCR model reason=%s",
+        getattr(model_result, "reason", "no candidate"),
+    )
+    logger.info("Type1 OCR attempt started: source=NumPy Type1 template library")
     template_result = extract_type1_template_candidate(image_bytes)
     if template_result:
+        logger.info(
+            "Type1 OCR attempt succeeded: source=NumPy Type1 template library text=%s",
+            template_result,
+        )
         return {
             "result": template_result,
             "source": "NumPy Type1 template library",
@@ -1494,9 +1565,12 @@ async def extract_type1_hybrid(
             "ocr": ocr_results,
         }
 
+    logger.info("Type1 OCR attempt produced no result: source=NumPy Type1 template library")
+    logger.info("Type1 OCR attempt started: source=local red/blue recognizer")
     local = extract_type1_local_candidates(image_bytes)
     red, blue = local.get("red"), local.get("blue")
     if red and blue and red == blue:
+        logger.info("Type1 OCR attempt succeeded: source=local red/blue consensus text=%s", red)
         return {
             "result": red,
             "source": "local consensus",
@@ -1504,6 +1578,19 @@ async def extract_type1_hybrid(
             "ocr": ocr_results,
         }
     fallback = next((value for value in (red, blue) if value and re.fullmatch(r"[0-9]{5}", value)), None)
+    if fallback:
+        logger.warning(
+            "Type1 OCR attempt succeeded with an unverified candidate: source=local red/blue recognizer text=%s red=%s blue=%s",
+            fallback,
+            red,
+            blue,
+        )
+    else:
+        logger.error(
+            "Type1 OCR chain exhausted: no provider returned five ASCII digits; failures=%s local=%s",
+            failures,
+            local,
+        )
     return {
         "result": fallback,
         "source": "local unverified" if fallback else "none",

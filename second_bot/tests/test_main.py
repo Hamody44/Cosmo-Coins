@@ -773,14 +773,15 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_type1_tries_gemini_35_then_38_before_ocr_space(self):
         gemini = AsyncMock(side_effect=[RuntimeError("first model unavailable"), ["45 454"]])
-        with patch.object(main, "load_vision_config", return_value=("test-key", main.DEFAULT_VISION_MODEL)), \
-                patch.object(main, "extract_numbers_from_image", new=gemini) as gemini_call, \
-                patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock()) as ocr_space:
-            result = await main.extract_type1_hybrid(
-                b"type1-image",
-                "image/png",
-                ocr_space_key="ocr-test-key",
-            )
+        with self.assertLogs("second_bot", level="INFO") as captured_logs:
+            with patch.object(main, "load_vision_config", return_value=("test-key", main.DEFAULT_VISION_MODEL)), \
+                    patch.object(main, "extract_numbers_from_image", new=gemini) as gemini_call, \
+                    patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock()) as ocr_space:
+                result = await main.extract_type1_hybrid(
+                    b"type1-image",
+                    "image/png",
+                    ocr_space_key="ocr-test-key",
+                )
 
         self.assertEqual(result["result"], "45454")
         self.assertEqual(result["source"], "Gemini (gemini-3.8-flash)")
@@ -789,6 +790,8 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertTrue(all(call.kwargs["allow_provider_fallbacks"] is False for call in gemini_call.await_args_list))
         ocr_space.assert_not_awaited()
+        self.assertTrue(any("attempt started: source=Gemini model=gemini-3.5-flash-lite" in item for item in captured_logs.output))
+        self.assertTrue(any("attempt succeeded: source=Gemini model=gemini-3.8-flash text=45454" in item for item in captured_logs.output))
 
     async def test_numbers_uses_ocr_space_for_type1_only(self):
         ctx = make_context()
