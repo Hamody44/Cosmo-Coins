@@ -65,6 +65,27 @@ def get_price(duration):
     credit_price = int(row[2])
     return {"duration":row[0], "duration_seconds":int(row[1]), "credit":credit_price, "adamc":database.credits_to_adamc(credit_price), "cosmo":int(row[4]), "crypto_usd":Decimal(row[5])}
 
+
+def list_prices():
+    """Return all configured Premium prices with AdamC derived from the live divisor."""
+    _global_schema()
+    with closing(sqlite3.connect(database.GLOBAL_DB_PATH, timeout=10)) as c:
+        rows = c.execute(
+            "SELECT duration,duration_seconds,credit,cosmo,crypto_usd "
+            "FROM premium_prices ORDER BY duration_seconds, duration"
+        ).fetchall()
+    return [
+        {
+            "duration": row[0],
+            "duration_seconds": int(row[1]),
+            "credit": int(row[2]),
+            "adamc": database.credits_to_adamc(int(row[2])),
+            "cosmo": int(row[3]),
+            "crypto_usd": Decimal(row[4]),
+        }
+        for row in rows
+    ]
+
 def _ensure_orders(conn):
     conn.execute("CREATE TABLE IF NOT EXISTS premium_payment_orders (id INTEGER PRIMARY KEY AUTOINCREMENT,guild_id INTEGER NOT NULL,user_id INTEGER NOT NULL,payer_name TEXT NOT NULL DEFAULT '',channel_id INTEGER NOT NULL,method TEXT NOT NULL,duration TEXT NOT NULL,duration_seconds INTEGER NOT NULL,expected_payment INTEGER,quote_usd TEXT,provider_order_id TEXT UNIQUE,provider_payment_id TEXT UNIQUE,status TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,payment_message_id INTEGER UNIQUE,payment_author_id INTEGER,paid_at INTEGER)")
     columns = {row[1] for row in conn.execute("PRAGMA table_info(premium_payment_orders)").fetchall()}

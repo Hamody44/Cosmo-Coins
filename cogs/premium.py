@@ -8,6 +8,7 @@ from database import PRIMARY_OWNER_ID, check_is_owner, get_balance, parse_durati
 from cogs.admin import parse_budget_payment_confirmation
 from ltcpay import create_ltc_invoice, format_usd, LTCPayError
 import premium_payments as pp
+from advertising_store import AD_DURATIONS, get_ad_config
 
 METHOD_LABELS = {"credit":"ProBot", "adamc":"AdamC", "cosmo":"رصيد Cosmo", "crypto":"LTC"}
 
@@ -80,6 +81,52 @@ class PremiumView(discord.ui.View):
 class Premium(commands.Cog):
     def __init__(self, bot): self.bot = bot
 
+    @commands.hybrid_command(
+        name="prices",
+        aliases=["الأسعار", "اسعار", "price_list"],
+        description="عرض أسعار Premium والإعلانات ونسبة AdamC الحالية",
+    )
+    async def prices(self, ctx: commands.Context):
+        """Show the live prices without exposing database details."""
+        lines = ["💰 **الأسعار الحالية**"]
+        divisor = database.get_adamc_divisor()
+        lines.append(
+            f"\n🪙 **AdamC:** كل `{divisor:,}` Credits = `1` AdamC "
+            "(يُطبق تلقائيًا على Premium والإعلانات وشحن الميزانية)."
+        )
+
+        premium_prices = pp.list_prices()
+        lines.append("\n💎 **أسعار Premium:**")
+        if premium_prices:
+            for price in premium_prices:
+                lines.append(
+                    f"• `{price['duration']}` — "
+                    f"ProBot: `{price['credit']:,}` | "
+                    f"AdamC: `{price['adamc']:,}` | "
+                    f"Cosmo: `{price['cosmo']:,}` | "
+                    f"LTC: `${format(price['crypto_usd'], 'f')}`"
+                )
+        else:
+            lines.append("• لم يتم تحديد أسعار Premium بعد.")
+
+        if ctx.guild:
+            ad_config = get_ad_config(ctx.guild.id)
+            lines.append(f"\n📣 **أسعار الإعلانات في {ctx.guild.name}:**")
+            ad_prices = [
+                (duration, ad_config["prices"].get(duration))
+                for duration in AD_DURATIONS
+                if ad_config["prices"].get(duration) is not None
+            ]
+            if ad_prices:
+                lines.extend(f"• `{duration}` — `{int(price):,}` Cosmo" for duration, price in ad_prices)
+            else:
+                lines.append("• لم يتم تحديد أسعار إعلانات بعد.")
+            lines.append(f"• رسوم everyone: `{ad_config['everyone_fee']:,}` Cosmo")
+        else:
+            lines.append("\n📣 **أسعار الإعلانات:** استخدم الأمر داخل سيرفر لعرض أسعاره.")
+
+        await ctx.send("\n".join(lines))
+
     @commands.hybrid_command(name="buy_premium", aliases=["premium_buy"], description="شراء Premium للسيرفر الحالي")
     async def buy_premium(self, ctx, duration: str):
         if not ctx.guild: return await ctx.send("⛔ استخدم الأمر داخل السيرفر.")
@@ -97,7 +144,7 @@ class Premium(commands.Cog):
         except (ValueError, TypeError, Exception): return await ctx.send("❌ صيغة أو أسعار غير صالحة.")
         await ctx.send(f"✅ تم حفظ سعر Premium لمدة `{duration}`.")
 
-    @commands.command(name="set_adamc_ratio", aliases=["تعديل_نسبة_ادم_سي"])
+    @commands.command(name="set_adamc_ratio", aliases=["set_adamc_divisor", "تعديل_نسبة_ادم_سي"])
     async def set_adamc_ratio(self, ctx, divisor: int):
         if not await check_is_owner(self.bot, ctx):
             return await ctx.send("⛔ هذا الأمر متاح فقط لمالك البوت الأساسي.")
