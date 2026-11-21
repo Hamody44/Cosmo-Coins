@@ -162,6 +162,7 @@ class AdvertisingStoreTests(unittest.TestCase):
         store.update_ad_order(1, order_id, status="paid")
         store.reserve_ad_giveaway(1, order_id, "customer_payment")
         store.record_ad_published(1, order_id, 55, 66, 0, "old-room")
+        self.assertEqual(store.list_busy_ad_channels(1), {55})
         claimed = store.claim_expired_ad_giveaways(1, now=10**12)
         self.assertEqual([row["order_id"] for row in claimed], [order_id])
         self.assertEqual(store.claim_expired_ad_giveaways(1, now=10**12), [])

@@ -33,6 +33,7 @@ from advertising_store import (
     get_ad_config,
     get_ad_statistics,
     get_ad_order,
+    list_busy_ad_channels,
     remove_ad_channel,
     set_ad_config,
     set_ad_buyer_role,
@@ -824,12 +825,19 @@ class Advertisements(commands.Cog):
 
     async def _publish_next_queued(self, guild: discord.Guild):
         config = get_ad_config(guild.id)
+        busy_channels = await asyncio.to_thread(list_busy_ad_channels, guild.id)
+        channel = next(
+            (
+                guild.get_channel(cid)
+                for cid in config["channels"]
+                if cid not in busy_channels and guild.get_channel(cid)
+            ),
+            None,
+        )
+        if channel is None:
+            return
         order_id = await asyncio.to_thread(claim_next_queued_order, guild.id, local_day_start(), config["daily_limit"])
         if not order_id:
-            return
-        channel = next((guild.get_channel(cid) for cid in config["channels"] if guild.get_channel(cid)), None)
-        if channel is None:
-            mark_ad_needs_review(guild.id, order_id, "no configured advertisement channel is available")
             return
         result = await self._publish_order(guild, order_id, channel)
         if result["status"] != "live":
@@ -1102,6 +1110,8 @@ class Advertisements(commands.Cog):
         config = get_ad_config(guild.id)
         if not channel or channel.guild.id != guild.id or channel.id not in config["channels"]:
             return {"status": "needs_review", "error": "channel is not allow-listed"}
+        if channel.id in await asyncio.to_thread(list_busy_ad_channels, guild.id):
+            return {"status": "blocked", "error": "advertisement channel already has an active giveaway"}
         funding = "server_budget" if order["advertiser_id"] == guild.owner_id else "customer_payment"
         reservation = reserve_ad_giveaway(guild.id, order_id, funding)
         if reservation["status"] == "insufficient_budget":

@@ -581,6 +581,21 @@ def list_live_ad_messages(guild_id: int):
         conn.close()
 
 
+def list_busy_ad_channels(guild_id: int):
+    """Return ad channels currently occupied by an unfinished giveaway."""
+    ensure_ad_schema(guild_id); conn, cur = get_guild_db(guild_id)
+    try:
+        rows = cur.execute(
+            "SELECT DISTINCT channel_id FROM ad_giveaways "
+            "WHERE guild_id=? AND status IN ('reserved','live','ending','awaiting_owner_decision','paying') "
+            "AND channel_id IS NOT NULL",
+            (guild_id,),
+        ).fetchall()
+        return {int(row[0]) for row in rows}
+    finally:
+        conn.close()
+
+
 def get_ad_statistics(guild_id: int):
     ensure_ad_schema(guild_id); conn, cur = get_guild_db(guild_id)
     try:
