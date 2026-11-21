@@ -79,10 +79,12 @@ COMMAND_RESPONSE_DELAY_SECONDS = 1
 USER_COMMAND_COOLDOWN_SECONDS = 30
 WALLET_STATE_PATH = BASE_DIR / ".runtime" / "wallet_balances.json"
 WALLET_CURRENCY_BY_PROVIDER = {"ProBot": "credit", "AdamC": "adamc", "Rob": "rob"}
+WALLET_CURRENCY_LABELS = {"credit": "Credit", "adamc": "AdamC", "rob": "Rob"}
 AUTO_DELIVERY_STATE_PATH = BASE_DIR / ".runtime" / "auto_delivery_state.json"
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 pending_currency_confirmations: dict[int, str] = {}
 AUTO_DELIVERY_LOCK = asyncio.Lock()
+AUTO_DELIVERY_INTERVAL_SECONDS = 120.0
 WALLET_LOCK = asyncio.Lock()
 AUTO_JOIN_INTERVAL_SECONDS = 60
 auto_join_next_allowed_at = 0.0
@@ -243,7 +245,19 @@ def auto_delivery_state() -> dict[str, object]:
     for order_id in processed:
         if isinstance(order_id, int) and not isinstance(order_id, bool) and order_id > 0:
             normalized_processed.append(order_id)
-    return {"enabled": enabled, "processed_orders": normalized_processed}
+    last_delivery_at = state.get("last_successful_delivery_at", 0.0)
+    if (
+        isinstance(last_delivery_at, bool)
+        or not isinstance(last_delivery_at, (int, float))
+        or not math.isfinite(last_delivery_at)
+        or last_delivery_at < 0
+    ):
+        last_delivery_at = 0.0
+    return {
+        "enabled": enabled,
+        "processed_orders": normalized_processed,
+        "last_successful_delivery_at": float(last_delivery_at),
+    }
 
 
 def set_auto_delivery_enabled(enabled: bool) -> None:
@@ -270,6 +284,13 @@ def release_auto_delivery_order_claim(order_id: int) -> None:
     state["processed_orders"] = [
         existing_id for existing_id in state["processed_orders"] if existing_id != int(order_id)
     ]
+    write_runtime_json(AUTO_DELIVERY_STATE_PATH, state)
+
+
+def record_auto_delivery_success() -> None:
+    """Persist when the last provider command was successfully posted."""
+    state = auto_delivery_state()
+    state["last_successful_delivery_at"] = time.time()
     write_runtime_json(AUTO_DELIVERY_STATE_PATH, state)
 
 
@@ -323,6 +344,37 @@ async def report_auto_delivery_result(message: discord.Message, order_id: int, o
         logger.exception("Could not report automatic-delivery result for order %s.", order_id)
 
 
+async def notify_wallet_owner(message: str) -> None:
+    """Send private wallet/automatic-delivery alerts to the configured owner."""
+    try:
+        owner = bot.get_user(PRIMARY_OWNER_ID) or await bot.fetch_user(PRIMARY_OWNER_ID)
+        await owner.send(message, allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        logger.exception("Could not send automatic-delivery wallet alert to the owner.")
+
+
+async def check_wallet_recharge_threshold(currency: str) -> bool:
+    """Disable all automatic deliveries and alert the owner at 10% of the saved baseline."""
+    current_balance = load_wallet_balances()[currency]
+    baseline = load_wallet_baselines()[currency]
+    if baseline <= 0 or current_balance * 10 > baseline:
+        return False
+
+    label = WALLET_CURRENCY_LABELS.get(currency, currency.upper())
+    try:
+        set_auto_delivery_enabled(False)
+        disabled_notice = "تم إيقاف التسليم التلقائي لجميع العملات تلقائيًا."
+    except OSError:
+        logger.exception("Could not disable automatic delivery after wallet %s reached its threshold.", currency)
+        disabled_notice = "تعذر حفظ إيقاف التسليم التلقائي؛ أوقفه يدويًا من فضلك."
+    await notify_wallet_owner(
+        f"⚠️ عملة **{label}** محتاجة تتشحن.\n"
+        f"الرصيد الحالي `{current_balance:,}` وصل إلى 10% أو أقل من الرصيد الأساسي "
+        f"`{baseline:,}`. {disabled_notice}"
+    )
+    return True
+
+
 def load_wallet_balances() -> dict[str, int]:
     """Load the owner's manually stored external-currency balances."""
     state = read_runtime_json(WALLET_STATE_PATH) or {}
@@ -336,11 +388,38 @@ def load_wallet_balances() -> dict[str, int]:
     return balances
 
 
-def save_wallet_balances(balances: dict[str, int]) -> None:
-    """Persist the owner's manually stored external-currency balances."""
+def load_wallet_baselines() -> dict[str, int]:
+    """Load reference balances used to detect when a currency needs recharging."""
+    state = read_runtime_json(WALLET_STATE_PATH) or {}
+    balances = load_wallet_balances()
+    saved_baselines = state.get("baseline_balances")
+    baselines: dict[str, int] = {}
+    for currency in ("credit", "adamc", "rob"):
+        raw_amount = (
+            saved_baselines.get(currency, balances[currency])
+            if isinstance(saved_baselines, dict)
+            else balances[currency]
+        )
+        try:
+            amount = int(raw_amount)
+        except (TypeError, ValueError):
+            amount = balances[currency]
+        baselines[currency] = max(0, amount)
+    return baselines
+
+
+def save_wallet_balances(balances: dict[str, int], *, reset_baseline: bool = False) -> None:
+    """Persist current balances and, when requested, reset the reference balances."""
+    current_balances = {currency: int(balances[currency]) for currency in ("credit", "adamc", "rob")}
+    existing_state = read_runtime_json(WALLET_STATE_PATH) or {}
+    baseline_balances = (
+        current_balances
+        if reset_baseline or not existing_state
+        else load_wallet_baselines()
+    )
     write_runtime_json(
         WALLET_STATE_PATH,
-        {currency: int(balances[currency]) for currency in ("credit", "adamc", "rob")},
+        {**current_balances, "baseline_balances": baseline_balances},
     )
 
 
@@ -2027,7 +2106,7 @@ async def set_wallet(ctx: commands.Context, credit: str, adamc: str, rob: str) -
         return
 
     async with WALLET_LOCK:
-        save_wallet_balances(values)
+        save_wallet_balances(values, reset_baseline=True)
     await ctx.send(
         "✅ تم حفظ أرصدتك:\n"
         f"• Credit: `{values['credit']:,}`\n"
@@ -2341,9 +2420,11 @@ async def send_currency_command(
     command: str,
     confirmation_type: str | None,
     wallet_currency: str | None = None,
+    extra: str = "",
 ) -> None:
     """Send an external-currency command and optionally debit its local wallet."""
     amount = amount.strip()
+    extra = extra.strip()
     try:
         parsed_amount = parse_wallet_amount(amount)
     except (AttributeError, TypeError, ValueError):
@@ -2358,9 +2439,13 @@ async def send_currency_command(
     previous_confirmation = pending_currency_confirmations.get(channel_id) if channel_id is not None else None
     if confirmation_type and channel_id is not None:
         pending_currency_confirmations[channel_id] = confirmation_type
+    recipient = str(target.id) if command == "!transfer" else target.mention
+    transfer_message = f"{command} {recipient} {amount}"
+    if extra:
+        transfer_message += f" {extra}"
     if wallet_currency is None:
         await ctx.send(
-            f"{command} {target.mention} {amount}",
+            transfer_message,
             allowed_mentions=discord.AllowedMentions.none(),
         )
         return
@@ -2379,7 +2464,7 @@ async def send_currency_command(
         return
     try:
         await ctx.send(
-            f"{command} {target.mention} {amount}",
+            transfer_message,
             allowed_mentions=discord.AllowedMentions.none(),
         )
     except Exception:
@@ -2394,23 +2479,47 @@ async def send_currency_command(
 
 @bot.command(name="tc")
 @commands.check(check_control_owner)
-async def transfer_credit(ctx: commands.Context, target: discord.Member, amount: str) -> None:
+async def transfer_credit(
+    ctx: commands.Context,
+    target: discord.Member,
+    amount: str,
+    *,
+    extra: str = "",
+) -> None:
     """Send a ProBot Credit command; its confirmation uses the shared type1 OCR chain."""
-    await send_currency_command(ctx, target, amount, "#credit", "type1", wallet_currency="credit")
+    await send_currency_command(
+        ctx, target, amount, "#credit", "type1", wallet_currency="credit", extra=extra
+    )
 
 
 @bot.command(name="ta")
 @commands.check(check_control_owner)
-async def transfer_adamc(ctx: commands.Context, target: discord.Member, amount: str) -> None:
+async def transfer_adamc(
+    ctx: commands.Context,
+    target: discord.Member,
+    amount: str,
+    *,
+    extra: str = "",
+) -> None:
     """Send an AdamC command and prepare for a type2 confirmation image."""
-    await send_currency_command(ctx, target, amount, "T", "type2", wallet_currency="adamc")
+    await send_currency_command(
+        ctx, target, amount, "T", "type2", wallet_currency="adamc", extra=extra
+    )
 
 
 @bot.command(name="tr")
 @commands.check(check_control_owner)
-async def transfer_rob(ctx: commands.Context, target: discord.Member, amount: str) -> None:
+async def transfer_rob(
+    ctx: commands.Context,
+    target: discord.Member,
+    amount: str,
+    *,
+    extra: str = "",
+) -> None:
     """Send a Rob transfer command without arming an image confirmation."""
-    await send_currency_command(ctx, target, amount, "!transfer", None, wallet_currency="rob")
+    await send_currency_command(
+        ctx, target, amount, "!transfer", None, wallet_currency="rob", extra=extra
+    )
 
 
 @bot.command(name="auto_delivery", aliases=["التسليم_التلقائي"])
@@ -2751,9 +2860,27 @@ async def process_auto_delivery_handoff(message: discord.Message) -> None:
         return
 
     async with AUTO_DELIVERY_LOCK:
-        if not auto_delivery_state()["enabled"]:
+        delivery_state = auto_delivery_state()
+        if not delivery_state["enabled"]:
             return
         order_id = int(payload["order_id"])
+        if order_id in delivery_state["processed_orders"]:
+            logger.info("Ignored duplicate automatic-delivery handoff for order %s.", order_id)
+            return
+        last_delivery_at = float(delivery_state["last_successful_delivery_at"])
+        wait_seconds = max(
+            0.0,
+            AUTO_DELIVERY_INTERVAL_SECONDS - (time.time() - last_delivery_at),
+        )
+        if wait_seconds > 0:
+            logger.info(
+                "Waiting %.1f seconds before accepting automatic-delivery order %s.",
+                wait_seconds,
+                order_id,
+            )
+            await asyncio.sleep(wait_seconds)
+            if not auto_delivery_state()["enabled"]:
+                return
         try:
             destination = bot.get_channel(int(payload["delivery_channel_id"]))
             if destination is None:
@@ -2831,6 +2958,11 @@ async def process_auto_delivery_handoff(message: discord.Message) -> None:
             except (OSError, sqlite3.Error, ValueError):
                 logger.exception("Could not release underfunded order %s.", order_id)
             await report_auto_delivery_result(message, order_id, "pending")
+            await check_wallet_recharge_threshold(wallet_currency)
+            currency_label = WALLET_CURRENCY_LABELS.get(wallet_currency, wallet_currency.upper())
+            await notify_wallet_owner(
+                f"⚠️ لم أستطع قبول الطلب رقم `{order_id}` تلقائيًا بسبب نقص رصيد عملة **{currency_label}**."
+            )
             try:
                 await message.channel.send(
                     f"⚠️ لم يُرسل الطلب `#{order_id}`: رصيد {wallet_currency.upper()} غير كافٍ. "
@@ -2851,6 +2983,15 @@ async def process_auto_delivery_handoff(message: discord.Message) -> None:
                 payload["command"],
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            try:
+                record_auto_delivery_success()
+            except OSError:
+                logger.exception(
+                    "Could not persist the automatic-delivery interval after order %s.",
+                    order_id,
+                )
+                await asyncio.sleep(AUTO_DELIVERY_INTERVAL_SECONDS)
+            await check_wallet_recharge_threshold(wallet_currency)
             logger.info(
                 "Posted automatic %s delivery command for order %s in channel %s.",
                 payload["provider"], order_id, destination.id,

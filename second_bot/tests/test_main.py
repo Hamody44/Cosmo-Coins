@@ -968,6 +968,7 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.env_patch.stop)
         main.pending_currency_confirmations.clear()
         main.save_wallet_balances({"credit": 1_000, "adamc": 1_000, "rob": 1_000})
+        self.owner = SimpleNamespace(send=AsyncMock())
         self.destination = SimpleNamespace(
             id=456,
             guild=SimpleNamespace(id=123),
@@ -1009,7 +1010,7 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.auto_delivery_state()["processed_orders"], [81])
         self.assertEqual(
             [call.args[1] for call in transition.call_args_list],
-            ["claim", "complete", "claim", "release"],
+            ["claim", "complete"],
         )
 
     async def test_probot_auto_delivery_confirmation_uses_shared_type1_pipeline(self):
@@ -1071,26 +1072,131 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
                 amount=250,
             )
             message = SimpleNamespace(author=self.message.author, channel=self.source_channel, content=content)
-            with patch.object(main.bot, "get_channel", return_value=self.destination), patch.object(
-                main, "transition_auto_exchange_request", return_value=True
+            with (
+                patch.object(main, "AUTO_DELIVERY_INTERVAL_SECONDS", 0),
+                patch.object(main.bot, "get_channel", return_value=self.destination),
+                patch.object(main, "transition_auto_exchange_request", return_value=True),
             ):
                 await main.process_auto_delivery_handoff(message)
 
             self.destination.send.assert_awaited_once()
             self.assertEqual(main.load_wallet_balances()[wallet_currency], 750)
 
+    async def test_two_minute_interval_is_shared_across_currencies_and_persisted(self):
+        clock = [1_000.0]
+        waited_seconds = []
+
+        async def fast_forward(seconds):
+            waited_seconds.append(seconds)
+            clock[0] += seconds
+
+        rob_handoff = build_handoff_message(
+            secret=os.environ["COSMO_AUTO_DELIVERY_SECRET"],
+            issuer_id=111,
+            order_id=82,
+            guild_id=123,
+            delivery_channel_id=456,
+            user_id=789,
+            currency="Robux",
+            amount=250,
+        )
+        rob_message = SimpleNamespace(
+            author=self.message.author,
+            channel=self.source_channel,
+            content=rob_handoff,
+        )
+        fake_sleep = AsyncMock(side_effect=fast_forward)
+
+        with (
+            patch.object(main.time, "time", side_effect=lambda: clock[0]),
+            patch.object(main.asyncio, "sleep", new=fake_sleep),
+            patch.object(main.bot, "get_channel", return_value=self.destination),
+            patch.object(main, "transition_auto_exchange_request", return_value=True),
+        ):
+            await main.process_auto_delivery_handoff(self.message)
+            self.assertEqual(main.auto_delivery_state()["last_successful_delivery_at"], 1_000.0)
+
+            self.destination.send.reset_mock()
+            await main.process_auto_delivery_handoff(rob_message)
+
+        fake_sleep.assert_awaited_once_with(120.0)
+        self.assertEqual(waited_seconds, [120.0])
+        self.destination.send.assert_awaited_once()
+        self.assertEqual(self.destination.send.await_args.args[0], "!transfer 789 250")
+        self.assertEqual(
+            self.destination.send.await_args.kwargs["allowed_mentions"].to_dict(),
+            discord.AllowedMentions.none().to_dict(),
+        )
+        self.assertEqual(clock[0], 1_120.0)
+        self.assertEqual(main.auto_delivery_state()["last_successful_delivery_at"], 1_120.0)
+
     async def test_auto_delivery_leaves_underfunded_order_pending_without_sending(self):
-        main.save_wallet_balances({"credit": 100, "adamc": 1_000, "rob": 1_000})
-        with patch.object(main.bot, "get_channel", return_value=self.destination), patch.object(
-            main, "transition_auto_exchange_request", return_value=True
-        ) as transition:
+        main.save_wallet_balances({"credit": 150, "adamc": 1_000, "rob": 1_000})
+        with (
+            patch.object(main.bot, "get_channel", return_value=self.destination),
+            patch.object(main.bot, "get_user", return_value=self.owner),
+            patch.object(main, "transition_auto_exchange_request", return_value=True) as transition,
+        ):
             await main.process_auto_delivery_handoff(self.message)
 
         self.destination.send.assert_not_awaited()
-        self.assertEqual(main.load_wallet_balances()["credit"], 100)
+        self.assertEqual(main.load_wallet_balances()["credit"], 150)
         self.assertEqual(main.auto_delivery_state()["processed_orders"], [])
         self.assertEqual([call.args[1] for call in transition.call_args_list], ["claim", "release"])
+        self.owner.send.assert_awaited_once()
+        self.assertIn("81", self.owner.send.await_args.args[0])
+        self.assertIn("Credit", self.owner.send.await_args.args[0])
+        self.assertTrue(main.auto_delivery_state()["enabled"])
         self.assertTrue(any("غير كافٍ" in call.args[0] for call in self.source_channel.send.await_args_list))
+
+    async def test_underfunded_order_at_ten_percent_threshold_locks_auto_delivery(self):
+        main.save_wallet_balances({"credit": 100, "adamc": 1_000, "rob": 1_000})
+        with (
+            patch.object(main.bot, "get_channel", return_value=self.destination),
+            patch.object(main.bot, "get_user", return_value=self.owner),
+            patch.object(main, "transition_auto_exchange_request", return_value=True),
+        ):
+            await main.process_auto_delivery_handoff(self.message)
+
+        self.destination.send.assert_not_awaited()
+        self.assertFalse(main.auto_delivery_state()["enabled"])
+        self.assertEqual(self.owner.send.await_count, 2)
+        messages = [call.args[0] for call in self.owner.send.await_args_list]
+        self.assertTrue(any("محتاجة تتشحن" in text for text in messages))
+        self.assertTrue(any("الطلب رقم `81`" in text for text in messages))
+
+    async def test_ten_percent_of_baseline_sends_dm_and_disables_all_auto_delivery(self):
+        main.save_wallet_balances(
+            {"credit": 1_000, "adamc": 1_000, "rob": 1_000},
+            reset_baseline=True,
+        )
+        handoff = build_handoff_message(
+            secret=os.environ["COSMO_AUTO_DELIVERY_SECRET"],
+            issuer_id=111,
+            order_id=85,
+            guild_id=123,
+            delivery_channel_id=456,
+            user_id=789,
+            currency="ProBot Credits",
+            amount=900,
+        )
+        message = SimpleNamespace(author=self.message.author, channel=self.source_channel, content=handoff)
+
+        with (
+            patch.object(main.bot, "get_channel", return_value=self.destination),
+            patch.object(main.bot, "get_user", return_value=self.owner),
+            patch.object(main, "transition_auto_exchange_request", return_value=True),
+        ):
+            await main.process_auto_delivery_handoff(message)
+
+        self.assertEqual(main.load_wallet_balances()["credit"], 100)
+        self.assertEqual(main.load_wallet_baselines()["credit"], 1_000)
+        self.assertFalse(main.auto_delivery_state()["enabled"])
+        self.owner.send.assert_awaited_once()
+        alert = self.owner.send.await_args.args[0]
+        self.assertIn("Credit", alert)
+        self.assertIn("10%", alert)
+        self.assertIn("تم إيقاف التسليم التلقائي لجميع العملات", alert)
 
     async def test_untrusted_non_bot_message_is_ignored(self):
         self.message.author.bot = False
@@ -1140,6 +1246,19 @@ class WalletCurrencyTransferTests(unittest.IsolatedAsyncioTestCase):
             channel=SimpleNamespace(id=channel_id),
             send=send or AsyncMock(),
         )
+
+    async def test_set_wallet_records_baseline_and_reservations_preserve_it(self):
+        ctx = self.make_context()
+
+        await main.set_wallet.callback(ctx, "10m", "20m", "30m")
+        await main.reserve_wallet_balance("credit", 9_000_000)
+
+        self.assertEqual(main.load_wallet_baselines(), {
+            "credit": 10_000_000,
+            "adamc": 20_000_000,
+            "rob": 30_000_000,
+        })
+        self.assertEqual(main.load_wallet_balances()["credit"], 1_000_000)
 
     async def test_ta_deducts_adamc_only_after_command_is_sent(self):
         ctx = self.make_context()
@@ -1218,12 +1337,34 @@ class WalletCurrencyTransferTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tr_deducts_rob_from_its_wallet_balance(self):
         ctx = self.make_context()
-        target = SimpleNamespace(mention="<@123>")
+        target = SimpleNamespace(id=123, mention="<@123>")
 
         await main.transfer_rob.callback(ctx, target, "1m")
 
         self.assertEqual(main.load_wallet_balances()["rob"], 1_000_000)
-        self.assertEqual(ctx.send.await_args.args[0], "!transfer <@123> 1m")
+        self.assertEqual(ctx.send.await_args.args[0], "!transfer 123 1m")
+
+    async def test_transfer_commands_append_trailing_text_and_tr_uses_id(self):
+        target = SimpleNamespace(id=123, mention="<@123>")
+        cases = (
+            (main.transfer_credit, "#credit <@123> 1m hi"),
+            (main.transfer_adamc, "T <@123> 1m hi"),
+            (main.transfer_rob, "!transfer 123 1m hi"),
+        )
+
+        for command, expected_message in cases:
+            with self.subTest(message=expected_message):
+                ctx = self.make_context()
+                await command.callback(ctx, target, "1m", extra="hi")
+                self.assertEqual(ctx.send.await_args.args[0], expected_message)
+
+    async def test_transfer_commands_trim_empty_trailing_text(self):
+        target = SimpleNamespace(id=123, mention="<@123>")
+        ctx = self.make_context()
+
+        await main.transfer_rob.callback(ctx, target, "1m", extra="   ")
+
+        self.assertEqual(ctx.send.await_args.args[0], "!transfer 123 1m")
 
     async def test_concurrent_ta_commands_cannot_spend_the_same_balance_twice(self):
         main.save_wallet_balances({"credit": 0, "adamc": 1_000_000, "rob": 0})
