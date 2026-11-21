@@ -688,6 +688,8 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, ["12.50", "٣"])
         request = fake_models.generate_content.await_args.kwargs
         self.assertEqual(request["model"], "vision-test")
+        self.assertNotIn("CAPTCHA", request["contents"][0].upper())
+        self.assertIn("الأرقام الخمسة الظاهرة في الصورة", request["contents"][0])
         image_part = request["contents"][1].inline_data
         self.assertEqual(image_part.mime_type, "image/png")
         self.assertEqual(image_part.data, b"image-bytes")

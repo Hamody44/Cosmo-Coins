@@ -1611,7 +1611,7 @@ async def extract_numbers_from_image(
     api_key, configured_model = load_vision_config()
     selected_model = model or configured_model
     prompt = (
-        "اقرأ رمز CAPTCHA المكوّن من خمسة أرقام فقط. "
+        "اقرأ الأرقام الخمسة الظاهرة في الصورة فقط. "
         "أعد كائن JSON صالحًا فقط، دون Markdown أو شرح، بهذا الشكل بالضبط: "
         '{"numbers":["12345"]}. '
         "يجب أن تحتوي numbers على عنصر واحد فقط. "
