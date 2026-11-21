@@ -976,6 +976,42 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             ["claim", "complete", "claim", "release"],
         )
 
+    async def test_probot_auto_delivery_confirmation_uses_shared_type1_pipeline(self):
+        with patch.object(main.bot, "get_channel", return_value=self.destination), patch.object(
+            main, "transition_auto_exchange_request", return_value=True
+        ):
+            await main.process_auto_delivery_handoff(self.message)
+
+        self.assertEqual(main.pending_currency_confirmations[456], "type1")
+        attachment = SimpleNamespace(
+            content_type="image/png",
+            filename="probot-confirmation.png",
+            size=4,
+            read=AsyncMock(return_value=b"automatic-probot-confirmation"),
+        )
+        response_message = SimpleNamespace(channel=self.destination, attachments=[attachment])
+        with (
+            patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}),
+            patch.object(main, "detect_image_style", return_value="type1"),
+            patch.object(main, "extract_type1_hybrid", new=AsyncMock(return_value={
+                "result": "19384", "source": "Gemini (gemini-3.5-flash-lite)",
+            })) as type1_pipeline,
+        ):
+            await main.process_pending_currency_confirmation(response_message)
+
+        type1_pipeline.assert_awaited_once_with(
+            b"automatic-probot-confirmation",
+            "image/png",
+            ocr_space_key="ocr-test-key",
+        )
+        self.destination.send.assert_awaited()
+        self.assertEqual(self.destination.send.await_args.args[0], "19384")
+        self.assertEqual(
+            self.destination.send.await_args.kwargs["allowed_mentions"].to_dict(),
+            discord.AllowedMentions.none().to_dict(),
+        )
+        self.assertNotIn(456, main.pending_currency_confirmations)
+
     async def test_disabled_auto_delivery_leaves_order_for_manual_handling(self):
         main.write_runtime_json(self.state_path, {"enabled": False, "processed_orders": []})
         with patch.object(main.bot, "get_channel", return_value=self.destination):
@@ -1108,6 +1144,41 @@ class WalletCurrencyTransferTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(main.load_wallet_balances()["credit"], 1_000_000)
         self.assertEqual(ctx.send.await_args.args[0], "#credit <@123> 1m")
+
+    async def test_tc_confirmation_image_uses_shared_type1_pipeline(self):
+        ctx = self.make_context()
+        target = SimpleNamespace(mention="<@123>")
+        await main.transfer_credit.callback(ctx, target, "100")
+        self.assertEqual(main.pending_currency_confirmations[555], "type1")
+        attachment = SimpleNamespace(
+            content_type="image/png",
+            filename="confirmation.png",
+            size=4,
+            read=AsyncMock(return_value=b"probot-confirmation"),
+        )
+        response_channel = SimpleNamespace(id=555, send=AsyncMock())
+        response_message = SimpleNamespace(channel=response_channel, attachments=[attachment])
+        with (
+            patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}),
+            patch.object(main, "detect_image_style", return_value="type1"),
+            patch.object(main, "extract_type1_hybrid", new=AsyncMock(return_value={
+                "result": "48291", "source": "Gemini (gemini-3.5-flash-lite)",
+            })) as type1_pipeline,
+        ):
+            await main.process_pending_currency_confirmation(response_message)
+
+        type1_pipeline.assert_awaited_once_with(
+            b"probot-confirmation",
+            "image/png",
+            ocr_space_key="ocr-test-key",
+        )
+        response_channel.send.assert_awaited_once()
+        self.assertEqual(response_channel.send.await_args.args[0], "48291")
+        self.assertEqual(
+            response_channel.send.await_args.kwargs["allowed_mentions"].to_dict(),
+            discord.AllowedMentions.none().to_dict(),
+        )
+        self.assertNotIn(555, main.pending_currency_confirmations)
 
     async def test_tr_deducts_rob_from_its_wallet_balance(self):
         ctx = self.make_context()

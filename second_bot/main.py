@@ -2361,7 +2361,7 @@ async def send_currency_command(
 @bot.command(name="tc")
 @commands.check(check_control_owner)
 async def transfer_credit(ctx: commands.Context, target: discord.Member, amount: str) -> None:
-    """Send a ProBot Credit command; type1 confirmation remains available for later use."""
+    """Send a ProBot Credit command; its confirmation uses the shared type1 OCR chain."""
     await send_currency_command(ctx, target, amount, "#credit", "type1", wallet_currency="credit")
 
 
@@ -2833,7 +2833,7 @@ async def process_auto_delivery_handoff(message: discord.Message) -> None:
 
 
 async def process_pending_currency_confirmation(message: discord.Message) -> None:
-    """Read a pending currency confirmation image and send only its answer."""
+    """Read pending confirmations; type1 images use the same OCR chain as ``numbers``."""
     channel_id = getattr(message.channel, "id", None)
     expected_type = pending_currency_confirmations.get(channel_id)
     if expected_type is None:
