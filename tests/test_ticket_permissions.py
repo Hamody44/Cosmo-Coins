@@ -7,7 +7,16 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 import database
-from cogs.tickets import TicketControlView, Tickets, can_manage_ticket_member, serialize_ticket_creation
+from cogs.tickets import (
+    TicketControlView,
+    Tickets,
+    can_manage_ticket_member,
+    get_ticket_ai_state,
+    is_ticket_ai_enabled,
+    serialize_ticket_creation,
+    set_ticket_ai_disabled,
+    set_ticket_ai_enabled,
+)
 
 
 class TicketPermissionTests(unittest.TestCase):
@@ -76,6 +85,32 @@ class TicketPermissionTests(unittest.TestCase):
                 cur_b.execute("SELECT ticket_log FROM settings WHERE guild_id = ?", (222,))
                 self.assertEqual(cur_b.fetchone()[0], 2002)
                 conn_b.close()
+            finally:
+                os.chdir(original_cwd)
+
+    def test_ticket_ai_global_and_local_settings_are_separate(self):
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                os.chdir(temp_dir)
+                os.mkdir("guilds_data")
+                guild_id, channel_id = 444, 555
+                conn, cur = database.get_guild_db(guild_id)
+                cur.execute(
+                    "INSERT INTO tickets (channel_id, user_id, opened_at, is_closed) VALUES (?, ?, ?, 0)",
+                    (channel_id, 777, "now"),
+                )
+                conn.commit()
+                conn.close()
+
+                self.assertTrue(is_ticket_ai_enabled(guild_id))
+                self.assertEqual(get_ticket_ai_state(guild_id, channel_id), {"disabled": False})
+                self.assertTrue(set_ticket_ai_disabled(guild_id, channel_id, True))
+                self.assertEqual(get_ticket_ai_state(guild_id, channel_id), {"disabled": True})
+
+                set_ticket_ai_enabled(guild_id, False)
+                self.assertFalse(is_ticket_ai_enabled(guild_id))
+                self.assertEqual(get_ticket_ai_state(guild_id, channel_id), {"disabled": True})
             finally:
                 os.chdir(original_cwd)
 

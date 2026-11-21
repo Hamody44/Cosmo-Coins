@@ -57,6 +57,61 @@ def can_manage_tickets(ctx: commands.Context) -> bool:
     return can_manage_ticket_member(ctx.guild, ctx.author, admin_role_id, owner_role_id) or is_bot_admin(ctx)
 
 
+def is_ticket_ai_enabled(guild_id: int) -> bool:
+    """Return the server-wide ticket AI setting; missing/NULL means enabled."""
+    conn, cur = get_guild_db(guild_id)
+    try:
+        row = cur.execute("SELECT ticket_ai_enabled FROM settings WHERE guild_id = ?", (guild_id,)).fetchone()
+        return not row or row[0] is None or bool(row[0])
+    finally:
+        conn.close()
+
+
+def set_ticket_ai_enabled(guild_id: int, enabled: bool) -> None:
+    conn, cur = get_guild_db(guild_id)
+    try:
+        cur.execute(
+            "INSERT INTO settings (guild_id, ticket_ai_enabled) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET ticket_ai_enabled = excluded.ticket_ai_enabled",
+            (guild_id, int(bool(enabled))),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_ticket_ai_state(guild_id: int, channel_id: int):
+    """Return whether a channel is an open ticket and whether its AI was stopped."""
+    conn, cur = get_guild_db(guild_id)
+    try:
+        row = cur.execute(
+            "SELECT is_closed, COALESCE(ticket_ai_disabled, 0) FROM tickets WHERE channel_id = ?",
+            (channel_id,),
+        ).fetchone()
+        if not row or int(row[0] or 0):
+            return None
+        return {"disabled": bool(row[1])}
+    finally:
+        conn.close()
+
+
+def set_ticket_ai_disabled(guild_id: int, channel_id: int, disabled: bool) -> bool:
+    conn, cur = get_guild_db(guild_id)
+    try:
+        cur.execute(
+            "UPDATE tickets SET ticket_ai_disabled = ? WHERE channel_id = ? AND is_closed = 0",
+            (int(bool(disabled)), channel_id),
+        )
+        changed = cur.rowcount == 1
+        if changed:
+            conn.commit()
+        else:
+            conn.rollback()
+        return changed
+    finally:
+        conn.close()
+
+
 async def sync_ticket_staff_roles(guild, previous_role_ids=(), active_role_ids=()):
     """Ensure configured staff roles can see existing tickets after role setup/change."""
     previous_role_ids = {int(role_id) for role_id in previous_role_ids if role_id}
@@ -326,6 +381,7 @@ class TicketCreateView(discord.ui.View):
         
         # إرسال الرسالة مع أزرار التحكم
         await ticket_channel.send(f"{user.mention}", embed=embed, view=TicketControlView())
+        await ticket_channel.send("🤖 كيف يمكنني مساعدتك؟ اكتب مشكلتك هنا وسأحاول مساعدتك مباشرة.")
 
         await interaction.followup.send(f"✅ تم إنشاء تذكرتك بنجاح: {ticket_channel.mention}", ephemeral=True)
 
@@ -355,6 +411,22 @@ class Tickets(commands.Cog):
             embed.set_thumbnail(url=ctx.guild.icon.url)
 
         await ctx.send(embed=embed, view=TicketCreateView())
+
+    @commands.hybrid_command(
+        name="toggle_ticket_ai",
+        aliases=["تفعيل_ذكاء_التكت", "ذكاء_التكت"],
+        description="تفعيل أو تعطيل مساعد الذكاء الاصطناعي في جميع التكتات",
+    )
+    @commands.has_permissions(manage_guild=True)
+    async def toggle_ticket_ai(self, ctx: commands.Context):
+        if not ctx.guild:
+            return await ctx.send("⛔ هذا الأمر مخصص للسيرفرات فقط.")
+        currently_enabled = is_ticket_ai_enabled(ctx.guild.id)
+        set_ticket_ai_enabled(ctx.guild.id, not currently_enabled)
+        if currently_enabled:
+            await ctx.send("⛔ تم تعطيل مساعد الذكاء الاصطناعي في جميع التكتات الحالية والمستقبلية.")
+        else:
+            await ctx.send("✅ تم تفعيل مساعد الذكاء الاصطناعي في جميع التكتات.")
 
     @commands.hybrid_command(name="set_ticket_log", aliases=["لوج_التكت"], description="تحديد روم إرسال سجلات وتفريغ التذاكر بعد حذفها")
     async def set_ticket_log(self, ctx: commands.Context, channel: discord.TextChannel):

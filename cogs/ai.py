@@ -13,6 +13,7 @@ from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
 from database import GLOBAL_DB_PATH, PRIMARY_OWNER_ID, get_guild_db
+from cogs.tickets import get_ticket_ai_state, is_ticket_ai_enabled, set_ticket_ai_disabled
 
 
 PRIMARY_REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -785,6 +786,38 @@ class GeminiAI(commands.Cog):
             return
 
         if not self.is_ai_enabled(message.guild.id):
+            return
+
+        ticket_state = get_ticket_ai_state(message.guild.id, message.channel.id)
+        if ticket_state is not None:
+            normalized_content = message.content.strip().casefold()
+            if normalized_content == "توقف":
+                if set_ticket_ai_disabled(message.guild.id, message.channel.id, True):
+                    await message.reply("⛔ تم إيقاف مساعد الذكاء الاصطناعي في هذه التذكرة فقط.")
+                return
+            if ticket_state["disabled"] or not is_ticket_ai_enabled(message.guild.id):
+                return
+            # Discord commands remain handled by discord.py and do not trigger a second AI reply.
+            if not message.content.strip() or message.content.lstrip().startswith(("!", "/")):
+                return
+
+            server_context = await self.get_server_data_context(message.guild, message.author)
+            if await self.handle_request(
+                await self.bot.get_context(message), message.content.strip(), server_context
+            ):
+                return
+            async with message.channel.typing():
+                reply_text = await self.generate_response(
+                    message.author.id,
+                    message.content.strip(),
+                    message.guild.id,
+                    message.channel.id,
+                    server_context=server_context,
+                )
+            if len(reply_text) <= 1900:
+                await message.reply(reply_text)
+            else:
+                await self.send_split_message(message.channel, f"{message.author.mention}\n{reply_text}")
             return
 
         if self.bot.user in message.mentions:

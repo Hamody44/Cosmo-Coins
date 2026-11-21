@@ -156,7 +156,8 @@ def get_guild_db(guild_id: int):
         blacklist_role_id INTEGER,
         exchange_enabled INTEGER DEFAULT 1,
         double_event_end INTEGER DEFAULT 0,
-        spending_balance INTEGER DEFAULT 0
+        spending_balance INTEGER DEFAULT 0,
+        ticket_ai_enabled INTEGER NOT NULL DEFAULT 1
     )''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS premium_info (
@@ -246,7 +247,8 @@ def get_guild_db(guild_id: int):
         user_id INTEGER,
         opened_at TEXT,
         closed_by INTEGER DEFAULT NULL,
-        is_closed INTEGER DEFAULT 0
+        is_closed INTEGER DEFAULT 0,
+        ticket_ai_disabled INTEGER NOT NULL DEFAULT 0
     )''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS budget_logs (
@@ -406,6 +408,8 @@ def get_guild_db(guild_id: int):
     _ensure_guild_db_column(cur, "settings", "exchange_room", "INTEGER", schema_key)
     _ensure_guild_db_column(cur, "settings", "ticket_log", "INTEGER", schema_key)
     _ensure_guild_db_column(cur, "settings", "invite_log", "INTEGER", schema_key)
+    _ensure_guild_db_column(cur, "settings", "ticket_ai_enabled", "INTEGER NOT NULL DEFAULT 1", schema_key)
+    _ensure_guild_db_column(cur, "tickets", "ticket_ai_disabled", "INTEGER NOT NULL DEFAULT 0", schema_key)
     with _guild_schema_migration_lock:
         if _ensure_guild_db_column(cur, "settings", "owner_role_id", "INTEGER", schema_key):
             cur.execute(
