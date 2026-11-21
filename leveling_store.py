@@ -6,7 +6,9 @@ from zoneinfo import ZoneInfo
 
 from database import get_guild_db
 
-XP_PER_LEVEL = 100
+MESSAGES_PER_LEVEL = 100
+# Compatibility alias for older integrations that imported XP_PER_LEVEL.
+XP_PER_LEVEL = MESSAGES_PER_LEVEL
 XP_COOLDOWN_SECONDS = 30
 SPAM_WINDOW_SECONDS = 10
 SPAM_MESSAGE_THRESHOLD = 5
@@ -20,7 +22,7 @@ def ensure_level_config(guild_id: int) -> dict:
     cur.execute("INSERT OR IGNORE INTO leveling_config (guild_id) VALUES (?)", (guild_id,))
     conn.commit()
     cur.execute(
-        "SELECT is_enabled, milestone_reward, announcement_channel_id, last_daily_report_date, enabled_since "
+        "SELECT is_enabled, salary_enabled, milestone_reward, announcement_channel_id, last_daily_report_date, enabled_since "
         "FROM leveling_config WHERE guild_id = ?",
         (guild_id,),
     )
@@ -28,21 +30,30 @@ def ensure_level_config(guild_id: int) -> dict:
     conn.close()
     return {
         "enabled": bool(row[0]),
-        "milestone_reward": int(row[1] or 0),
-        "announcement_channel_id": row[2],
-        "last_daily_report_date": row[3],
-        "enabled_since": float(row[4]) if row[4] is not None else None,
+        "salary_enabled": bool(row[1]),
+        "milestone_reward": int(row[2] or 0),
+        "announcement_channel_id": row[3],
+        "last_daily_report_date": row[4],
+        "enabled_since": float(row[5]) if row[5] is not None else None,
     }
 
 
 def should_track_channel(guild_id: int, channel_id: int) -> bool:
     conn, cur = get_guild_db(guild_id)
+    cur.execute("INSERT OR IGNORE INTO leveling_config (guild_id) VALUES (?)", (int(guild_id),))
     cur.execute(
-        "SELECT c.is_enabled FROM leveling_config c "
+        "SELECT c.is_enabled, c.salary_enabled FROM leveling_config c "
         "JOIN leveling_channels ch ON ch.channel_id = ? WHERE c.guild_id = ?",
         (int(channel_id), int(guild_id)),
     )
     row = cur.fetchone()
+    conn.close()
+    return bool(row and (row[0] or row[1]))
+
+
+def is_leveling_enabled(guild_id: int) -> bool:
+    conn, cur = get_guild_db(guild_id)
+    row = cur.execute("SELECT is_enabled FROM leveling_config WHERE guild_id = ?", (int(guild_id),)).fetchone()
     conn.close()
     return bool(row and row[0])
 
@@ -53,7 +64,7 @@ def set_leveling_enabled(guild_id: int, enabled: bool, now: float | None = None)
     cur.execute(
         "INSERT INTO leveling_config (guild_id, is_enabled, enabled_since) VALUES (?, ?, ?) "
         "ON CONFLICT(guild_id) DO UPDATE SET is_enabled = excluded.is_enabled, "
-        "enabled_since = CASE WHEN excluded.is_enabled = 0 THEN NULL "
+        "enabled_since = CASE WHEN excluded.is_enabled = 0 AND salary_enabled = 0 THEN NULL "
         "WHEN leveling_config.is_enabled = 0 THEN excluded.enabled_since "
         "ELSE leveling_config.enabled_since END",
         (guild_id, int(enabled), now if enabled else None),
@@ -68,6 +79,21 @@ def set_milestone_reward(guild_id: int, amount: int) -> None:
         "INSERT INTO leveling_config (guild_id, milestone_reward) VALUES (?, ?) "
         "ON CONFLICT(guild_id) DO UPDATE SET milestone_reward = excluded.milestone_reward",
         (guild_id, int(amount)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_salary_enabled(guild_id: int, enabled: bool) -> None:
+    now = time.time()
+    conn, cur = get_guild_db(guild_id)
+    cur.execute(
+        "INSERT INTO leveling_config (guild_id, salary_enabled, enabled_since) VALUES (?, ?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET salary_enabled = excluded.salary_enabled, "
+        "enabled_since = CASE WHEN excluded.salary_enabled = 1 AND leveling_config.enabled_since IS NULL "
+        "THEN excluded.enabled_since WHEN excluded.salary_enabled = 0 AND leveling_config.is_enabled = 0 "
+        "THEN NULL ELSE leveling_config.enabled_since END",
+        (int(guild_id), int(bool(enabled)), now if enabled else None),
     )
     conn.commit()
     conn.close()
@@ -181,22 +207,29 @@ def record_pending_message(guild_id: int, user_id: int, message_id: int, channel
 
 
 def mature_pending_messages(guild_id: int, now: float | None = None, limit: int = 1000) -> list[dict]:
-    """Accept messages older than the spam window and award capped XP transactionally."""
+    """Accept messages older than the spam window and record level-up/payout events."""
     now = float(now or time.time())
     limit = max(1, min(int(limit), 5000))
     conn, cur = get_guild_db(guild_id)
     conn.execute("BEGIN IMMEDIATE")
     conn.execute("INSERT OR IGNORE INTO leveling_config (guild_id) VALUES (?)", (guild_id,))
-    reward_row = conn.execute(
-        "SELECT milestone_reward FROM leveling_config WHERE guild_id = ?", (guild_id,)
+    config_row = conn.execute(
+        "SELECT is_enabled, salary_enabled, milestone_reward FROM leveling_config WHERE guild_id = ?", (guild_id,)
     ).fetchone()
-    milestone_reward = int(reward_row[0] or 0) if reward_row else 0
+    level_enabled = bool(config_row and config_row[0])
+    salary_enabled = bool(config_row and config_row[1])
+    milestone_reward = int(config_row[2] or 0) if config_row else 0
     pending = conn.execute(
         "SELECT message_id, user_id, channel_id, created_at FROM leveling_pending_messages "
         "WHERE created_at <= ? ORDER BY created_at, message_id LIMIT ?",
         (now - SPAM_WINDOW_SECONDS, limit),
     ).fetchall()
     milestone_payouts = []
+    if not level_enabled and not salary_enabled:
+        conn.execute("DELETE FROM leveling_pending_messages WHERE created_at <= ?", (now - SPAM_WINDOW_SECONDS,))
+        conn.commit()
+        conn.close()
+        return milestone_payouts
 
     for message_id, user_id, channel_id, created_at in pending:
         user_id = int(user_id)
@@ -212,8 +245,11 @@ def mature_pending_messages(guild_id: int, now: float | None = None, limit: int 
             "SELECT total_points, last_point_at FROM leveling_users WHERE user_id = ?",
             (user_id,),
         ).fetchone()
-        old_points, last_point_at = int(profile[0] or 0), float(profile[1] or 0)
-        points_awarded = int(last_point_at == 0 or created_at - last_point_at >= XP_COOLDOWN_SECONDS)
+        old_points = int(profile[0] or 0)
+        # Every accepted (non-spam) message counts toward levels while level
+        # tracking is enabled. Salary events are still recorded when levels
+        # are disabled, but they do not advance the member's level.
+        points_awarded = int(level_enabled)
         new_points = old_points + points_awarded
 
         conn.execute(
@@ -226,24 +262,38 @@ def mature_pending_messages(guild_id: int, now: float | None = None, limit: int 
                 "UPDATE leveling_users SET total_points = ?, last_point_at = ? WHERE user_id = ?",
                 (new_points, created_at, user_id),
             )
-            old_level = old_points // XP_PER_LEVEL + 1
-            new_level = new_points // XP_PER_LEVEL + 1
-            if milestone_reward > 0 and new_level > old_level:
+            old_level = old_points // MESSAGES_PER_LEVEL + 1
+            new_level = new_points // MESSAGES_PER_LEVEL + 1
+            if new_level > old_level:
+                for reached_level in range(old_level + 1, new_level + 1):
+                    milestone_payouts.append({
+                        "payout_key": None,
+                        "user_id": user_id,
+                        "amount": 0,
+                        "milestone": reached_level,
+                        "level_up": True,
+                        "status": "level_up",
+                    })
                 first_milestone = (old_level // 10 + 1) * 10
                 for milestone in range(first_milestone, new_level + 1, 10):
-                    payout_key = f"milestone:{guild_id}:{user_id}:{milestone}"
-                    cur.execute(
-                        "INSERT OR IGNORE INTO leveling_payouts "
-                        "(payout_key, user_id, payout_type, amount, status, created_at, updated_at) "
-                        "VALUES (?, ?, 'milestone', ?, 'pending', ?, ?)",
-                        (payout_key, user_id, milestone_reward, created_at, now),
-                    )
-                    if cur.rowcount:
+                    if milestone_reward > 0:
+                        payout_key = f"milestone:{guild_id}:{user_id}:{milestone}"
+                        cur.execute(
+                            "INSERT OR IGNORE INTO leveling_payouts "
+                            "(payout_key, user_id, payout_type, amount, status, created_at, updated_at) "
+                            "VALUES (?, ?, 'milestone', ?, 'pending', ?, ?)",
+                            (payout_key, user_id, milestone_reward, created_at, now),
+                        )
+                    else:
+                        payout_key = None
+                    if milestone_reward == 0 or cur.rowcount:
                         milestone_payouts.append({
                             "payout_key": payout_key,
                             "user_id": user_id,
                             "amount": milestone_reward,
                             "milestone": milestone,
+                            "level_up": True,
+                            "status": "level_up" if milestone_reward == 0 else "pending",
                         })
         conn.execute("DELETE FROM leveling_pending_messages WHERE message_id = ?", (int(message_id),))
 
@@ -270,8 +320,8 @@ def get_level_profile(guild_id: int, user_id: int) -> dict:
         (points, points, int(user_id)),
     ).fetchone()[0])
     conn.close()
-    level = points // XP_PER_LEVEL + 1
-    progress = points % XP_PER_LEVEL
+    level = points // MESSAGES_PER_LEVEL + 1
+    progress = points % MESSAGES_PER_LEVEL
     return {
         "user_id": int(user_id),
         "points": points,
@@ -279,7 +329,7 @@ def get_level_profile(guild_id: int, user_id: int) -> dict:
         "rank": rank,
         "messages": messages,
         "progress": progress,
-        "next_level_points": XP_PER_LEVEL - progress,
+        "next_level_points": MESSAGES_PER_LEVEL - progress,
     }
 
 
@@ -287,16 +337,16 @@ def get_level_leaderboard(guild_id: int, start_at: int | None, end_at: int | Non
     conn, cur = get_guild_db(guild_id)
     if start_at is None:
         query = (
-            "SELECT u.user_id, u.total_points, COUNT(e.message_id) "
+            "SELECT u.user_id, u.total_points, COALESCE(SUM(e.points_awarded), 0) "
             "FROM leveling_users u JOIN leveling_message_events e ON e.user_id = u.user_id "
-            "GROUP BY u.user_id ORDER BY u.total_points DESC, COUNT(e.message_id) DESC, u.user_id ASC LIMIT ?"
+            "GROUP BY u.user_id ORDER BY u.total_points DESC, COALESCE(SUM(e.points_awarded), 0) DESC, u.user_id ASC LIMIT ?"
         )
         rows = cur.execute(query, (int(limit),)).fetchall()
     else:
         query = (
-            "SELECT user_id, SUM(points_awarded), COUNT(*) FROM leveling_message_events "
-            "WHERE created_at >= ? AND created_at < ? GROUP BY user_id "
-            "ORDER BY SUM(points_awarded) DESC, COUNT(*) DESC, user_id ASC LIMIT ?"
+            "SELECT user_id, SUM(points_awarded), SUM(points_awarded) FROM leveling_message_events "
+            "WHERE created_at >= ? AND created_at < ? AND points_awarded > 0 GROUP BY user_id "
+            "ORDER BY SUM(points_awarded) DESC, user_id ASC LIMIT ?"
         )
         rows = cur.execute(query, (int(start_at), int(end_at), int(limit))).fetchall()
     conn.close()
@@ -304,6 +354,24 @@ def get_level_leaderboard(guild_id: int, start_at: int | None, end_at: int | Non
         {"user_id": int(row[0]), "points": int(row[1] or 0), "messages": int(row[2] or 0)}
         for row in rows
     ]
+
+
+def get_salary_leaderboard(guild_id: int, start_at: int | None, end_at: int | None, limit: int = 5) -> list[dict]:
+    """Rank members by accepted messages independently of level tracking."""
+    conn, cur = get_guild_db(guild_id)
+    clauses = []
+    params: list[object] = []
+    if start_at is not None:
+        clauses.extend(["created_at >= ?", "created_at < ?"])
+        params.extend([int(start_at), int(end_at)])
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = cur.execute(
+        "SELECT user_id, COUNT(*) FROM leveling_message_events "
+        f"{where} GROUP BY user_id ORDER BY COUNT(*) DESC, user_id ASC LIMIT ?",
+        (*params, max(1, min(int(limit), 100))),
+    ).fetchall()
+    conn.close()
+    return [{"user_id": int(row[0]), "messages": int(row[1] or 0), "points": int(row[1] or 0)} for row in rows]
 
 
 def set_salary_tier(guild_id: int, threshold: int, amount: int) -> None:

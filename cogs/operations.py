@@ -119,28 +119,28 @@ class Operations(commands.Cog):
         if not ctx.guild:
             return await ctx.send("⛔ استخدم الأمر داخل السيرفر.")
         config = await asyncio.to_thread(get_level_admin_config, ctx.guild.id)
-        await ctx.send(embed=discord.Embed(title=f"إعدادات اللفلات والفويس | {ctx.guild.name}", description=f"اللفلات: **{'مفعلة' if config['enabled'] else 'مغلقة'}**\nالفويس: **{'مفعل' if config['voice_enabled'] else 'مغلق'}**\nالرومات: {', '.join(f'<#{x}>' for x in config['channels']) or 'لا يوجد'}\nمكافأة المستوى: `{config['milestone_reward']:,}`\nشرائح الرواتب: `{config['salary_tiers']}`", color=discord.Color.blurple()))
+        await ctx.send(embed=discord.Embed(title=f"إعدادات اللفلات والفويس | {ctx.guild.name}", description=f"اللفلات: **{'مفعلة' if config['enabled'] else 'مغلقة'}**\nالرواتب: **{'مفعلة' if config['salary_enabled'] else 'مغلقة'}**\nالفويس: **{'مفعل' if config['voice_enabled'] else 'مغلق'}**\nالرومات: {', '.join(f'<#{x}>' for x in config['channels']) or 'لا يوجد'}\nمكافأة المستوى: `{config['milestone_reward']:,}`\nشرائح الرواتب: `{config['salary_tiers']}`", color=discord.Color.blurple()))
 
-    @commands.hybrid_command(name="level_adjust", aliases=["تصحيح_نقاط"], description="تصحيح نقاط عضو مع سبب إلزامي")
+    @commands.hybrid_command(name="level_adjust", aliases=["تصحيح_نقاط", "تصحيح_رسائل"], description="تصحيح عدد رسائل عضو مع سبب إلزامي")
     async def level_adjust(self, ctx: commands.Context, member: discord.Member, points: int, *, reason: str):
         if not _has_guild_admin(ctx):
-            return await ctx.send("⛔ لا تملك صلاحية تصحيح النقاط.")
+            return await ctx.send("⛔ لا تملك صلاحية تصحيح الرسائل.")
         if not reason.strip() or points < 0:
-            return await ctx.send("❌ أدخل نقاطًا غير سالبة وسببًا واضحًا للتعديل.")
+            return await ctx.send("❌ أدخل عدداً غير سالب من الرسائل وسبباً واضحاً للتعديل.")
         before = await asyncio.to_thread(get_level_profile, ctx.guild.id, member.id)
         result = await asyncio.to_thread(adjust_level_points, ctx.guild.id, member.id, points)
         await asyncio.to_thread(audit.record_ctx, database.GLOBAL_DB_PATH, "level_points_adjusted", ctx, target_user_id=member.id, reason=reason, before=before, after=result)
-        await ctx.send(f"✅ تم تصحيح نقاط {member.mention} من `{result['before']}` إلى `{result['after']}`. السبب: {reason}")
+        await ctx.send(f"✅ تم تصحيح رسائل {member.mention} من `{result['before']}` إلى `{result['after']}`. السبب: {reason}")
 
-    @commands.hybrid_command(name="level_reset", aliases=["مسح_نقاط"], description="مسح نقاط ووقت فويس عضو مع الاحتفاظ بسجل التدقيق")
+    @commands.hybrid_command(name="level_reset", aliases=["مسح_نقاط", "مسح_رسائل"], description="مسح رسائل ووقت فويس عضو مع الاحتفاظ بسجل التدقيق")
     async def level_reset(self, ctx: commands.Context, member: discord.Member, *, reason: str):
         if not _has_guild_admin(ctx):
-            return await ctx.send("⛔ لا تملك صلاحية مسح النقاط.")
+            return await ctx.send("⛔ لا تملك صلاحية مسح الرسائل.")
         if not reason.strip():
             return await ctx.send("❌ السبب إلزامي.")
         result = await asyncio.to_thread(reset_level_member, ctx.guild.id, member.id)
         await asyncio.to_thread(audit.record_ctx, database.GLOBAL_DB_PATH, "level_member_reset", ctx, target_user_id=member.id, reason=reason, after=result)
-        await ctx.send(f"✅ تم تصفير نقاط ووقت فويس {member.mention}. السبب: {reason}")
+        await ctx.send(f"✅ تم تصفير رسائل ووقت فويس {member.mention}. السبب: {reason}")
 
     @commands.hybrid_command(name="voice_status", aliases=["حالة_الفويس"], description="عرض وقت فويس عضو")
     async def voice_status(self, ctx: commands.Context, member: discord.Member | None = None):

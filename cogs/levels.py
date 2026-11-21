@@ -24,6 +24,7 @@ from leveling_store import (
     finish_daily_report,
     get_level_channels,
     get_level_leaderboard,
+    get_salary_leaderboard,
     get_level_profile,
     get_report_status,
     get_retryable_payouts,
@@ -42,6 +43,7 @@ from leveling_store import (
     set_announcement_channel,
     set_leveling_enabled,
     set_milestone_reward,
+    set_salary_enabled,
     set_salary_tier,
     set_voice_leveling_enabled,
     should_track_channel,
@@ -153,12 +155,12 @@ def profile_embed(
     if avatar:
         embed.set_thumbnail(url=avatar)
     embed.add_field(name="المستوى", value=f"**{profile['level']:,}**", inline=True)
-    embed.add_field(name="النقاط", value=f"**{profile['points']:,}**", inline=True)
+    embed.add_field(name="الرسائل المحتسبة للفل", value=f"**{profile['points']:,}**", inline=True)
     embed.add_field(name="الترتيب", value=f"**#{profile['rank']:,}**", inline=True)
     embed.add_field(name="الرسائل المحتسبة", value=f"**{profile['messages']:,}**", inline=True)
     embed.add_field(
         name=f"التقدم إلى المستوى {profile['level'] + 1:,}",
-        value=f"`{bar}` **{progress_percent}%**\nالمتبقي: **{profile['next_level_points']:,}** نقطة",
+        value=f"`{bar}` **{progress_percent}%**\nالمتبقي: **{profile['next_level_points']:,}** رسالة",
         inline=False,
     )
     embed.set_footer(text="بيانات هذا السيرفر فقط • توقيت الرياض")
@@ -185,12 +187,11 @@ def leaderboard_embed(
     if text_entries:
         lines.extend(
             f"{medals[index]} **#{index + 1}** <@{int(entry['user_id'])}>"
-            f"   •   ⭐ النقاط: **{entry['points']:,}**"
             f"   •   💬 الرسائل: **{entry['messages']:,}**"
             for index, entry in enumerate(text_entries[:5])
         )
     else:
-        lines.append("لا توجد نقاط أو رسائل محتسبة في هذه الفترة.")
+        lines.append("لا توجد رسائل محتسبة في هذه الفترة.")
 
     lines.extend(["", "**TOP 5 VOICE**"])
     if voice_entries:
@@ -315,11 +316,12 @@ class Leveling(commands.Cog):
     async def leveling_worker(self):
         for guild in list(self.bot.guilds):
             try:
-                await asyncio.to_thread(mature_pending_messages, guild.id)
+                level_events = await asyncio.to_thread(mature_pending_messages, guild.id)
+                await self.announce_level_events(guild, level_events)
                 await self.refresh_voice_sessions(guild)
                 await self.process_retryable_payouts(guild)
                 config = await asyncio.to_thread(ensure_level_config, guild.id)
-                if config["enabled"] and config["announcement_channel_id"]:
+                if (config["enabled"] or config["salary_enabled"]) and config["announcement_channel_id"]:
                     local_now = datetime.now(RIYADH)
                     due_days = daily_report_dates_due(
                         config["enabled_since"], config["last_daily_report_date"], local_now
@@ -359,6 +361,13 @@ class Leveling(commands.Cog):
                     continue
                 if payout["payout_type"] == "milestone":
                     member = guild.get_member(payout["user_id"])
+                    config = await asyncio.to_thread(ensure_level_config, guild.id)
+                    channel = guild.get_channel(config["announcement_channel_id"]) if config["announcement_channel_id"] else None
+                    if channel:
+                        await channel.send(
+                            f"💰 حصل <@{payout['user_id']}> على مكافأة المستوى `{milestone}` بقيمة `{payout['amount']:,}` Cosmo.",
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
                     if member:
                         milestone = payout["payout_key"].rsplit(":", 1)[-1]
                         await member.send(
@@ -379,6 +388,21 @@ class Leveling(commands.Cog):
                 print(f"Leveling payout notification failed in guild {guild.id} for {payout['payout_key']}: {exc}")
             except Exception as exc:
                 print(f"Leveling payout processing failed in guild {guild.id} for {payout['payout_key']}: {exc}")
+
+    async def announce_level_events(self, guild: discord.Guild, events: list[dict]):
+        if not events:
+            return
+        config = await asyncio.to_thread(ensure_level_config, guild.id)
+        channel = guild.get_channel(config["announcement_channel_id"]) if config["announcement_channel_id"] else None
+        if not channel:
+            return
+        for event in events:
+            if event.get("status") != "level_up":
+                continue
+            await channel.send(
+                f"🎉 مبروك <@{event['user_id']}>! ارتقى إلى المستوى `{event['milestone']}`.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     async def publish_daily_report(self, guild: discord.Guild, local_day: str, channel_id: int):
         report_status = await asyncio.to_thread(get_report_status, guild.id, local_day)
@@ -408,7 +432,11 @@ class Leveling(commands.Cog):
         try:
             _owner_role_id, admin_role_id = await asyncio.to_thread(get_guild_management_role_ids, guild.id)
             salary_tiers = await asyncio.to_thread(get_salary_tiers, guild.id)
-            salary_entries = entries
+            salary_entries = (
+                await asyncio.to_thread(get_salary_leaderboard, guild.id, start_at, end_at, 5)
+                if (await asyncio.to_thread(ensure_level_config, guild.id))["salary_enabled"]
+                else []
+            )
         except Exception as exc:
             print(f"Daily salary configuration lookup failed in guild {guild.id}: {exc}")
             salary_processing_error = True
@@ -517,14 +545,14 @@ class Leveling(commands.Cog):
             salary_text = "لا يوجد إداري مستحق للراتب ضمن التوب 5 اليوم."
 
         ranking_lines = [
-            f"{index}. <@{entry['user_id']}> — `{entry['points']:,}` نقطة / `{entry['messages']:,}` رسالة"
+            f"{index}. <@{entry['user_id']}> — `{entry['messages']:,}` رسالة"
             for index, entry in enumerate(entries, 1)
         ]
         ranking_text = "\n".join(ranking_lines) if ranking_lines else "لا توجد رسائل محتسبة اليوم."
 
         embed = discord.Embed(
             title=f"🏆 أفضل 5 لليوم | {guild.name}",
-            description="ترتيب اليوم حسب النقاط المكتسبة. الرواتب تحتسب الرسائل المقبولة غير المزعجة.",
+            description="ترتيب اليوم حسب الرسائل المقبولة غير المزعجة. الرواتب مستقلة عن تشغيل اللفلات.",
             color=discord.Color.from_rgb(123, 103, 238),
             timestamp=datetime.now(RIYADH),
         )
@@ -610,7 +638,7 @@ class Leveling(commands.Cog):
                 return message
         return None
 
-    @commands.hybrid_command(name="toggle_level_system", description="فتح أو إغلاق نظام النقاط واللفلات لهذا السيرفر")
+    @commands.hybrid_command(name="toggle_level_system", description="فتح أو إغلاق نظام الرسائل واللفلات لهذا السيرفر")
     async def toggle_level_system(self, ctx: commands.Context, enabled: bool):
         if not ctx.guild or not can_manage_level_settings(ctx):
             return await ctx.send("⛔ مالك السيرفر أو owner-role أو إدارة Discord فقط يمكنهم إعداد النظام.")
@@ -618,6 +646,15 @@ class Leveling(commands.Cog):
         record_audit("level_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="toggle text leveling", after={"enabled": bool(enabled)}, source="discord")
         state = "مفتوح ويحتسب الرسائل في الرومات المحددة ✅" if enabled else "مغلق ولن يحتسب رسائل جديدة ⛔"
         await ctx.send(f"⚙️ نظام اللفلات في **{ctx.guild.name}** أصبح {state}.")
+
+    @commands.hybrid_command(name="toggle_salary_system", aliases=["toggle_admin_salary"], description="فتح أو إغلاق رواتب الإدارة لهذا السيرفر")
+    async def toggle_salary_system(self, ctx: commands.Context, enabled: bool):
+        if not ctx.guild or not can_manage_level_settings(ctx):
+            return await ctx.send("⛔ لا تملك صلاحية إعداد رواتب الإدارة.")
+        await asyncio.to_thread(set_salary_enabled, ctx.guild.id, enabled)
+        record_audit("salary_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="toggle salary system", after={"enabled": bool(enabled)}, source="discord")
+        state = "مفتوحة وسيستمر احتساب رسائل الإدارة وصرف المستحقات ✅" if enabled else "مغلقة ولن تُحتسب رسائل الرواتب الجديدة أو تُصرف مستحقات ⛔"
+        await ctx.send(f"💰 رواتب الإدارة في **{ctx.guild.name}** أصبحت {state}.")
 
     @commands.hybrid_command(name="add_level_channel", description="السماح باحتساب الرسائل في روم لهذا السيرفر")
     async def add_level_channel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -628,7 +665,7 @@ class Leveling(commands.Cog):
         added = await asyncio.to_thread(add_level_channel, ctx.guild.id, channel.id)
         if added:
             record_audit("level_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="add level channel", after={"channel_id": channel.id}, source="discord")
-        await ctx.send(f"✅ تمت إضافة {channel.mention} إلى رومات احتساب النقاط." if added else f"ℹ️ {channel.mention} موجود بالفعل في القائمة.")
+        await ctx.send(f"✅ تمت إضافة {channel.mention} إلى رومات احتساب الرسائل." if added else f"ℹ️ {channel.mention} موجود بالفعل في القائمة.")
 
     @commands.hybrid_command(name="remove_level_channel", description="إزالة روم من رومات احتساب الرسائل")
     async def remove_level_channel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -637,7 +674,7 @@ class Leveling(commands.Cog):
         removed = await asyncio.to_thread(remove_level_channel, ctx.guild.id, channel.id)
         if removed:
             record_audit("level_setting_changed", guild_id=ctx.guild.id, actor_id=ctx.author.id, actor_name=getattr(ctx.author, "display_name", getattr(ctx.author, "name", str(ctx.author.id))), reason="remove level channel", after={"channel_id": channel.id}, source="discord")
-        await ctx.send(f"✅ أُزيل {channel.mention} من رومات احتساب النقاط." if removed else f"ℹ️ {channel.mention} غير موجود في القائمة.")
+        await ctx.send(f"✅ أُزيل {channel.mention} من رومات احتساب الرسائل." if removed else f"ℹ️ {channel.mention} غير موجود في القائمة.")
 
     @commands.hybrid_command(name="list_level_channels", description="عرض الرومات المحددة لنظام اللفلات")
     async def list_level_channels(self, ctx: commands.Context):
@@ -645,10 +682,10 @@ class Leveling(commands.Cog):
             return await ctx.send("⛔ استخدم هذا الأمر داخل السيرفر.")
         channel_ids = await asyncio.to_thread(get_level_channels, ctx.guild.id)
         if not channel_ids:
-            return await ctx.send("ℹ️ لم يتم تحديد رومات لاحتساب النقاط بعد.")
-        await ctx.send("📚 رومات احتساب النقاط في هذا السيرفر:\n" + "\n".join(f"• <#{channel_id}>" for channel_id in channel_ids))
+            return await ctx.send("ℹ️ لم يتم تحديد رومات احتساب الرسائل بعد.")
+        await ctx.send("📚 رومات احتساب الرسائل في هذا السيرفر:\n" + "\n".join(f"• <#{channel_id}>" for channel_id in channel_ids))
 
-    @commands.hybrid_command(name="toggle_voice_level_system", description="فتح أو إغلاق نظام نقاط ووقت الفويس لهذا السيرفر")
+    @commands.hybrid_command(name="toggle_voice_level_system", description="فتح أو إغلاق نظام وقت الفويس لهذا السيرفر")
     async def toggle_voice_level_system(self, ctx: commands.Context, enabled: bool):
         if not ctx.guild or not can_manage_level_settings(ctx):
             return await ctx.send("⛔ مالك السيرفر أو owner-role أو إدارة Discord فقط يمكنهم إعداد النظام.")
@@ -770,7 +807,7 @@ class Leveling(commands.Cog):
             send_kwargs["ephemeral"] = True
         await ctx.send(**send_kwargs)
 
-    @commands.hybrid_command(name="level_points", aliases=["my_level"], description="عرض نقاطك ومستواك في هذا السيرفر")
+    @commands.hybrid_command(name="level_points", aliases=["my_level", "level_messages"], description="عرض رسائلك ومستواك في هذا السيرفر")
     async def level_points(self, ctx: commands.Context, member: discord.Member | None = None):
         if not ctx.guild:
             return await ctx.send("⛔ استخدم هذا الأمر داخل السيرفر.")

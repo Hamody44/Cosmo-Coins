@@ -306,11 +306,13 @@ def get_guild_db(guild_id: int):
     cur.execute('''CREATE TABLE IF NOT EXISTS leveling_config (
         guild_id INTEGER PRIMARY KEY,
         is_enabled INTEGER NOT NULL DEFAULT 0,
+        salary_enabled INTEGER NOT NULL DEFAULT 1,
         milestone_reward INTEGER NOT NULL DEFAULT 0,
         announcement_channel_id INTEGER,
         last_daily_report_date TEXT,
         enabled_since REAL
     )''')
+    _ensure_guild_db_column(cur, "leveling_config", "salary_enabled", "INTEGER NOT NULL DEFAULT 1", schema_key)
     _ensure_guild_db_column(cur, "leveling_config", "enabled_since", "REAL", schema_key)
     cur.execute(
         "UPDATE leveling_config SET enabled_since = ? WHERE is_enabled = 1 AND enabled_since IS NULL",
