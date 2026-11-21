@@ -772,15 +772,50 @@ class PhotoContest(commands.Cog):
         ).fetchall()
         counts = {
             status: cur.execute("SELECT COUNT(*) FROM invite_uses WHERE guild_id=? AND inviter_id=? AND status=?", (ctx.guild.id, member.id, status)).fetchone()[0]
-            for status in ("valid", "fake", "left", "returned")
+            for status in ("valid", "fake", "left", "returned", "unknown")
         }
         total = cur.execute("SELECT COUNT(*) FROM invite_uses WHERE guild_id=? AND inviter_id=?", (ctx.guild.id, member.id)).fetchone()[0]
         conn.close()
-        text = f"دعوات {member.mention}: صالح `{counts['valid']}` • وهمي `{counts['fake']}` • غادر `{counts['left']}` • عاد بعد مغادرة `{counts['returned']}` • الإجمالي `{total}`\n" + "\n".join(
-            f"{index}. {username or member_id} — {code or 'غير محدد'} — {INVITE_STATUS_LABELS.get(status, status)}"
-            for index, (code, member_id, username, _joined_at, status) in enumerate(rows, 1)
+        embed = discord.Embed(
+            title=f"📨 دعوات {member.display_name}",
+            description=(
+                f"الداعي: {member.mention}\n"
+                "الأعضاء الظاهرون أدناه هم آخر 50 عضوًا تم تسجيل دخولهم من خلال هذا الداعي."
+            ),
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
         )
-        await ctx.send(text or "لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح.")
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="✅ صالح", value=f"`{counts['valid']}`", inline=True)
+        embed.add_field(name="🚫 وهمي", value=f"`{counts['fake']}`", inline=True)
+        embed.add_field(name="📤 غادر", value=f"`{counts['left']}`", inline=True)
+        embed.add_field(name="🔁 عاد بعد مغادرة", value=f"`{counts['returned']}`", inline=True)
+        embed.add_field(name="❔ غير محدد", value=f"`{counts['unknown']}`", inline=True)
+        embed.add_field(name="📊 المجموع الكلي", value=f"`{total}`", inline=True)
+
+        if rows:
+            status_lines = [
+                f"{index}. <@{int(member_id)}> — {INVITE_STATUS_LABELS.get(status, status)}"
+                for index, (_code, member_id, _username, _joined_at, status) in enumerate(rows, 1)
+            ]
+            # Keep every embed field below Discord's 1024-character limit.
+            for field_index in range(0, len(status_lines), 20):
+                embed.add_field(
+                    name="👥 الأعضاء المدعوون" if field_index == 0 else "👥 الأعضاء المدعوون (تابع)",
+                    value="\n".join(status_lines[field_index:field_index + 20]),
+                    inline=False,
+                )
+        else:
+            embed.add_field(
+                name="👥 الأعضاء المدعوون",
+                value="لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح.",
+                inline=False,
+            )
+        embed.set_footer(text="يتم عرض آخر 50 دعوة مسجلة")
+        await ctx.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
 
     @commands.command(name="invites_all", aliases=["دعوات_الجميع"])
     async def invites_all(self, ctx):
