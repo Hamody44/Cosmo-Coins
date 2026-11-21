@@ -522,8 +522,8 @@ class Advertisements(commands.Cog):
                 premium_snapshot=True, server_owner_id=guild.owner_id,
             )
         except ValueError as exc:
-            if "open advertisement" in str(exc):
-                return await interaction.followup.send("⚠️ لديك طلب إعلان مفتوح بالفعل.", ephemeral=True)
+            if "paid or active advertisement" in str(exc):
+                return await interaction.followup.send("⚠️ لديك طلب إعلان مدفوع أو قيد التنفيذ بالفعل؛ لا يمكن استبداله بطلب جديد.", ephemeral=True)
             return await interaction.followup.send("❌ تعذر إنشاء الطلب؛ تحقق من قيمة الجيف والإعدادات.", ephemeral=True)
 
         order = get_ad_order(guild.id, order_id)
@@ -1111,26 +1111,51 @@ class Advertisements(commands.Cog):
         old_name = channel.name
         try:
             await channel.edit(name=f"giveaway-{int(order['giveaway_total'])}", reason=f"Publish ad order #{order_id}")
+            end_timestamp = int(time.time()) + AD_DURATIONS[order["duration_key"]]
+            ad_text = f"{order['title']}\n{order['content']}"
+            await channel.send(
+                ad_text,
+                suppress_embeds=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+            giveaway_embed = discord.Embed(
+                title="🎉 سحب على Cosmo! 🎉",
+                description=(
+                    f"**الجائزة لكل فائز:** `{int(order['amount_per_winner']):,}` Cosmo\n"
+                    f"**عدد الفائزين:** `{int(order['winners_count'])}`\n"
+                    "**المشاركين:** `0`\n"
+                    "**الشرط:** دخول السيرفر\n"
+                    f"**ينتهي:** <t:{end_timestamp}:R>"
+                ),
+                color=discord.Color.purple(),
+            )
+            # This field is used by the ad participant refresher when editing the giveaway.
+            giveaway_embed.add_field(name="👥 المشاركون", value="0", inline=False)
+            giveaway_embed.set_footer(text="تفاعل بالريأكشن 🎉 للدخول في السحب!")
+            giveaway_message = await channel.send(embed=giveaway_embed)
+            await giveaway_message.add_reaction("🎉")
+
             mention = "@everyone" if order["mention_type"] == "everyone" else "@here"
-            embed = discord.Embed(title=order["title"], description=order["content"], color=discord.Color.gold())
-            duration_labels = {"1d": "يوم واحد", "2d": "يومان", "3d": "3 أيام", "5d": "5 أيام", "7d": "7 أيام"}
-            embed.add_field(name="🎁 قيمة الجيف", value=f"{int(order['giveaway_total']):,} Cosmo", inline=True)
-            embed.add_field(name="👥 المشاركون", value="0", inline=True)
-            embed.add_field(name="⏱️ مدة الجيف", value=duration_labels.get(order["duration_key"], order["duration_key"]), inline=True)
-            embed.add_field(name="✅ شرط الاستلام", value="دخول السيرفر", inline=False)
-            embed.add_field(name="⚠️ تنويه", value="هذا إعلان لسيرفر مستقل؛ لا نتحمل أي شيء يحدث بالداخل.", inline=False)
-            embed.set_footer(text=f"إعلان #{order_id}")
-            if order.get("media_url"):
-                embed.set_image(url=order["media_url"])
-            message = await channel.send(content=mention, embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True, users=False, roles=False, replied_user=False))
-            await message.add_reaction("🎉")
-            result = record_ad_published(guild.id, order_id, channel.id, message.id, 0, old_name)
+            await channel.send(
+                f"{mention}\n"
+                f"🎁 **قيمة الجيف الكلية:** `{int(order['giveaway_total']):,}` Cosmo\n"
+                "⚠️ **تنويه:** هذا إعلان لسيرفر مستقل؛ لا نتحمل أي شيء يحدث بالداخل.",
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=True,
+                    users=False,
+                    roles=False,
+                    replied_user=False,
+                ),
+            )
+
+            result = record_ad_published(guild.id, order_id, channel.id, giveaway_message.id, 0, old_name)
             if result["status"] not in {"live", "already_live"}:
                 raise RuntimeError("ad publication ledger did not accept the Discord message")
         except Exception as exc:
             mark_ad_needs_review(guild.id, order_id, f"Discord publication failed: {exc}")
             return {"status": "needs_review", "error": str(exc)}
-        return {"status": "live", "channel": channel, "message": message}
+        return {"status": "live", "channel": channel, "message": giveaway_message}
 
     @commands.hybrid_command(name="ad_publish", aliases=["نشر_الإعلان"], description="نشر إعلان مكتمل الدفع في روم مسموح")
     async def ad_publish(self, ctx: commands.Context, order_id: int, channel: discord.TextChannel = None):

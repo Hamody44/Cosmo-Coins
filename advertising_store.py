@@ -226,9 +226,32 @@ def create_ad_order(guild_id: int, advertiser_id: int, ticket_channel_id: int, d
     status = "queued" if queued else "draft"
     conn, cur = get_guild_db(guild_id)
     try:
-        open_order = cur.execute("SELECT id FROM ad_orders WHERE guild_id=? AND advertiser_id=? AND status NOT IN ('completed','cancelled','needs_review')", (guild_id, advertiser_id)).fetchone()
+        open_order = cur.execute(
+            "SELECT o.id,o.status,COALESCE(p.status,'pending') "
+            "FROM ad_orders o LEFT JOIN ad_payments p ON p.ad_order_id=o.id "
+            "WHERE o.guild_id=? AND o.advertiser_id=? "
+            "AND o.status NOT IN ('completed','cancelled','needs_review') "
+            "ORDER BY o.id DESC LIMIT 1",
+            (guild_id, advertiser_id),
+        ).fetchone()
         if open_order:
-            raise ValueError("advertiser already has an open advertisement")
+            previous_id, previous_status, payment_status = open_order
+            paid_or_active = (
+                payment_status == "paid"
+                or previous_status in {"paid", "publishing", "live", "giveaway_ended", "awaiting_owner_decision"}
+            )
+            if paid_or_active:
+                raise ValueError("advertiser already has a paid or active advertisement")
+            cur.execute(
+                "UPDATE ad_orders SET status='cancelled',ticket_channel_id=NULL,cancel_reason=?,updated_at=? "
+                "WHERE id=? AND guild_id=? AND status NOT IN ('completed','cancelled','needs_review')",
+                ("replaced by a newer unpaid advertisement request", now, int(previous_id), guild_id),
+            )
+            cur.execute(
+                "UPDATE ad_payments SET status='cancelled' "
+                "WHERE ad_order_id=? AND status NOT IN ('paid','cancelled')",
+                (int(previous_id),),
+            )
         cur.execute("INSERT INTO ad_orders(guild_id,advertiser_id,ticket_channel_id,duration_key,ad_price,everyone_fee,total_payment,giveaway_total,winners_count,amount_per_winner,mention_type,status,premium_snapshot,created_at,updated_at,server_owner_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (guild_id, advertiser_id, ticket_channel_id, duration_key, int(ad_price), everyone_fee, total_payment, int(giveaway_total), int(winners_count), amount_per_winner, mention_type, status, int(bool(premium_snapshot)), now, now, server_owner_id))
         order_id = cur.lastrowid
         if queued:

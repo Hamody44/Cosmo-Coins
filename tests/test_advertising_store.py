@@ -74,6 +74,25 @@ class AdvertisingStoreTests(unittest.TestCase):
         self.assertEqual(store.get_ad_order(1, order_id)["status"], "paid")
         self.assertEqual(store.settle_ad_payment(1, order_id, 700, 1234, 13_000_000)["status"], "already_paid")
 
+    def test_new_order_cancels_previous_unpaid_order(self):
+        previous_id = store.create_ad_order(1, 20, 30, "1d", 8_000_000, 5_000_000)
+        store.create_ad_payment(1, previous_id, "adamc", 13_000_000)
+        new_id = store.create_ad_order(1, 20, 30, "3d", 12_000_000, 5_000_000)
+
+        previous = store.get_ad_order(1, previous_id)
+        self.assertEqual(previous["status"], "cancelled")
+        self.assertIn("newer unpaid", previous["cancel_reason"])
+        self.assertEqual(store.get_ad_payment(1, previous_id)["status"], "cancelled")
+        self.assertEqual(store.get_ad_order(1, new_id)["status"], "draft")
+
+    def test_new_order_cannot_replace_paid_order(self):
+        previous_id = store.create_ad_order(1, 20, 30, "1d", 8_000_000, 5_000_000)
+        store.create_ad_payment(1, previous_id, "adamc", 13_000_000)
+        store.settle_ad_payment(1, previous_id, 700, 1234, 13_000_000)
+
+        with self.assertRaisesRegex(ValueError, "paid or active"):
+            store.create_ad_order(1, 20, 30, "3d", 12_000_000, 5_000_000)
+
     def test_payment_can_be_confirmed_before_content_is_submitted(self):
         order_id = store.create_ad_order(1, 20, 30, "1d", 8_000_000, 5_000_000)
         store.create_ad_payment(1, order_id, "credit", 13_000_000, recipient_id=99, channel_id=30)
