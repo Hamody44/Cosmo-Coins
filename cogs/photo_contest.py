@@ -299,6 +299,49 @@ class PhotoChannelSelect(discord.ui.ChannelSelect):
         await interaction.response.edit_message(content=self.setup_view.summary(), view=self.setup_view)
 
 
+class InvitePaginatorView(discord.ui.View):
+    """Paginate invitees while keeping member mentions visual-only."""
+    def __init__(self, embeds: list[discord.Embed], owner_id: int):
+        super().__init__(timeout=180)
+        self.embeds = embeds
+        self.owner_id = int(owner_id)
+        self.current_page = 0
+        self._update_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "⛔ هذه الأزرار مخصصة للشخص الذي طلب قائمة الدعوات.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _update_buttons(self):
+        self.previous_button.disabled = self.current_page <= 0
+        self.next_button.disabled = self.current_page >= len(self.embeds) - 1
+
+    async def _show_current_page(self, interaction: discord.Interaction):
+        self._update_buttons()
+        await interaction.response.edit_message(
+            embed=self.embeds[self.current_page],
+            view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @discord.ui.button(label="السابق", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+        await self._show_current_page(interaction)
+
+    @discord.ui.button(label="التالي", emoji="▶️", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page < len(self.embeds) - 1:
+            self.current_page += 1
+        await self._show_current_page(interaction)
+
+
 class PhotoContest(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -776,45 +819,47 @@ class PhotoContest(commands.Cog):
         }
         total = cur.execute("SELECT COUNT(*) FROM invite_uses WHERE guild_id=? AND inviter_id=?", (ctx.guild.id, member.id)).fetchone()[0]
         conn.close()
-        embed = discord.Embed(
-            title=f"📨 دعوات {member.display_name}",
-            description=(
-                f"الداعي: {member.mention}\n"
-                "الأعضاء الظاهرون أدناه هم آخر 50 عضوًا تم تسجيل دخولهم من خلال هذا الداعي."
-            ),
-            color=discord.Color.blurple(),
-            timestamp=discord.utils.utcnow(),
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="✅ صالح", value=f"`{counts['valid']}`", inline=True)
-        embed.add_field(name="🚫 وهمي", value=f"`{counts['fake']}`", inline=True)
-        embed.add_field(name="📤 غادر", value=f"`{counts['left']}`", inline=True)
-        embed.add_field(name="🔁 عاد بعد مغادرة", value=f"`{counts['returned']}`", inline=True)
-        embed.add_field(name="❔ غير محدد", value=f"`{counts['unknown']}`", inline=True)
-        embed.add_field(name="📊 المجموع الكلي", value=f"`{total}`", inline=True)
+        status_lines = [
+            f"{index}. <@{int(member_id)}> — {INVITE_STATUS_LABELS.get(status, status)}"
+            for index, (_code, member_id, _username, _joined_at, status) in enumerate(rows, 1)
+        ]
+        if not status_lines:
+            status_lines = ["لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح."]
 
-        if rows:
-            status_lines = [
-                f"{index}. <@{int(member_id)}> — {INVITE_STATUS_LABELS.get(status, status)}"
-                for index, (_code, member_id, _username, _joined_at, status) in enumerate(rows, 1)
-            ]
-            # Keep every embed field below Discord's 1024-character limit.
-            for field_index in range(0, len(status_lines), 20):
-                embed.add_field(
-                    name="👥 الأعضاء المدعوون" if field_index == 0 else "👥 الأعضاء المدعوون (تابع)",
-                    value="\n".join(status_lines[field_index:field_index + 20]),
-                    inline=False,
-                )
-        else:
+        page_size = 15
+        total_pages = max(1, (len(status_lines) + page_size - 1) // page_size)
+        embeds = []
+        for page_start in range(0, len(status_lines), page_size):
+            page_number = (page_start // page_size) + 1
+            embed = discord.Embed(
+                title=f"📨 دعوات {member.display_name}",
+                description=(
+                    f"الداعي: {member.mention}\n"
+                    f"صفحة `{page_number}` من `{total_pages}` — آخر 50 دعوة مسجلة"
+                ),
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.add_field(name="✅ صالح", value=f"`{counts['valid']}`", inline=True)
+            embed.add_field(name="🚫 وهمي", value=f"`{counts['fake']}`", inline=True)
+            embed.add_field(name="📤 غادر", value=f"`{counts['left']}`", inline=True)
+            embed.add_field(name="🔁 عاد بعد مغادرة", value=f"`{counts['returned']}`", inline=True)
+            embed.add_field(name="❔ غير محدد", value=f"`{counts['unknown']}`", inline=True)
+            embed.add_field(name="📊 المجموع الكلي", value=f"`{total}`", inline=True)
             embed.add_field(
                 name="👥 الأعضاء المدعوون",
-                value="لا يوجد سجل. التتبع التاريخي قبل التفعيل غير متاح.",
+                value="\n".join(status_lines[page_start:page_start + page_size]),
                 inline=False,
             )
-        embed.set_footer(text="يتم عرض آخر 50 دعوة مسجلة")
+            embed.set_footer(text="المنشن بصري فقط ولن يتم إرسال إشعارات للأعضاء")
+            embeds.append(embed)
+
+        view = InvitePaginatorView(embeds, ctx.author.id) if len(embeds) > 1 else None
         await ctx.send(
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            embed=embeds[0],
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     @commands.command(name="invites_all", aliases=["دعوات_الجميع"])
