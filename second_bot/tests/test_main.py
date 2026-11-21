@@ -476,6 +476,42 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(main.resolve_gemini_fallback_model("custom-vision-model"), "custom-vision-model")
 
+    async def test_change_model_persists_order_and_changes_type1_primary(self):
+        default_order = main.TYPE1_GEMINI_MODELS
+        reversed_order = (default_order[1], default_order[0])
+        self.assertIn(main.check_control_owner, main.change_model.checks)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(main, "BASE_DIR", Path(tmp) / "second_bot"):
+                self.assertEqual(main.get_type1_gemini_model_order(), default_order)
+
+                ctx = make_context()
+                await main.change_model.callback(ctx)
+
+                self.assertEqual(main.get_type1_gemini_model_order(), reversed_order)
+                state_path = main.runtime_state_path(main.TYPE1_GEMINI_MODEL_STATE_FILENAME)
+                self.assertEqual(
+                    json.loads(state_path.read_text(encoding="utf-8"))["primary_model"],
+                    reversed_order[0],
+                )
+                self.assertIn(reversed_order[0], ctx.send.await_args.args[0])
+                self.assertIn(reversed_order[1], ctx.send.await_args.args[0])
+
+                gemini = AsyncMock(return_value=["12345"])
+                with patch.object(main, "load_vision_config", return_value=("test-key", main.DEFAULT_VISION_MODEL)), \
+                        patch.object(main, "extract_numbers_from_image", new=gemini):
+                    result = await main.extract_type1_hybrid(
+                        b"type1-image",
+                        "image/png",
+                        ocr_space_key="ocr-test-key",
+                    )
+
+                self.assertEqual(result["source"], f"Gemini ({reversed_order[0]})")
+                self.assertEqual(gemini.await_args.kwargs["model"], reversed_order[0])
+
+                await main.change_model.callback(ctx)
+                self.assertEqual(main.get_type1_gemini_model_order(), default_order)
+
     def test_openrouter_plain_text_accepts_only_one_unambiguous_five_digit_value(self):
         self.assertEqual(main.parse_openrouter_numbers_response("The number appears to be 12345."), ["12345"])
         with self.assertRaisesRegex(RuntimeError, "single unambiguous"):

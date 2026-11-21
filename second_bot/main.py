@@ -98,6 +98,7 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 DEFAULT_VISION_MODEL = "gemini-3.8-flash"
 DEFAULT_FALLBACK_VISION_MODEL = "gemini-3.5-flash-lite"
 TYPE1_GEMINI_MODELS = ("gemini-3.5-flash-lite", "gemini-3.8-flash")
+TYPE1_GEMINI_MODEL_STATE_FILENAME = "type1_gemini_model.json"
 LEGACY_GEMINI_MODEL_REPLACEMENTS = {
     "gemini-2.5-flash-lite": "gemini-3.5-flash-lite",
 }
@@ -140,6 +141,7 @@ TYPE1_TEST_VARIANTS = (
 TYPE1_TEST_LOCK = asyncio.Lock()
 OCR_SPACE_RATE_LOCK = asyncio.Lock()
 VERYFI_RATE_LOCK = asyncio.Lock()
+TYPE1_GEMINI_MODEL_LOCK = asyncio.Lock()
 TRANSIENT_GEMINI_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
@@ -196,6 +198,33 @@ def write_runtime_json(path: Path, payload: dict[str, object]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     temporary_path.replace(path)
+
+
+def get_type1_gemini_model_order() -> tuple[str, str]:
+    """Return the saved primary/fallback Gemini order for Type1 recognition."""
+    state = read_runtime_json(runtime_state_path(TYPE1_GEMINI_MODEL_STATE_FILENAME)) or {}
+    primary = state.get("primary_model")
+    if not isinstance(primary, str) or primary not in TYPE1_GEMINI_MODELS:
+        return TYPE1_GEMINI_MODELS
+    fallback = next(model for model in TYPE1_GEMINI_MODELS if model != primary)
+    return primary, fallback
+
+
+async def toggle_type1_gemini_model_order() -> tuple[str, str]:
+    """Swap the primary and fallback models and persist the new order."""
+    async with TYPE1_GEMINI_MODEL_LOCK:
+        current_order = get_type1_gemini_model_order()
+        next_order = (current_order[1], current_order[0])
+        write_runtime_json(
+            runtime_state_path(TYPE1_GEMINI_MODEL_STATE_FILENAME),
+            {"primary_model": next_order[0]},
+        )
+    logger.info(
+        "Changed Type1 Gemini model order: primary=%s fallback=%s",
+        next_order[0],
+        next_order[1],
+    )
+    return next_order
 
 
 def auto_delivery_state() -> dict[str, object]:
@@ -1439,9 +1468,14 @@ async def extract_type1_hybrid(
     """Try Type1 providers in order: Gemini 3.5, Gemini 3.8, OCR.Space, local OCR."""
     failures: list[str] = []
     gemini_key, _configured_model = load_vision_config()
-    logger.info("Starting Type1 OCR chain: Gemini models, OCR.Space, then local OCR.")
+    model_order = get_type1_gemini_model_order()
+    logger.info(
+        "Starting Type1 OCR chain: Gemini primary=%s fallback=%s, then OCR.Space and local OCR.",
+        model_order[0],
+        model_order[1],
+    )
     if gemini_key:
-        for model_name in TYPE1_GEMINI_MODELS:
+        for model_name in model_order:
             logger.info("Type1 OCR attempt started: source=Gemini model=%s", model_name)
             try:
                 ai_values = await asyncio.wait_for(
@@ -2402,6 +2436,24 @@ async def auto_delivery(ctx: commands.Context, action: str = "status") -> None:
         await ctx.send("✅ تم تشغيل التسليم التلقائي للطلبات الجديدة.")
     else:
         await ctx.send("⏸️ تم إيقاف التسليم التلقائي؛ ستُعالج الطلبات الجديدة يدويًا، ويظل زر نسخ الأمر متاحًا.")
+
+
+@bot.command(name="change_model", aliases=["change-model", "تغيير_النموذج"])
+@commands.check(check_control_owner)
+async def change_model(ctx: commands.Context) -> None:
+    """Swap the primary and fallback Gemini models for Type1 image reading."""
+    try:
+        primary, fallback = await toggle_type1_gemini_model_order()
+    except OSError:
+        logger.exception("Could not save the Type1 Gemini model selection.")
+        await send_notice(ctx, "تعذر حفظ اختيار النموذج. تحقق من صلاحيات الكتابة ثم حاول مجددًا.")
+        return
+    await ctx.send(
+        "تم تبديل ترتيب نماذج القراءة من النوع الأول.\n"
+        f"الأساسي: `{primary}`\n"
+        f"الاحتياطي: `{fallback}`",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 @bot.command(name="ping")
