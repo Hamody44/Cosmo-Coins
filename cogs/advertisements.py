@@ -79,6 +79,18 @@ def validate_ad_content(content: str):
     return True, content
 
 
+def validate_ad_channel_name(name: str):
+    name = re.sub(r"\s+", "-", (name or "").strip())
+    name = name.strip("-")
+    if not name:
+        return False, "اسم الروم لا يمكن أن يكون فارغًا."
+    if len(name) > 100:
+        return False, "اسم الروم يجب ألا يتجاوز 100 حرف."
+    if re.search(r"[@#:<>`\\/]", name):
+        return False, "اسم الروم يحتوي على رموز غير مسموحة."
+    return True, name.lower()
+
+
 class AdTicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -296,6 +308,63 @@ class AdContentModal(discord.ui.Modal):
         )
 
 
+class AdChannelNameModal(discord.ui.Modal):
+    def __init__(self, guild_id: int, order_id: int):
+        super().__init__(title="اسم روم الإعلان", timeout=600)
+        self.guild_id = int(guild_id)
+        self.order_id = int(order_id)
+        self.channel_name = discord.ui.TextInput(
+            label="اسم الروم أثناء مدة الإعلان",
+            placeholder="مثال: giveaway-server",
+            required=True,
+            max_length=100,
+        )
+        self.add_item(self.channel_name)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Advertisements")
+        if not cog:
+            return await interaction.response.send_message("⚠️ نظام الإعلانات غير متاح الآن.", ephemeral=True)
+        await cog.finish_ad_channel_choice(interaction, self.order_id, str(self.channel_name.value))
+
+
+class AdChannelNameChoiceView(discord.ui.View):
+    """Ask for the temporary ad channel name before the order is queued."""
+    def __init__(self, bot, guild_id: int, order_id: int):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.guild_id = int(guild_id)
+        self.order_id = int(order_id)
+        yes = discord.ui.Button(
+            label="نعم، أريد تغيير الاسم",
+            style=discord.ButtonStyle.primary,
+            emoji="✏️",
+            custom_id=f"ad-channel-name-yes:{self.guild_id}:{self.order_id}",
+        )
+        no = discord.ui.Button(
+            label="لا، استخدم الاسم الطبيعي",
+            style=discord.ButtonStyle.secondary,
+            emoji="↩️",
+            custom_id=f"ad-channel-name-no:{self.guild_id}:{self.order_id}",
+        )
+        yes.callback = self._yes
+        no.callback = self._no
+        self.add_item(yes)
+        self.add_item(no)
+
+    async def _yes(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Advertisements")
+        if not cog:
+            return await interaction.response.send_message("⚠️ نظام الإعلانات غير متاح الآن.", ephemeral=True)
+        await cog.open_ad_channel_name_modal(interaction, self.order_id)
+
+    async def _no(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Advertisements")
+        if not cog:
+            return await interaction.response.send_message("⚠️ نظام الإعلانات غير متاح الآن.", ephemeral=True)
+        await cog.finish_ad_channel_choice(interaction, self.order_id, None)
+
+
 class AdSettlementView(discord.ui.View):
     """Persistent settlement controls; custom IDs include guild and order IDs."""
     def __init__(self, bot, guild_id: int, order_id: int):
@@ -423,6 +492,8 @@ class Advertisements(commands.Cog):
                     if (status in {"paid", "queued"} and (not title or not content)
                             and (int(advertiser_id) == int(owner_id or 0) or payment_status == "paid")):
                         self.bot.add_view(AdContentSubmitView(self.bot, guild.id, order_id))
+                    if status == "paid" and title and content:
+                        self.bot.add_view(AdChannelNameChoiceView(self.bot, guild.id, order_id))
                 pending = await asyncio.to_thread(list_ad_settlement_messages, guild.id)
                 for order_id, _message_id, _channel_id in pending:
                     self.bot.add_view(AdSettlementView(self.bot, guild.id, order_id))
@@ -589,10 +660,13 @@ class Advertisements(commands.Cog):
             if result["status"] not in {"paid", "already_paid"}:
                 return await interaction.response.send_message("⚠️ تعذر إتمام دفع Cosmo؛ تم تحويل الطلب للمراجعة.", ephemeral=True)
             await self._grant_buyer_role(interaction.guild, interaction.user.id)
-            view = AdContentSubmitView(self.bot, interaction.guild.id, order_id)
+            paid_order = get_ad_order(interaction.guild.id, order_id)
+            has_content = bool(paid_order and paid_order["title"] and paid_order["content"])
+            view = AdChannelNameChoiceView(self.bot, interaction.guild.id, order_id) if has_content else AdContentSubmitView(self.bot, interaction.guild.id, order_id)
             self.bot.add_view(view)
-            await interaction.response.send_message("✅ تم تحويل Cosmo تلقائيًا إلى صاحب السيرفر. اضغط زر إدخال الإعلان.", ephemeral=True)
-            return await interaction.channel.send(f"✅ تم تأكيد دفع الإعلان #{order_id}. اضغط الزر لإدخال محتوى الإعلان.", view=view)
+            prompt = "اختر اسم روم الإعلان قبل النشر." if has_content else "اضغط الزر لإدخال محتوى الإعلان."
+            await interaction.response.send_message(f"✅ تم تحويل Cosmo تلقائيًا إلى صاحب السيرفر. {prompt}", ephemeral=True)
+            return await interaction.channel.send(f"✅ تم تأكيد دفع الإعلان #{order_id}. {prompt}", view=view)
         await interaction.response.send_message(
             f"💳 حوّل `{expected:,}` إلى صاحب السيرفر باستخدام الأمر التالي داخل هذه التذكرة، ثم انتظر إيصال البوت هنا:\n```{command}```",
             ephemeral=True,
@@ -613,6 +687,50 @@ class Advertisements(commands.Cog):
         if order["title"] or order["content"]:
             return await interaction.response.send_message("✅ تم استلام محتوى هذا الإعلان بالفعل.", ephemeral=True)
         await interaction.response.send_modal(AdContentModal(interaction.guild.id, order_id))
+
+    async def open_ad_channel_name_modal(self, interaction: discord.Interaction, order_id: int):
+        order = get_ad_order(interaction.guild.id, order_id) if interaction.guild else None
+        if (not order or order["advertiser_id"] != interaction.user.id
+                or order["ticket_channel_id"] != interaction.channel_id):
+            return await interaction.response.send_message("❌ هذا الطلب لا يخصك أو لا ينتمي إلى هذه التذكرة.", ephemeral=True)
+        if order["status"] not in {"paid", "queued"} or not order["title"] or not order["content"]:
+            return await interaction.response.send_message("⏳ أدخل محتوى الإعلان أولًا.", ephemeral=True)
+        if order["advertiser_id"] != order["server_owner_id"]:
+            payment = get_ad_payment(interaction.guild.id, order_id)
+            if not payment or payment["status"] != "paid":
+                return await interaction.response.send_message("⏳ لم يتم تأكيد الدفع بعد.", ephemeral=True)
+        await interaction.response.send_modal(AdChannelNameModal(interaction.guild.id, order_id))
+
+    async def finish_ad_channel_choice(self, interaction: discord.Interaction, order_id: int, channel_name: str | None):
+        order = get_ad_order(interaction.guild.id, order_id) if interaction.guild else None
+        if (not order or order["advertiser_id"] != interaction.user.id
+                or order["ticket_channel_id"] != interaction.channel_id):
+            return await interaction.response.send_message("❌ هذا الطلب لا يخصك أو لا ينتمي إلى هذه التذكرة.", ephemeral=True)
+        if order["status"] not in {"paid", "queued"} or not order["title"] or not order["content"]:
+            return await interaction.response.send_message("⏳ لا يمكن اختيار اسم الروم في حالة الطلب الحالية.", ephemeral=True)
+        if order["advertiser_id"] != order["server_owner_id"]:
+            payment = get_ad_payment(interaction.guild.id, order_id)
+            if not payment or payment["status"] != "paid":
+                return await interaction.response.send_message("⏳ لم يتم تأكيد الدفع بعد.", ephemeral=True)
+        if channel_name is not None:
+            valid, channel_name = validate_ad_channel_name(channel_name)
+            if not valid:
+                return await interaction.response.send_message(f"❌ {channel_name}", ephemeral=True)
+        update_ad_order(
+            interaction.guild.id,
+            order_id,
+            requested_channel_name=channel_name,
+            status="queued",
+        )
+        await interaction.response.send_message(
+            "✅ تم اعتماد اسم الروم المخصص." if channel_name else "✅ سيتم استخدام اسم الروم الطبيعي.",
+            ephemeral=True,
+        )
+        await interaction.channel.send(
+            f"✅ تم تجهيز الإعلان #{order_id} للنشر؛ "
+            f"{'سيتم تغيير اسم الروم مؤقتًا إلى `' + channel_name + '`.' if channel_name else 'سيبقى اسم الروم كما هو.'}"
+        )
+        await self._publish_next_queued(interaction.guild)
 
     async def save_ad_content_from_modal(self, interaction: discord.Interaction, order_id: int,
                                         title: str, content: str):
@@ -639,15 +757,19 @@ class Advertisements(commands.Cog):
         )
         if not saved:
             return await interaction.response.send_message("❌ لا يمكن تعديل هذا الطلب في حالته الحالية.", ephemeral=True)
-        update_ad_order(interaction.guild.id, order_id, status="queued")
-        await interaction.response.send_message("✅ تم فحص محتوى الإعلان وإدخاله في النشر التلقائي.", ephemeral=True)
+        # Keep the paid order out of the queue until the advertiser chooses the
+        # temporary name (or explicitly keeps the channel's normal name).
+        update_ad_order(interaction.guild.id, order_id, status="paid")
+        choice_view = AdChannelNameChoiceView(self.bot, interaction.guild.id, order_id)
+        self.bot.add_view(choice_view)
+        await interaction.response.send_message("✅ تم فحص محتوى الإعلان. هل تريد تغيير اسم روم الإعلان مؤقتًا أثناء مدة الإعلان؟", ephemeral=True)
         embed = discord.Embed(title=title.strip(), description=cleaned_content, color=discord.Color.gold())
         await interaction.channel.send(
-            f"📨 تم استلام محتوى الإعلان #{order_id} وسيتم نشره تلقائيًا عند توفر القناة والحد اليومي.",
+            f"📨 تم استلام محتوى الإعلان #{order_id}. قبل النشر، اختر اسم الروم أثناء مدة الإعلان:",
             embed=embed,
+            view=choice_view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        await self._publish_next_queued(interaction.guild)
 
     @tasks.loop(seconds=30)
     async def ad_expiry_worker(self):
@@ -1008,13 +1130,17 @@ class Advertisements(commands.Cog):
         saved = submit_ad_content(ctx.guild.id, order_id, ctx.author.id, title.strip(), result, attachment_url, owner_id)
         if not saved:
             return await ctx.send("❌ لا يمكن تعديل هذا الطلب في حالته الحالية.")
+        update_ad_order(ctx.guild.id, order_id, status="paid")
         # صاحب السيرفر يستطيع الإعلان دون دفع رسم الإعلان أو قيمة الجيف؛ سيتم
         # حجز الجيف من ميزانية السيرفر عند النشر فقط.
         if ctx.author.id == owner_id:
-            if order["status"] != "queued":
-                update_ad_order(ctx.guild.id, order_id, status="paid")
-            state = " وتم وضعه في قائمة الانتظار" if order["status"] == "queued" else ""
-            return await ctx.send(f"✅ تم حفظ الإعلان{state}. أنت صاحب السيرفر، لذلك لا يوجد دفع؛ ستُحجز قيمة الجيف من ميزانية السيرفر عند النشر.")
+            choice_view = AdChannelNameChoiceView(self.bot, ctx.guild.id, order_id)
+            self.bot.add_view(choice_view)
+            return await ctx.send(
+                "✅ تم حفظ الإعلان. قبل النشر سيظهر لك اختيار اسم روم الإعلان؛ "
+                "أنت صاحب السيرفر، لذلك لا يوجد دفع.",
+                view=choice_view,
+            )
         expected = int(order["total_payment"])
         await ctx.send(f"✅ تم حفظ الإعلان. إجمالي الدفع المطلوب هو `{expected:,}` Cosmo.\n"
                        "استخدم `ad_pay credit` أو `ad_pay adamc` لاختيار طريقة الدفع.")
@@ -1055,6 +1181,11 @@ class Advertisements(commands.Cog):
                 return await ctx.send("❌ رصيد Cosmo الشخصي غير كافٍ؛ لم تُخصم أي عملة.")
             if result["status"] in {"paid", "already_paid"}:
                 await self._grant_buyer_role(ctx.guild, ctx.author.id)
+                paid_order = get_ad_order(ctx.guild.id, order_id)
+                if paid_order and paid_order["title"] and paid_order["content"]:
+                    view = AdChannelNameChoiceView(self.bot, ctx.guild.id, order_id)
+                    self.bot.add_view(view)
+                    return await ctx.send("✅ تم تحويل Cosmo تلقائيًا إلى صاحب السيرفر. اختر اسم روم الإعلان قبل النشر.", view=view)
             return await ctx.send("✅ تم تحويل Cosmo تلقائيًا إلى صاحب السيرفر." if result["status"] in {"paid", "already_paid"} else "⚠️ تعذر إتمام دفع Cosmo؛ تم تحويل الطلب للمراجعة.")
         command = f"#credit {owner_id} {expected} with tax" if method == "credit" else f"!transfer {owner_id} {expected}"
         await ctx.send(f"💳 حوّل `{expected:,}` إلى صاحب السيرفر <@{owner_id}> باستخدام:\n```{command}```\nثم انتظر إيصال البوت داخل هذه التذكرة.")
@@ -1097,11 +1228,12 @@ class Advertisements(commands.Cog):
                     view=view,
                 )
             else:
-                await message.channel.send(f"✅ تم تأكيد دفع الإعلان #{order_id}. سيدخل النشر التلقائي الآن.")
-                paid_order = get_ad_order(message.guild.id, order_id)
-                if paid_order and paid_order["status"] == "paid":
-                    update_ad_order(message.guild.id, order_id, status="queued")
-                await self._publish_next_queued(message.guild)
+                view = AdChannelNameChoiceView(self.bot, message.guild.id, order_id)
+                self.bot.add_view(view)
+                await message.channel.send(
+                    f"✅ تم تأكيد دفع الإعلان #{order_id}. هل تريد تغيير اسم روم الإعلان مؤقتًا أثناء مدة الإعلان؟",
+                    view=view,
+                )
 
     async def _publish_order(self, guild: discord.Guild, order_id: int, channel: discord.TextChannel):
         order = get_ad_order(guild.id, order_id)
@@ -1120,7 +1252,8 @@ class Advertisements(commands.Cog):
             return reservation
         old_name = channel.name
         try:
-            await channel.edit(name=f"giveaway-{int(order['giveaway_total'])}", reason=f"Publish ad order #{order_id}")
+            publish_name = order.get("requested_channel_name") or old_name
+            await channel.edit(name=publish_name, reason=f"Publish ad order #{order_id}")
             end_timestamp = int(time.time()) + AD_DURATIONS[order["duration_key"]]
             ad_text = f"{order['title']}\n{order['content']}"
             await channel.send(
