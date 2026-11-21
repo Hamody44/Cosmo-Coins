@@ -70,6 +70,7 @@ def ensure_ad_schema(guild_id: int):
         for column, definition in (
             ("title", "TEXT"), ("content", "TEXT"), ("media_url", "TEXT"),
             ("server_owner_id", "INTEGER"),
+            ("requested_channel_name", "TEXT"),
             ("everyone_fee", "INTEGER NOT NULL DEFAULT 0"),
             ("total_payment", "INTEGER NOT NULL DEFAULT 1"),
             ("amount_per_winner", "INTEGER NOT NULL DEFAULT 5000000"),
@@ -267,17 +268,17 @@ def get_ad_order(guild_id: int, order_id: int):
     ensure_ad_schema(guild_id)
     conn, cur = get_guild_db(guild_id)
     try:
-        row = cur.execute("SELECT id,guild_id,advertiser_id,ticket_channel_id,target_channel_id,duration_key,ad_price,everyone_fee,total_payment,giveaway_total,winners_count,amount_per_winner,mention_type,status,queue_rank,created_at,updated_at,published_at,completed_at,cancel_reason,title,content,media_url,server_owner_id,premium_snapshot FROM ad_orders WHERE guild_id=? AND id=?", (guild_id, order_id)).fetchone()
+        row = cur.execute("SELECT id,guild_id,advertiser_id,ticket_channel_id,target_channel_id,duration_key,ad_price,everyone_fee,total_payment,giveaway_total,winners_count,amount_per_winner,mention_type,status,queue_rank,created_at,updated_at,published_at,completed_at,cancel_reason,title,content,media_url,server_owner_id,requested_channel_name,premium_snapshot FROM ad_orders WHERE guild_id=? AND id=?", (guild_id, order_id)).fetchone()
         if not row:
             return None
-        keys = "id guild_id advertiser_id ticket_channel_id target_channel_id duration_key ad_price everyone_fee total_payment giveaway_total winners_count amount_per_winner mention_type status queue_rank created_at updated_at published_at completed_at cancel_reason title content media_url server_owner_id premium_snapshot".split()
+        keys = "id guild_id advertiser_id ticket_channel_id target_channel_id duration_key ad_price everyone_fee total_payment giveaway_total winners_count amount_per_winner mention_type status queue_rank created_at updated_at published_at completed_at cancel_reason title content media_url server_owner_id requested_channel_name premium_snapshot".split()
         return dict(zip(keys, row))
     finally:
         conn.close()
 
 
 def update_ad_order(guild_id: int, order_id: int, **fields):
-    allowed = {"target_channel_id", "status", "queue_rank", "updated_at", "published_at", "completed_at", "cancel_reason", "duration_key", "ad_price", "giveaway_total", "winners_count", "mention_type", "title", "content", "media_url", "server_owner_id"}
+    allowed = {"target_channel_id", "requested_channel_name", "status", "queue_rank", "updated_at", "published_at", "completed_at", "cancel_reason", "duration_key", "ad_price", "giveaway_total", "winners_count", "mention_type", "title", "content", "media_url", "server_owner_id"}
     fields = {key: value for key, value in fields.items() if key in allowed}
     if not fields:
         return False
