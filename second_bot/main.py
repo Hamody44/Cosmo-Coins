@@ -97,6 +97,7 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # The configured model is intentionally not replaced here; set GEMINI_VISION_MODEL in second_bot/.env.
 DEFAULT_VISION_MODEL = "gemini-3.8-flash"
 DEFAULT_FALLBACK_VISION_MODEL = "gemini-3.5-flash-lite"
+TYPE1_GEMINI_MODELS = ("gemini-3.5-flash-lite", "gemini-3.8-flash")
 LEGACY_GEMINI_MODEL_REPLACEMENTS = {
     "gemini-2.5-flash-lite": "gemini-3.5-flash-lite",
 }
@@ -1411,25 +1412,77 @@ async def extract_type1_hybrid(
     *,
     ocr_space_key: str,
 ) -> dict[str, object]:
-    """Resolve type1 using local RGB consensus, OCR.Space agreement, then AI.
+    """Try Type1 providers in order: Gemini 3.5, Gemini 3.8, OCR.Space, local OCR."""
+    failures: list[str] = []
+    gemini_key, _configured_model = load_vision_config()
+    if gemini_key:
+        for model_name in TYPE1_GEMINI_MODELS:
+            try:
+                ai_values = await asyncio.wait_for(
+                    extract_numbers_from_image(
+                        image_bytes,
+                        mime_type,
+                        model=model_name,
+                        allow_provider_fallbacks=False,
+                    ),
+                    timeout=_type1_ai_timeout(),
+                )
+                ai_result = first_five_digit_result(ai_values)
+                if ai_result and re.fullmatch(r"[0-9]{5}", ai_result):
+                    logger.info("Using %s for type1 image: %s", model_name, ai_result)
+                    return {
+                        "result": ai_result,
+                        "source": f"Gemini ({model_name})",
+                        "local": {"red": None, "blue": None},
+                        "ocr": {},
+                    }
+                failures.append(f"{model_name} returned no valid ASCII five-digit result")
+            except asyncio.TimeoutError:
+                failures.append(f"{model_name} timed out after {_type1_ai_timeout():g} seconds")
+            except Exception as exc:
+                failures.append(f"{model_name}: {exc}")
+            logger.warning("Type1 Gemini model %s failed; trying the next provider.", model_name)
+    else:
+        failures.append("GEMINI_API_KEY is missing")
+        logger.info("GEMINI_API_KEY is not configured; skipping Gemini type1 providers.")
 
-    OCR.Space is never accepted as an independent answer: it must equal the
-    red or blue local candidate.  AI is called only after that evidence fails.
-    """
-    # The compact NumPy-only classifier is the primary runtime Type1 path.
-    # Keep the older local/provider chain below as an explicit compatibility
-    # fallback for images outside the trained distribution or a bad model load.
+    ocr_results: dict[tuple[str, str], str | None] = {}
+    if ocr_space_key:
+        try:
+            ocr_results = await extract_numbers_with_ocr_space_variants(
+                image_bytes,
+                api_key=ocr_space_key,
+            )
+            consensus = select_ocr_consensus(ocr_results)
+            if consensus:
+                logger.info("Using OCR.Space consensus for type1 image: %s", consensus)
+                return {
+                    "result": consensus,
+                    "source": "OCR.Space consensus",
+                    "local": {"red": None, "blue": None},
+                    "ocr": ocr_results,
+                }
+            failures.append("OCR.Space did not produce a two-variant consensus")
+        except Exception as exc:
+            failures.append(f"OCR.Space: {exc}")
+            logger.warning("OCR.Space failed in type1 path; trying local OCR: %s", exc)
+    else:
+        failures.append("OCR_SPACE_API_KEY is missing")
+        logger.info("OCR_SPACE_API_KEY is missing; skipping OCR.Space for type1.")
+
+    # Local OCR is deliberately last: the trained classifier, then template bank,
+    # followed by the older red/blue local candidate recognizer.
     try:
         model_result = recognize_type1(image_bytes)
     except Exception as exc:
-        logger.warning("New Type1 OCR failed; using legacy fallback chain: %s", exc)
+        logger.warning("NumPy Type1 OCR failed: %s", exc)
         model_result = None
     if model_result is not None and model_result.text and model_result.reliable:
         return {
             "result": model_result.text,
             "source": "NumPy Type1 OCR model",
             "local": {"new_model": model_result.as_dict(), "red": None, "blue": None},
-            "ocr": {},
+            "ocr": ocr_results,
         }
 
     template_result = extract_type1_template_candidate(image_bytes)
@@ -1438,65 +1491,26 @@ async def extract_type1_hybrid(
             "result": template_result,
             "source": "NumPy Type1 template library",
             "local": {"template": template_result, "red": None, "blue": None},
-            "ocr": {},
+            "ocr": ocr_results,
         }
+
     local = extract_type1_local_candidates(image_bytes)
     red, blue = local.get("red"), local.get("blue")
     if red and blue and red == blue:
-        return {"result": red, "source": "local consensus", "local": local, "ocr": {}}
-
-    ocr_results: dict[tuple[str, str], str | None] = {}
-    ocr_failure: str | None = None
-    if ocr_space_key:
-        try:
-            ocr_results = await extract_numbers_with_ocr_space_variants(
-                image_bytes, api_key=ocr_space_key
-            )
-            local_values = {value for value in (red, blue) if value}
-            matching = [value for value in ocr_results.values() if value and value in local_values]
-            if matching:
-                return {
-                    "result": matching[0], "source": "OCR.Space matched local",
-                    "local": local, "ocr": ocr_results,
-                }
-            ocr_failure = "OCR.Space did not match red or blue local OCR"
-        except (RuntimeError, asyncio.TimeoutError) as exc:
-            ocr_failure = str(exc)
-            logger.warning("OCR.Space failed in type1 hybrid path: %s", exc)
-    else:
-        ocr_failure = "OCR_SPACE_API_KEY is missing"
-
-    gemini_key, gemini_model = load_vision_config()
-    if gemini_key:
-        try:
-            ai_values = await asyncio.wait_for(
-                extract_numbers_from_image(image_bytes, mime_type, model=gemini_model),
-                timeout=_type1_ai_timeout(),
-            )
-            ai_result = first_five_digit_result(ai_values)
-            if ai_result and re.fullmatch(r"[0-9]{5}", ai_result):
-                return {
-                    "result": ai_result, "source": "Gemini AI",
-                    "local": local, "ocr": ocr_results,
-                }
-            ai_failure = "Gemini returned no valid ASCII five-digit result"
-        except asyncio.TimeoutError:
-            ai_failure = f"Gemini timed out after {_type1_ai_timeout():g} seconds"
-        except RuntimeError as exc:
-            ai_failure = str(exc)
-        logger.warning("Type1 AI fallback unavailable: %s", ai_failure)
-    else:
-        ai_failure = "GEMINI_API_KEY is missing"
-
+        return {
+            "result": red,
+            "source": "local consensus",
+            "local": local,
+            "ocr": ocr_results,
+        }
     fallback = next((value for value in (red, blue) if value and re.fullmatch(r"[0-9]{5}", value)), None)
     return {
         "result": fallback,
         "source": "local unverified" if fallback else "none",
         "local": local,
         "ocr": ocr_results,
-        "failure": "; ".join(item for item in (ocr_failure, ai_failure) if item),
+        "failure": "; ".join(failures),
     }
-
 
 async def extract_numbers_from_image(
     image_bytes: bytes,
@@ -1504,6 +1518,7 @@ async def extract_numbers_from_image(
     *,
     client=None,
     model: str | None = None,
+    allow_provider_fallbacks: bool = True,
 ) -> list[str]:
     """Ask Gemini Vision to return every number visible in an image."""
     api_key, configured_model = load_vision_config()
@@ -1559,7 +1574,7 @@ async def extract_numbers_from_image(
             os.getenv("GEMINI_FALLBACK_MODEL", DEFAULT_FALLBACK_VISION_MODEL)
         )
         models_to_try = [selected_model]
-        if fallback_model and fallback_model not in models_to_try:
+        if allow_provider_fallbacks and fallback_model and fallback_model not in models_to_try:
             models_to_try.append(fallback_model)
 
         timeout = aiohttp.ClientTimeout(total=VISION_REQUEST_TIMEOUT_SECONDS)
@@ -1592,7 +1607,7 @@ async def extract_numbers_from_image(
                     logger.warning("%s", last_failure)
 
         if response_data is None or last_failure is not None and response_data.get("candidates") is None:
-            openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+            openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip() if allow_provider_fallbacks else ""
             if openrouter_key:
                 try:
                     logger.warning("Gemini was unavailable; trying OpenRouter free vision fallback.")

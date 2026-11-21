@@ -755,9 +755,11 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         type1_library.assert_not_called()
         self.assertEqual(ctx.send.await_args.args[0], "99598")
 
-    async def test_numbers_uses_numpy_template_library_for_type1_only(self):
-        with patch.object(main, "extract_type1_template_candidate", return_value="12345") as template_library, \
-                patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock()) as ocr_space:
+    async def test_numbers_uses_numpy_template_library_after_remote_providers(self):
+        with patch.object(main, "load_vision_config", return_value=("", main.DEFAULT_VISION_MODEL)), \
+                patch.object(main, "recognize_type1", return_value=None), \
+                patch.object(main, "extract_type1_template_candidate", return_value="12345") as template_library, \
+                patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock(return_value={})) as ocr_space:
             result = await main.extract_type1_hybrid(
                 b"type1-image",
                 "image/png",
@@ -767,6 +769,25 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["result"], "12345")
         self.assertEqual(result["source"], "NumPy Type1 template library")
         template_library.assert_called_once_with(b"type1-image")
+        ocr_space.assert_awaited_once_with(b"type1-image", api_key="ocr-test-key")
+
+    async def test_type1_tries_gemini_35_then_38_before_ocr_space(self):
+        gemini = AsyncMock(side_effect=[RuntimeError("first model unavailable"), ["45 454"]])
+        with patch.object(main, "load_vision_config", return_value=("test-key", main.DEFAULT_VISION_MODEL)), \
+                patch.object(main, "extract_numbers_from_image", new=gemini) as gemini_call, \
+                patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock()) as ocr_space:
+            result = await main.extract_type1_hybrid(
+                b"type1-image",
+                "image/png",
+                ocr_space_key="ocr-test-key",
+            )
+
+        self.assertEqual(result["result"], "45454")
+        self.assertEqual(result["source"], "Gemini (gemini-3.8-flash)")
+        self.assertEqual([call.kwargs["model"] for call in gemini_call.await_args_list], [
+            "gemini-3.5-flash-lite", "gemini-3.8-flash",
+        ])
+        self.assertTrue(all(call.kwargs["allow_provider_fallbacks"] is False for call in gemini_call.await_args_list))
         ocr_space.assert_not_awaited()
 
     async def test_numbers_uses_ocr_space_for_type1_only(self):
@@ -780,7 +801,9 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         ctx.message.attachments = [attachment]
 
         with patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}), \
+                patch.object(main, "load_vision_config", return_value=("", main.DEFAULT_VISION_MODEL)), \
                 patch.object(main, "detect_image_style", return_value="type1"), \
+                patch.object(main, "recognize_type1", return_value=None), \
                 patch.object(main, "extract_type1_template_candidate", return_value=None), \
                 patch.object(main, "extract_type1_local_candidates", return_value={"red": "12880", "blue": None}), \
                 patch.object(main, "extract_numbers_with_ocr_space_variants", new=AsyncMock(return_value={
@@ -796,7 +819,7 @@ class NumberExtractionTests(unittest.IsolatedAsyncioTestCase):
         local_ocr.assert_not_called()
         self.assertIn("12880", ctx.send.await_args.args[0])
         output = ctx.send.await_args.args[0]
-        self.assertIn("OCR.Space matched local", output)
+        self.assertIn("OCR.Space consensus", output)
 
     async def test_type1_uses_gemini_when_ocr_space_fails(self):
         with patch.dict(os.environ, {
