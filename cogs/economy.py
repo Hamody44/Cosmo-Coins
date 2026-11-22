@@ -440,7 +440,16 @@ class Economy(commands.Cog):
         request_id = int(payload["order_id"])
         outcome = payload["outcome"]
         if outcome == "automatic":
-            complete_auto_exchange_delivery(request_id)
+            request_data = get_exchange_request_delivery_data(request_id)
+            completed = complete_auto_exchange_delivery(request_id)
+            if completed and request_data:
+                origin_guild_id, user_id, amount, currency_name, received_amount, *_ = request_data
+                try:
+                    await self._send_exchange_success_log(
+                        origin_guild_id, user_id, amount, received_amount, currency_name
+                    )
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    print(f"Could not send automatic exchange success log for request {request_id}: {exc}")
         elif outcome == "pending":
             release_auto_exchange_delivery(request_id)
         elif outcome == "rejected":

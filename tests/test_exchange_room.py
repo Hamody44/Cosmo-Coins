@@ -201,6 +201,51 @@ class ExchangeDeliveryCallbackTests(unittest.IsolatedAsyncioTestCase):
         complete.assert_called_once_with(81)
         update.assert_awaited_once_with(81)
 
+    async def test_successful_automatic_delivery_posts_the_exchange_success_log(self):
+        secret = "exchange-result-test-secret-that-is-long-enough"
+        content = build_delivery_result_message(
+            secret=secret, issuer_id=444, order_id=81, outcome="automatic"
+        )
+        message = SimpleNamespace(content=content, author=SimpleNamespace(id=444))
+        request_data = (123, 456, 1_000, "Gems", 2.5, "قيد التسليم التلقائي", "قيد التسليم التلقائي")
+        cog = Economy(SimpleNamespace())
+        with patch.dict(os.environ, {"COSMO_AUTO_DELIVERY_SECRET": secret}), patch(
+            "cogs.economy.get_exchange_request_delivery_data", return_value=request_data
+        ) as get_data, patch(
+            "cogs.economy.complete_auto_exchange_delivery", return_value=True
+        ) as complete, patch.object(
+            cog, "_send_exchange_success_log", new=AsyncMock()
+        ) as success_log, patch.object(
+            cog, "_update_exchange_request_embed", new=AsyncMock()
+        ) as update:
+            await cog.on_message(message)
+
+        get_data.assert_called_once_with(81)
+        complete.assert_called_once_with(81)
+        success_log.assert_awaited_once_with(123, 456, 1_000, 2.5, "Gems")
+        update.assert_awaited_once_with(81)
+
+    async def test_duplicate_automatic_delivery_result_does_not_repeat_success_log(self):
+        secret = "exchange-result-test-secret-that-is-long-enough"
+        content = build_delivery_result_message(
+            secret=secret, issuer_id=444, order_id=81, outcome="automatic"
+        )
+        message = SimpleNamespace(content=content, author=SimpleNamespace(id=444))
+        cog = Economy(SimpleNamespace())
+        with patch.dict(os.environ, {"COSMO_AUTO_DELIVERY_SECRET": secret}), patch(
+            "cogs.economy.get_exchange_request_delivery_data",
+            return_value=(123, 456, 1_000, "Gems", 2.5, "تم القبول", "تسليم تلقائي"),
+        ), patch(
+            "cogs.economy.complete_auto_exchange_delivery", return_value=False
+        ), patch.object(
+            cog, "_send_exchange_success_log", new=AsyncMock()
+        ) as success_log, patch.object(
+            cog, "_update_exchange_request_embed", new=AsyncMock()
+        ):
+            await cog.on_message(message)
+
+        success_log.assert_not_awaited()
+
     async def test_primary_ignores_tampered_or_wrong_author_result(self):
         secret = "exchange-result-test-secret-that-is-long-enough"
         content = build_delivery_result_message(
