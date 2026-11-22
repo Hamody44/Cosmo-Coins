@@ -435,11 +435,20 @@ async function toggleFullscreen() {
   try {
     if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
     else await document.exitFullscreen();
+    await lockLandscape();
   } catch { toast("ملء الشاشة غير متاح في هذا المتصفح"); }
 }
 
-connectButton.addEventListener("click", connect);
-reconnectButton.addEventListener("click", connect);
+async function lockLandscape() {
+  try {
+    if (screen.orientation?.lock) await screen.orientation.lock("landscape");
+  } catch {
+    // The CSS fallback keeps the game usable when locking requires fullscreen.
+  }
+}
+
+connectButton.addEventListener("click", async () => { await lockLandscape(); connect(); });
+reconnectButton.addEventListener("click", async () => { await lockLandscape(); connect(); });
 shootButton.addEventListener("click", () => {
   const cue = cueBall();
   if (cue && canPlay()) fireShot(Math.atan2(aim.y - cue.y, (aim.x - cue.x) * TABLE_ASPECT));
@@ -459,5 +468,6 @@ if ("ResizeObserver" in window) new ResizeObserver(resizeCanvas).observe(stage);
 
 powerOutput.textContent = `${latinDigits(powerInput.value)}٪`;
 resizeCanvas();
+lockLandscape();
 if (authToken || spectator) connect();
 const protocolVersion = "cosmo-8ball-v1";

@@ -15,6 +15,7 @@ from typing import Any
 
 PROTOCOL_VERSION = "cosmo-8ball-v1"
 MAX_PLAYERS = 64
+MATCH_ENTRY_SECONDS = 60
 
 
 class TournamentError(ValueError):
@@ -483,7 +484,7 @@ class TournamentManager:
         for slot in range(0, len(ids), 2):
             players = ids[slot:slot + 2]
             match_id = f"{tournament.tournament_id}-r1-m{slot // 2 + 1}"
-            match = Match(match_id, 1, slot // 2 + 1, players, status="waiting_entry", entry_deadline=now + 10)
+            match = Match(match_id, 1, slot // 2 + 1, players, status="waiting_entry", entry_deadline=now + MATCH_ENTRY_SECONDS)
             tournament.matches[match_id] = match
             tournament.round_match_ids.append(match_id)
             if len(players) == 1:
@@ -509,7 +510,7 @@ class TournamentManager:
         for slot in range(0, len(winners), 2):
             players = [int(item) for item in winners[slot:slot + 2]]
             match_id = f"{tournament.tournament_id}-r{tournament.round_number}-m{slot // 2 + 1}"
-            match = Match(match_id, tournament.round_number, slot // 2 + 1, players, status="waiting_entry", entry_deadline=float(now if now is not None else time.time()) + 10)
+            match = Match(match_id, tournament.round_number, slot // 2 + 1, players, status="waiting_entry", entry_deadline=float(now if now is not None else time.time()) + MATCH_ENTRY_SECONDS)
             tournament.matches[match_id] = match
             tournament.round_match_ids.append(match_id)
             if len(players) == 1:
@@ -538,7 +539,7 @@ class TournamentManager:
                 match.completed_at = now
             else:
                 tournament.status = "cancelled"
-                tournament.cancelled_reason = "both players did not enter the match within 10 seconds"
+                tournament.cancelled_reason = f"both players did not enter the match within {MATCH_ENTRY_SECONDS} seconds"
                 tournament.settlement_status = "pending_refund"
                 return
             changed = True

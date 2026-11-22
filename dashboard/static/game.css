@@ -115,12 +115,10 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
 .result-banner.foul { border-color: #ff806e70; color: #ffb1a5; }
 .toast { opacity: 0; transform: translateY(8px); transition: opacity .18s, transform .18s; }
 .toast.show { opacity: 1; transform: translateY(0); }
-.orientation-warning { display: none; }
+/* Use a landscape-sized, rotated canvas when the browser blocks the Screen
+   Orientation API outside fullscreen/PWA mode. */
 @media (max-width: 760px) and (orientation: portrait) {
-  .orientation-warning { position: fixed; z-index: 99; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #07100df7; color: var(--ink); text-align: center; }
-  .orientation-warning > span { color: var(--lime); font-size: 48px; transform: rotate(90deg); }
-  .orientation-warning strong { font-size: 17px; }
-  .orientation-warning small { color: var(--muted); font-size: 11px; }
+  .game-shell { width: 100vh; height: 100vw; transform: rotate(90deg) translateY(-100%); transform-origin: top left; }
 }
 @media (max-height: 520px) and (orientation: landscape) {
   .game-shell { grid-template-rows: 30px 47px minmax(0, 1fr) 44px; gap: 4px; padding: 4px 8px; }

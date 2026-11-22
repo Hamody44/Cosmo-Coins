@@ -20,7 +20,7 @@ from database import (
 from cogs.games import can_manage_server_games
 from dashboard.game_auth import issue_game_token
 from dashboard.realtime import stop_tournament_connections, tournament_manager
-from dashboard.tournament import TournamentError
+from dashboard.tournament import MATCH_ENTRY_SECONDS, TournamentError
 
 
 def _game_url(tournament_id: str, *, match_id: str | None = None, ticket: str | None = None, spectator: bool = False) -> str:
@@ -127,7 +127,7 @@ class EightBallMatchInviteButton(discord.ui.Button):
         except RuntimeError:
             return await interaction.response.send_message("❌ إعداد GAME_AUTH_SECRET مفقود في الاستضافة.", ephemeral=True)
         await interaction.response.send_message(
-            "اضغط الزر التالي لفتح التطبيق. سيتم احتساب دخولك فقط بعد اتصال التطبيق خلال 10 ثوانٍ.",
+            f"اضغط الزر التالي لفتح التطبيق. سيتم احتساب دخولك فقط بعد اتصال التطبيق خلال {MATCH_ENTRY_SECONDS} ثانية.",
             view=LaunchLinkView(_game_url(self.tournament_id, match_id=self.match_id, ticket=ticket)),
             ephemeral=True,
         )
@@ -135,7 +135,7 @@ class EightBallMatchInviteButton(discord.ui.Button):
 
 class EightBallMatchInviteView(discord.ui.View):
     def __init__(self, tournament_id: str, match_id: str):
-        super().__init__(timeout=10)
+        super().__init__(timeout=MATCH_ENTRY_SECONDS)
         self.add_item(EightBallMatchInviteButton(tournament_id, match_id))
 
 
@@ -211,7 +211,7 @@ class EightBall(commands.Cog):
             names = " و ".join(player["display_name"] for player in match["players"])
             await channel.send(
                 f"🎱 **مباراة الجولة {match['round']} بدأت مرحلة الدخول:** {names}\n"
-                "لديكما **10 ثوانٍ** لفتح التطبيق. لن تبدأ المباراة حتى يدخل اللاعبان.",
+                f"لديكما **{MATCH_ENTRY_SECONDS} ثانية** لفتح التطبيق. لن تبدأ المباراة حتى يدخل اللاعبان.",
                 view=EightBallMatchInviteView(launch["tournament_id"], match["match_id"]),
             )
             tournament_manager.mark_match_launch_sent(launch["tournament_id"], match["match_id"])
@@ -276,7 +276,7 @@ class EightBall(commands.Cog):
                 tournament_manager.mark_refunded(refund["tournament_id"])
                 channel = self.bot.get_channel(refund["channel_id"])
                 if channel:
-                    await channel.send("⚠️ لم يدخل لاعبا المباراة خلال 10 ثوانٍ؛ أُلغيت البطولة وأُعيدت الجائزة إلى ميزانية السيرفر.")
+                    await channel.send(f"⚠️ لم يدخل لاعبا المباراة خلال {MATCH_ENTRY_SECONDS} ثانية؛ أُلغيت البطولة وأُعيدت الجائزة إلى ميزانية السيرفر.")
                 print(f"[8Ball] tournament refunded tournament={refund['tournament_id']} reason={refund['reason']}")
             except Exception as exc:
                 print(f"8Ball refund failed for {refund['tournament_id']}: {exc}")

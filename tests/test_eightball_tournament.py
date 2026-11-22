@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from dashboard.tournament import TournamentError, TournamentManager
+from dashboard.tournament import MATCH_ENTRY_SECONDS, TournamentError, TournamentManager
 
 
 class EightBallTournamentTests(unittest.TestCase):
@@ -110,8 +110,8 @@ class MatchEntryWindowTests(unittest.TestCase):
         manager.join(tid, 11, "B", now=100.1)
         state = manager.state(tid, now=101)
         self.assertEqual(state["status"], "active")
-        manager.tick(now=112)
-        state = manager.state(tid, now=112)
+        manager.tick(now=101 + MATCH_ENTRY_SECONDS)
+        state = manager.state(tid, now=101 + MATCH_ENTRY_SECONDS)
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(len(manager.pending_refunds()), 1)
 
@@ -140,7 +140,7 @@ class MatchEntryWindowTests(unittest.TestCase):
         manager.join(tid, 11, "B", now=100.1)
         match_id = manager.state(tid, now=101)["matches"][0]["match_id"]
         manager.enter_match(tid, match_id, 10, now=101.1)
-        manager.tick(now=112)
+        manager.tick(now=101 + MATCH_ENTRY_SECONDS)
         completed = manager.completion(tid)
         self.assertIsNotNone(completed)
         self.assertEqual(completed["winner_id"], 10)
