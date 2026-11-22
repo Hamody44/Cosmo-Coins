@@ -1,9 +1,8 @@
-"""ASGI bridge for the Flask dashboard and the future 8Ball game service.
+"""ASGI bridge for the Flask dashboard and the live 8Ball game service.
 
 The Discord game client connects to /game-ws while existing Flask routes continue
-through the same public origin and port. Game state is intentionally kept behind
-an explicit room protocol; this first layer only provides safe connection,
-heartbeat and protocol negotiation primitives.
+through the same public origin and port. Tournament and pool state are
+authoritative on the server and broadcast through an explicit room protocol.
 """
 from __future__ import annotations
 
@@ -48,9 +47,8 @@ class GameConnection:
 class GameRoomManager:
     """Small in-process connection registry for the single-host deployment.
 
-    The authoritative tournament/match state will be added here in the next
-    phase. Connections are bounded and removed on disconnect so a stale browser
-    cannot retain a seat forever.
+    Connections are bounded and removed on disconnect so a stale browser cannot
+    retain a seat forever. Match and tournament state live in their managers.
     """
 
     def __init__(self, max_connections: int = 500):
@@ -236,6 +234,21 @@ async def game_socket(websocket: WebSocket):
                     await _broadcast_pool_state(connection.match_key)
                 except (TournamentError, TypeError, ValueError) as exc:
                     await websocket.send_json({"type": "error", "code": "shot_rejected", "message": str(exc)[:200]})
+            elif message_type == "place_cue_ball":
+                try:
+                    if not connection.authenticated or not connection.user_id or not connection.match_key:
+                        raise TournamentError("enter a match before placing the cue ball")
+                    game = pool_games.get(connection.match_key)
+                    if not game:
+                        raise TournamentError("pool game is not ready")
+                    game.place_cue_ball(
+                        connection.user_id,
+                        float(message.get("x")),
+                        float(message.get("y")),
+                    )
+                    await _broadcast_pool_state(connection.match_key)
+                except (TournamentError, TypeError, ValueError) as exc:
+                    await websocket.send_json({"type": "error", "code": "cue_ball_rejected", "message": str(exc)[:200]})
             elif message_type == "report_match_result":
                 try:
                     if not connection.authenticated or not connection.user_id:
@@ -269,8 +282,6 @@ async def game_socket(websocket: WebSocket):
                 room_manager.leave_room(connection)
                 await websocket.send_json({"type": "room_left"})
             else:
-                # Do not accept gameplay mutations until the authoritative room
-                # and tournament state machine is implemented.
                 await websocket.send_json({"type": "error", "code": "unsupported_message"})
     except WebSocketDisconnect:
         pass
@@ -306,6 +317,36 @@ async def _broadcast_pool_state(match_key: str) -> None:
             room_manager.remove(connection)
 
 
+async def _report_pool_winner(match_key: str, game: PoolGame) -> None:
+    """Advance the tournament once an authoritative 8-ball match is won."""
+    if game.winner_id is None or game.result_reported:
+        return
+    tournament_id, separator, match_id = match_key.partition(":")
+    if not separator:
+        LOGGER.error("Cannot report pool result with invalid match key: %s", match_key)
+        game.result_reported = True
+        return
+    tournament = tournament_manager.get(tournament_id)
+    if tournament is None:
+        LOGGER.error("Cannot report pool result for missing tournament: %s", tournament_id)
+        game.result_reported = True
+        return
+    try:
+        state = tournament_manager.report_match_result(
+            tournament_id,
+            match_id,
+            game.winner_id,
+            referee_id=tournament.created_by,
+            result_nonce=f"pool:{game.shot_number}:{game.winner_id}",
+        )
+    except TournamentError:
+        LOGGER.exception("Unable to advance tournament after pool match %s", match_key)
+        game.result_reported = True
+        return
+    game.result_reported = True
+    await _broadcast_tournament_state(tournament_id, state=state)
+
+
 async def stop_tournament_connections(tournament_id: str, reason: str = "تم إيقاف البطولة") -> None:
     """Close all game clients and discard in-memory pool tables for a stopped tournament."""
     tournament_id = str(tournament_id)
@@ -328,6 +369,8 @@ async def _pool_physics_loop() -> None:
         try:
             for match_key, game in list(pool_games.items()):
                 changed = game.step()
+                if game.winner_id is not None and not game.result_reported:
+                    await _report_pool_winner(match_key, game)
                 # Avoid constructing a full 16-ball public snapshot just to read
                 # the timer; the snapshot is built only if it is broadcast.
                 remaining = game.turn_remaining

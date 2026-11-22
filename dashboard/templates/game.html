@@ -2,71 +2,62 @@
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cosmo 8Ball</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#08120f">
+  <title>كوزمو — طاولة البلياردو</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='game.css') }}">
 </head>
 <body data-client-id="{{ discord_client_id }}" data-tournament="{{ request.args.get('tournament', '') }}" data-match="{{ request.args.get('match', '') }}" data-ticket="{{ request.args.get('ticket', '') }}" data-spectator="{{ request.args.get('spectator', '') }}" data-initial-token="{{ initial_token }}">
   <main class="game-shell">
-    <div class="orientation-warning" role="status"><div class="rotate-icon">↻</div><strong>أدر الهاتف إلى الوضع الأفقي</strong><span>اللعب مصمم بوضع Landscape مثل 8 Ball Pool.</span></div>
     <header class="topbar">
-      <div>
-        <p class="eyebrow">COSMO ARCADE / 01</p>
-        <h1>بطولة <span>8Ball</span></h1>
+      <a class="brand" href="#" aria-label="كوزمو أركيد"><span class="brand-mark" aria-hidden="true">✳</span><span><strong>كوزمو</strong><small>صالة اللعب</small></span></a>
+      <div class="match-title"><span class="live-indicator" aria-hidden="true"></span><span id="match-label">مباراة مباشرة</span><small id="round-label">بانتظار المباراة</small></div>
+      <div class="top-actions">
+        <button class="icon-button tournament-toggle" id="tournament-button" type="button" aria-expanded="false" aria-controls="tournament-panel" title="تفاصيل البطولة"><span aria-hidden="true">▤</span><span class="button-caption">البطولة</span></button>
+        <button class="icon-button fullscreen-button" id="fullscreen-button" type="button" aria-label="ملء الشاشة" title="ملء الشاشة"><span aria-hidden="true">⛶</span><span class="button-caption">ملء الشاشة</span></button>
+        <div class="connection" id="connection-status" role="status"><i></i><span>غير متصل</span></div>
       </div>
-      <div class="status-pill" id="connection-status">غير متصل</div>
     </header>
 
-    <section class="match-hud" aria-label="حالة المباراة">
-      <div class="player-card player-left"><span class="player-avatar">◉</span><span><small>PLAYER 1</small><strong id="player-one-name">—</strong></span><b id="player-one-turn">—</b></div>
-      <div class="turn-clock"><small>TIME</small><strong id="turn-timer">30</strong><span>ثانية للدور</span></div>
-      <div class="player-card player-right"><b id="player-two-turn">—</b><span><small>PLAYER 2</small><strong id="player-two-name">—</strong></span><span class="player-avatar">◉</span></div>
+    <section class="match-hud" aria-label="معلومات المباراة">
+      <article class="player-card" id="player-one-card">
+        <div class="player-avatar" aria-hidden="true">١</div>
+        <div class="player-info"><small id="player-one-group">بانتظار الخصم</small><strong id="player-one-name">اللاعب الأول</strong><span id="player-one-balls">—</span></div>
+        <span class="turn-marker" id="player-one-turn" aria-label="حالة الدور"></span>
+      </article>
+      <div class="center-status"><div class="turn-clock"><strong id="turn-timer">—</strong><small>ثانية</small></div><div class="status-copy"><strong id="turn-label">طاولة كوزمو</strong><small id="shot-label">جاهزة للعب</small></div></div>
+      <article class="player-card opponent" id="player-two-card">
+        <span class="turn-marker" id="player-two-turn" aria-label="حالة الدور"></span>
+        <div class="player-info"><small id="player-two-group">بانتظار الخصم</small><strong id="player-two-name">اللاعب الثاني</strong><span id="player-two-balls">—</span></div>
+        <div class="player-avatar avatar-alt" aria-hidden="true">٢</div>
+      </article>
     </section>
 
-    <section class="lobby-panel" id="lobby-panel">
-      <div class="panel-copy">
-        <span class="kicker">TOURNAMENT LOBBY</span>
-        <h2>ملعب 8Ball مباشر — نفس الطاولة للجميع.</h2>
-        <p>الحركة والدور يُداران من الخادم، لذلك يرى اللاعبون والمشاهدون نفس الكرات في نفس اللحظة.</p>
+    <section class="arena" aria-label="طاولة البلياردو">
+      <div class="table-meta"><span class="table-name"><b>طاولة ٠٨</b><i id="phase-label">استعد</i></span><button class="small-link" id="reconnect-button" type="button" hidden>إعادة الاتصال</button></div>
+      <div class="table-stage" id="table-stage">
+        <canvas id="pool-table" width="1200" height="600" tabindex="0" aria-label="طاولة البلياردو. اسحب من الكرة البيضاء لتحديد الاتجاه والقوة، أو استخدم مفاتيح الأسهم ثم زر التسديد."></canvas>
+        <div class="table-overlay" id="table-overlay" role="status"><span class="overlay-symbol" aria-hidden="true">✳</span><strong id="overlay-title">بانتظار المباراة</strong><span id="overlay-detail">سيظهر اللاعبان والطاولة هنا عند الاتصال.</span><button id="connect-button" class="overlay-action" type="button">دخول المباراة</button></div>
+        <div class="spectator-badge" id="spectator-badge" hidden><span class="live-indicator"></span>وضع المشاهدة</div>
+        <div class="aim-hint" id="aim-hint">اسحب من الكرة البيضاء للتصويب</div>
       </div>
-      <div class="auth-box">
-        <div class="avatar-orb">◉</div>
-        <div>
-        <strong id="identity-label">بانتظار زر المباراة</strong>
-        <small id="identity-help">افتح الرابط من زر مباراة Discord؛ لا تحتاج إلى تسجيل دخول إضافي.</small>
-        </div>
-        <button id="connect-button" class="primary-button">فتح اتصال المباراة</button>
-      </div>
-      <div class="lobby-stats">
-        <div><small>البطولة</small><strong id="tournament-label">—</strong></div>
-        <div><small>المشاركون</small><strong id="player-count">0 / 64</strong></div>
-        <div><small>الحالة</small><strong id="tournament-status">بانتظار الاتصال</strong></div>
-      </div>
+      <div class="table-footer"><span id="table-message" role="status">الطاولة بانتظار اللاعبين</span><span class="keyboard-hint">الأسهم للتوجيه · المسافة للتسديد</span></div>
     </section>
 
-    <section class="play-layout">
-      <div class="table-card">
-        <div class="table-heading"><span>TABLE 08 <i id="turn-label">—</i></span><span id="round-label">الجولة —</span></div>
-        <div class="table-wrap">
-          <canvas id="pool-table" width="1000" height="560" aria-label="طاولة 8Ball"></canvas>
-          <div class="table-overlay" id="table-overlay">بانتظار دخول اللاعبين</div>
-        </div>
-        <div class="controls">
-          <label>القوة <input id="power" type="range" min="10" max="100" value="55"><b id="power-value">55%</b></label>
-          <button id="shoot-button" class="shoot-button" disabled>اضرب الكرة</button>
-        </div>
-      </div>
+    <footer class="control-bar">
+      <div class="power-control"><div class="power-heading"><label for="power">قوة التسديد</label><output id="power-value" for="power">٥٥٪</output></div><input id="power" type="range" min="10" max="100" value="55" aria-label="قوة التسديد"></div>
+      <button id="shoot-button" class="shoot-button" type="button" disabled><span class="shoot-icon" aria-hidden="true">↗</span><span>تسديد</span><kbd>مسافة</kbd></button>
+      <div class="control-hint" id="control-hint">المس واسحب لتحديد القوة والاتجاه</div>
+    </footer>
 
-      <aside class="bracket-card">
-        <div class="bracket-heading"><span>BRACKET</span><span class="live-dot">LIVE</span></div>
-        <div id="match-list" class="match-list"><p class="muted">ستظهر المجموعات بعد إغلاق التسجيل.</p></div>
-        <div class="rules">
-          <strong>قواعد الجولة</strong>
-          <p>مباراة 1 ضد 1. الخادم هو مصدر الحقيقة؛ جميع اللاعبين والمشاهدين يستقبلون حالة الطاولة نفسها.</p>
-        </div>
-      </aside>
-    </section>
-    <div id="toast" class="toast" role="status"></div>
+    <aside class="tournament-panel" id="tournament-panel" aria-label="لوحة البطولة" hidden>
+      <div class="panel-heading"><div><small>مركز البطولة</small><strong id="tournament-label">—</strong></div><button id="close-tournament" class="close-button" type="button" aria-label="إغلاق">×</button></div>
+      <div class="tournament-stats"><div><small>المشاركون</small><strong id="player-count">—</strong></div><div><small>الحالة</small><strong id="tournament-status">بانتظار الاتصال</strong></div></div>
+      <div class="match-list" id="match-list"><p class="muted">ستظهر المباريات بعد الاتصال.</p></div>
+    </aside>
+
+    <div class="notice-stack" aria-live="polite"><div id="result-banner" class="result-banner" hidden></div><div id="toast" class="toast" role="status"></div></div>
+    <div class="orientation-warning" role="status"><span aria-hidden="true">▱</span><strong>أدر جهازك للوضع الأفقي</strong><small>تحتاج الطاولة إلى مساحة أفقية لتظهر بوضوح.</small></div>
   </main>
   <script type="module" src="{{ url_for('static', filename='game.js') }}"></script>
 </body>
