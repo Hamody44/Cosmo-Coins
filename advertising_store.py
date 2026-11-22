@@ -114,6 +114,8 @@ def ensure_ad_schema(guild_id: int):
             cur.execute("ALTER TABLE ad_giveaways ADD COLUMN original_channel_name TEXT")
         if "end_timestamp" not in giveaway_columns:
             cur.execute("ALTER TABLE ad_giveaways ADD COLUMN end_timestamp INTEGER")
+        if "channel_cleanup_at" not in giveaway_columns:
+            cur.execute("ALTER TABLE ad_giveaways ADD COLUMN channel_cleanup_at INTEGER")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ad_orders_queue ON ad_orders(status, premium_snapshot DESC, created_at, id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ad_orders_guild_day ON ad_orders(guild_id, status, published_at)")
         conn.commit()
@@ -535,7 +537,13 @@ def cleanup_ad_order(guild_id: int, order_id: int):
         row = cur.execute("SELECT status FROM ad_giveaways WHERE ad_order_id=?", (order_id,)).fetchone()
         if not row or row[0] not in {"paid", "refunded"}:
             return False
-        cur.execute("UPDATE ad_orders SET status='completed',completed_at=COALESCE(completed_at,?),updated_at=? WHERE guild_id=? AND id=?", (int(time.time()),int(time.time()),guild_id,order_id)); conn.commit(); return cur.rowcount == 1
+        now = int(time.time())
+        cur.execute(
+            "UPDATE ad_giveaways SET channel_cleanup_at=COALESCE(channel_cleanup_at,?),updated_at=? "
+            "WHERE ad_order_id=? AND status IN ('paid','refunded')",
+            (now, now, order_id),
+        )
+        cur.execute("UPDATE ad_orders SET status='completed',completed_at=COALESCE(completed_at,?),updated_at=? WHERE guild_id=? AND id=?", (now,now,guild_id,order_id)); conn.commit(); return cur.rowcount == 1
     finally: conn.close()
 
 
@@ -616,5 +624,5 @@ def get_ad_statistics(guild_id: int):
 def list_ad_cleanup_orders(guild_id: int):
     ensure_ad_schema(guild_id); conn, cur = get_guild_db(guild_id)
     try:
-        return cur.execute("SELECT ad_order_id,channel_id,original_channel_name FROM ad_giveaways WHERE guild_id=? AND status IN ('paid','refunded')", (guild_id,)).fetchall()
+        return cur.execute("SELECT ad_order_id,channel_id,original_channel_name FROM ad_giveaways WHERE guild_id=? AND status IN ('paid','refunded') AND channel_cleanup_at IS NULL ORDER BY ad_order_id", (guild_id,)).fetchall()
     finally: conn.close()

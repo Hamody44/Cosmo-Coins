@@ -783,8 +783,8 @@ class Advertisements(commands.Cog):
                 continue
             for item in claimed:
                 await self._finish_expired_ad(guild, item)
-            await self._publish_next_queued(guild)
             await self._cleanup_settled_ads(guild)
+            await self._publish_next_queued(guild)
 
     async def _refresh_live_ad_participants(self, guild: discord.Guild):
         for order_id, message_id, channel_id in await asyncio.to_thread(list_live_ad_messages, guild.id):
@@ -967,11 +967,34 @@ class Advertisements(commands.Cog):
 
     async def _cleanup_settled_ads(self, guild: discord.Guild):
         rows = await asyncio.to_thread(list_ad_cleanup_orders, guild.id)
+        busy_channels = await asyncio.to_thread(list_busy_ad_channels, guild.id)
+        by_channel = {}
+        without_channel = []
         for order_id, channel_id, original_name in rows:
-            channel = guild.get_channel(channel_id) if channel_id else None
+            if not channel_id:
+                without_channel.append(order_id)
+                continue
+            channel_id = int(channel_id)
+            if channel_id in busy_channels:
+                continue
+            by_channel.setdefault(channel_id, []).append((order_id, original_name))
+
+        for channel_id, channel_orders in by_channel.items():
+            channel = guild.get_channel(channel_id)
+            # If multiple old ads were left pending, the oldest entry carries
+            # the true pre-campaign name; later entries may contain an ad name.
+            first_order_id, original_name = channel_orders[0]
             try:
                 if channel and original_name:
-                    await channel.edit(name=original_name, reason=f"Automatic cleanup for settled ad #{order_id}")
+                    await channel.edit(name=original_name, reason=f"Automatic cleanup for settled ad #{first_order_id}")
+                for order_id, _ in channel_orders:
+                    await asyncio.to_thread(cleanup_ad_order, guild.id, order_id)
+            except Exception as exc:
+                for order_id, _ in channel_orders:
+                    mark_ad_needs_review(guild.id, order_id, f"automatic cleanup failed: {exc}")
+
+        for order_id in without_channel:
+            try:
                 await asyncio.to_thread(cleanup_ad_order, guild.id, order_id)
             except Exception as exc:
                 mark_ad_needs_review(guild.id, order_id, f"automatic cleanup failed: {exc}")
@@ -1244,6 +1267,9 @@ class Advertisements(commands.Cog):
             return {"status": "needs_review", "error": "channel is not allow-listed"}
         if channel.id in await asyncio.to_thread(list_busy_ad_channels, guild.id):
             return {"status": "blocked", "error": "advertisement channel already has an active giveaway"}
+        # Clear any previous one-time restoration before capturing this ad's
+        # original name, so stale cleanup cannot rename a newly published ad.
+        await self._cleanup_settled_ads(guild)
         funding = "server_budget" if order["advertiser_id"] == guild.owner_id else "customer_payment"
         reservation = reserve_ad_giveaway(guild.id, order_id, funding)
         if reservation["status"] == "insufficient_budget":
@@ -1372,12 +1398,14 @@ class Advertisements(commands.Cog):
         giveaway = get_ad_giveaway(ctx.guild.id, order_id)
         if not giveaway or giveaway["status"] not in {"paid", "refunded"}:
             return await ctx.send("⚠️ لا يمكن تنظيف الإعلان قبل التسوية النهائية.")
+        pending_cleanup = await asyncio.to_thread(list_ad_cleanup_orders, ctx.guild.id)
+        if not any(int(row[0]) == int(order_id) for row in pending_cleanup):
+            return await ctx.send("✅ تمت استعادة اسم القناة لهذا الإعلان مسبقًا.")
         channel = ctx.guild.get_channel(giveaway["channel_id"]) if giveaway["channel_id"] else None
+        if channel and channel.id in await asyncio.to_thread(list_busy_ad_channels, ctx.guild.id):
+            return await ctx.send("⚠️ هذه القناة مستخدمة حاليًا في إعلان آخر؛ لن أغيّر اسمها الآن.")
         try:
-            if channel and giveaway["original_channel_name"]:
-                await channel.edit(name=giveaway["original_channel_name"], reason=f"Cleanup settled ad #{order_id}")
-            if not cleanup_ad_order(ctx.guild.id, order_id):
-                return await ctx.send("⚠️ تعذر تسجيل اكتمال التنظيف؛ لم يتم عكس التسوية.")
+            await self._cleanup_settled_ads(ctx.guild)
         except Exception as exc:
             from advertising_store import mark_ad_needs_review
             mark_ad_needs_review(ctx.guild.id, order_id, f"cleanup failed: {exc}")

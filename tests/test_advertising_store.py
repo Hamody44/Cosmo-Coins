@@ -168,6 +168,22 @@ class AdvertisingStoreTests(unittest.TestCase):
         self.assertEqual(store.claim_expired_ad_giveaways(1, now=10**12), [])
         self.assertEqual(store.finish_ad_giveaway(1, order_id, [77])["status"], "awaiting_owner_decision")
 
+    def test_settled_ad_channel_cleanup_is_listed_only_once(self):
+        from database import get_guild_db
+
+        order_id = store.create_ad_order(1, 20, 30, "1d", 1, 5_000_000)
+        store.update_ad_order(1, order_id, status="paid")
+        store.reserve_ad_giveaway(1, order_id, "customer_payment")
+        store.record_ad_published(1, order_id, 55, 66, 0, "giveaway")
+        conn, cur = get_guild_db(1)
+        cur.execute("UPDATE ad_giveaways SET status='paid' WHERE ad_order_id=?", (order_id,))
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(store.list_ad_cleanup_orders(1), [(order_id, 55, "giveaway")])
+        self.assertTrue(store.cleanup_ad_order(1, order_id))
+        self.assertEqual(store.list_ad_cleanup_orders(1), [])
+
 
 if __name__ == "__main__":
     unittest.main()
