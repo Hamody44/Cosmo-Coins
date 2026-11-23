@@ -125,6 +125,11 @@ class DashboardSecurityTests(unittest.TestCase):
         self.assertFalse(dashboard.guild_can_manage_exchange({"owner": False, "permissions": "0"}))
         self.assertFalse(dashboard.guild_can_manage_exchange({"owner": False, "permissions": "invalid"}))
 
+    def test_global_dashboard_controls_require_primary_owner(self):
+        self.assertTrue(dashboard.session_user_is_primary_owner({"id": str(dashboard.PRIMARY_OWNER_ID)}))
+        self.assertFalse(dashboard.session_user_is_primary_owner({"id": "123456789"}))
+        self.assertFalse(dashboard.session_user_is_primary_owner({"id": "not-an-id"}))
+
     def test_profile_exchange_list_includes_manageable_non_premium_guild(self):
         class Response:
             status_code = 200

@@ -22,6 +22,7 @@ if project_root not in sys.path:
 
 # استيراد الدوال والأدوات المتاحة من database.py
 import database
+import premium_payments
 from database import (
     get_guild_db, PRIMARY_OWNER_ID, get_balance, parse_amount,
     create_exchange_request, deny_exchange_request,
@@ -281,6 +282,14 @@ def guild_can_manage_exchange(guild_data: dict) -> bool:
         permissions = 0
     return bool(guild_data.get("owner") or (permissions & 0x8) or (permissions & 0x20))
 
+
+def session_user_is_primary_owner(user: dict) -> bool:
+    """Global dashboard controls are restricted to the configured bot owner."""
+    try:
+        return int(user.get("id", 0)) == int(PRIMARY_OWNER_ID)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
 def fetch_public_image(url: str, max_bytes: int = 8 * 1024 * 1024):
     """جلب صورة HTTPS عامة فقط مع منع عناوين الشبكات الخاصة والتحويلات."""
     try:
@@ -481,6 +490,8 @@ def manage(guild_id):
     if guild_id not in get_bot_guild_ids():
         abort(404, description="البوت غير موجود في هذا السيرفر.")
 
+    is_primary_owner = session_user_is_primary_owner(user)
+
     try:
         conn, cur = get_guild_db(guild_id)
         bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
@@ -528,7 +539,33 @@ def manage(guild_id):
         # 2. معالجة إرسال البيانات (POST)
         if request.method == "POST":
             action = request.form.get("action")
-            
+
+            if action == "save_global_settings":
+                if not is_primary_owner:
+                    conn.close()
+                    abort(403, description="إعدادات البوت العامة متاحة لمالك البوت الأساسي فقط.")
+                try:
+                    premium_payments.set_purchase_enabled(request.form.get("premium_purchase") == "1")
+                    for method in ("credit", "adamc", "cosmo", "crypto"):
+                        premium_payments.set_method_enabled(
+                            method, request.form.get(f"premium_{method}") == "1"
+                        )
+                    for method in ("credit", "adamc", "crypto"):
+                        database.set_auto_budget_payment_enabled(
+                            method, request.form.get(f"budget_{method}") == "1",
+                            get_bot_guild_ids(),
+                        )
+                    database.set_global_exchange_enabled(request.form.get("exchange_system") == "1")
+                    divisor = int(request.form.get("adamc_divisor", ""))
+                    database.set_adamc_divisor(divisor)
+                except (TypeError, ValueError) as exc:
+                    conn.close()
+                    flash(f"تعذر حفظ الإعدادات العامة: {exc}", "danger")
+                    return redirect(url_for("manage", guild_id=guild_id))
+                conn.close()
+                flash("تم حفظ إعدادات البوت العامة وطرق الدفع والتبديل بنجاح.", "success")
+                return redirect(url_for("manage", guild_id=guild_id))
+
             if action == "save_settings":
                 transfer_log = request.form.get("transfer_log") or None
                 delivery_log = request.form.get("delivery_log") or None
@@ -683,6 +720,20 @@ def manage(guild_id):
             "ticket_log": ticket_log,
         }
 
+        global_settings = {
+            "premium_purchase": premium_payments.purchase_enabled(),
+            "premium_methods": {
+                method: premium_payments.method_enabled(method)
+                for method in ("credit", "adamc", "cosmo", "crypto")
+            },
+            "budget_methods": {
+                method: database.is_auto_budget_payment_enabled(method)
+                for method in ("credit", "adamc", "crypto")
+            },
+            "exchange_enabled": database.is_global_exchange_enabled(),
+            "adamc_divisor": database.get_adamc_divisor(),
+        }
+
         # العملات العامة موحدة من قاعدة سيرفر Cosmo ولا يمكن تعديلها من صفحة سيرفر أخرى.
         currencies = database.get_exchange_currencies(active_only=False)
 
@@ -738,7 +789,9 @@ def manage(guild_id):
             currency_label=currency_label,
             bot_nick=bot_current_nick,
             banner_url=banner_url,
-            avatar_url=avatar_url
+            avatar_url=avatar_url,
+            is_primary_owner=is_primary_owner,
+            global_settings=global_settings,
         )
     except Exception as e:
         import traceback

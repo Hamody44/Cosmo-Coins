@@ -62,6 +62,66 @@
     {% endif %}
 </div>
 
+{% if is_primary_owner %}
+<div class="card p-4 mb-4 border-info">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+        <div>
+            <h4 class="text-info fw-bold mb-1">🛠️ التحكم المركزي في البوت</h4>
+            <p class="text-muted-custom mb-0">هذه الإعدادات عامة وتؤثر على جميع السيرفرات التي يعمل فيها البوت.</p>
+        </div>
+        <span class="badge bg-info text-dark">مالك البوت الأساسي</span>
+    </div>
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="save_global_settings">
+        <div class="row g-3 mt-1">
+            <div class="col-lg-4">
+                <div class="p-3 bg-dark rounded border border-secondary h-100">
+                    <h6 class="text-warning fw-bold">⭐ شراء Premium</h6>
+                    <div class="form-check form-switch mb-3">
+                        <input class="form-check-input" type="checkbox" name="premium_purchase" value="1" id="premium_purchase" {% if global_settings.premium_purchase %}checked{% endif %}>
+                        <label class="form-check-label text-white" for="premium_purchase">فتح شراء Premium</label>
+                    </div>
+                    <div class="small text-muted-custom mb-2">طرق الدفع المتاحة:</div>
+                    {% for method, label in [('credit', 'ProBot Credits'), ('adamc', 'AdamC'), ('cosmo', 'رصيد Cosmo'), ('crypto', 'Crypto / LTC')] %}
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" name="premium_{{ method }}" value="1" id="premium_{{ method }}" {% if global_settings.premium_methods[method] %}checked{% endif %}>
+                        <label class="form-check-label text-white" for="premium_{{ method }}">{{ label }}</label>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="col-lg-4">
+                <div class="p-3 bg-dark rounded border border-secondary h-100">
+                    <h6 class="text-success fw-bold">🪙 شحن ميزانية السيرفرات</h6>
+                    <p class="small text-muted-custom">فتح أو إغلاق وسائل الشحن التلقائي لجميع السيرفرات.</p>
+                    {% for method, label in [('credit', 'ProBot Credits'), ('adamc', 'AdamC'), ('crypto', 'Crypto / LTC')] %}
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" name="budget_{{ method }}" value="1" id="budget_{{ method }}" {% if global_settings.budget_methods[method] %}checked{% endif %}>
+                        <label class="form-check-label text-white" for="budget_{{ method }}">{{ label }}</label>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="col-lg-4">
+                <div class="p-3 bg-dark rounded border border-secondary h-100">
+                    <h6 class="text-primary fw-bold">⚙️ التبديل والتحويل</h6>
+                    <div class="form-check form-switch mb-3">
+                        <input class="form-check-input" type="checkbox" name="exchange_system" value="1" id="exchange_system" {% if global_settings.exchange_enabled %}checked{% endif %}>
+                        <label class="form-check-label text-white" for="exchange_system">فتح التبديل العام</label>
+                    </div>
+                    <label class="form-label text-white fw-semibold" for="adamc_divisor">قاسم تحويل AdamC</label>
+                    <input class="form-control" type="number" min="1" max="1000000" name="adamc_divisor" id="adamc_divisor" value="{{ global_settings.adamc_divisor }}" required>
+                    <small class="text-muted-custom">مثال: 5 يعني كل 5 Credits = 1 AdamC.</small>
+                </div>
+            </div>
+        </div>
+        <div class="alert alert-warning mt-3 mb-3">تغيير إعدادات الدفع قد يلغي طلبات الشحن المعلقة للوسيلة التي تم إغلاقها أو إعادة تفعيلها.</div>
+        <button type="submit" class="btn btn-info fw-bold">حفظ الإعدادات العامة</button>
+    </form>
+</div>
+{% endif %}
+
 <div class="row g-4">
     <!-- إعدادات التبديل ورومات لوجات السيرفر -->
     <div class="col-lg-5">
