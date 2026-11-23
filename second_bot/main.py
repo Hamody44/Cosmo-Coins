@@ -47,10 +47,11 @@ try:
     from second_bot.auto_delivery import (
         HANDOFF_PREFIX,
         build_delivery_result_message,
+        is_provider_confirmation,
         verify_handoff_message,
     )
 except ImportError:  # direct execution from second_bot/
-    from auto_delivery import HANDOFF_PREFIX, build_delivery_result_message, verify_handoff_message
+    from auto_delivery import HANDOFF_PREFIX, build_delivery_result_message, is_provider_confirmation, verify_handoff_message
 
 BASE_DIR = Path(__file__).resolve().parent
 GLOBAL_DB_PATH = BASE_DIR.parent / "global_cosmo.db"
@@ -83,8 +84,10 @@ WALLET_CURRENCY_LABELS = {"credit": "Credit", "adamc": "AdamC", "rob": "Rob"}
 AUTO_DELIVERY_STATE_PATH = BASE_DIR / ".runtime" / "auto_delivery_state.json"
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 pending_currency_confirmations: dict[int, str] = {}
+pending_provider_confirmations: dict[int, dict[str, object]] = {}
 AUTO_DELIVERY_LOCK = asyncio.Lock()
 AUTO_DELIVERY_INTERVAL_SECONDS = 120.0
+AUTO_DELIVERY_CONFIRMATION_TIMEOUT_SECONDS = 30.0
 WALLET_LOCK = asyncio.Lock()
 AUTO_JOIN_INTERVAL_SECONDS = 60
 auto_join_next_allowed_at = 0.0
@@ -297,8 +300,9 @@ def record_auto_delivery_success() -> None:
 def transition_auto_exchange_request(order_id: int, operation: str) -> bool:
     """Atomically reserve, complete, or release an exchange row shared with the primary bot."""
     transitions = {
-        "claim": ("قيد التسليم التلقائي", "قيد الانتظار", None),
-        "complete": ("تم القبول", "قيد التسليم التلقائي", "تسليم تلقائي"),
+        "claim": ("قيد التسليم التلقائي", "قيد الانتظار", "قيد التسليم التلقائي"),
+        "fail": ("قيد التسليم التلقائي", "قيد التسليم التلقائي", "فشل التسليم التلقائي"),
+        "complete": ("تم القبول", "قيد التسليم التلقائي", "نجح التسليم التلقائي"),
         "release": ("قيد الانتظار", "قيد التسليم التلقائي", "قيد الانتظار"),
     }
     if operation not in transitions:
@@ -342,6 +346,22 @@ async def report_auto_delivery_result(message: discord.Message, order_id: int, o
         await message.channel.send(result_message, allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException:
         logger.exception("Could not report automatic-delivery result for order %s.", order_id)
+
+
+async def wait_for_provider_confirmation(channel_id: int, provider: str) -> bool:
+    """Wait for the provider receipt in the delivery channel, expiring after one attempt."""
+    event = asyncio.Event()
+    key = int(channel_id)
+    pending_provider_confirmations[key] = {"provider": str(provider), "event": event}
+    try:
+        await asyncio.wait_for(event.wait(), timeout=AUTO_DELIVERY_CONFIRMATION_TIMEOUT_SECONDS)
+        return True
+    except asyncio.TimeoutError:
+        return False
+    finally:
+        current = pending_provider_confirmations.get(key)
+        if current is not None and current.get("event") is event:
+            pending_provider_confirmations.pop(key, None)
 
 
 async def notify_wallet_owner(message: str) -> None:
@@ -2976,24 +2996,36 @@ async def process_auto_delivery_handoff(message: discord.Message) -> None:
         await report_auto_delivery_result(message, order_id, "processing")
 
         confirmation_type = payload["confirmation_type"]
-        if confirmation_type:
-            pending_currency_confirmations[int(destination.id)] = confirmation_type
         try:
-            await destination.send(
-                payload["command"],
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            while True:
+                if confirmation_type:
+                    confirmation_task = asyncio.create_task(
+                        wait_for_provider_confirmation(int(destination.id), payload["provider"])
+                    )
+                else:
+                    confirmation_task = None
+                await destination.send(
+                    payload["command"],
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                confirmed = True if confirmation_task is None else await confirmation_task
+                if confirmed:
+                    break
+                transition_auto_exchange_request(order_id, "fail")
+                await report_auto_delivery_result(message, order_id, "failed")
+                logger.warning(
+                    "No %s confirmation received for order %s; retrying in 30 seconds.",
+                    payload["provider"], order_id,
+                )
+                await asyncio.sleep(30.0)
+
             try:
                 record_auto_delivery_success()
             except OSError:
-                logger.exception(
-                    "Could not persist the automatic-delivery interval after order %s.",
-                    order_id,
-                )
-                await asyncio.sleep(AUTO_DELIVERY_INTERVAL_SECONDS)
+                logger.exception("Could not persist the automatic-delivery interval after order %s.", order_id)
             await check_wallet_recharge_threshold(wallet_currency)
             logger.info(
-                "Posted automatic %s delivery command for order %s in channel %s.",
+                "Confirmed automatic %s delivery for order %s in channel %s.",
                 payload["provider"], order_id, destination.id,
             )
             try:
@@ -3004,12 +3036,12 @@ async def process_auto_delivery_handoff(message: discord.Message) -> None:
                 logger.exception("Provider command was sent but database completion failed for order %s.", order_id)
             await report_auto_delivery_result(message, order_id, "automatic")
         except discord.HTTPException:
+            if confirmation_task is not None and not confirmation_task.done():
+                confirmation_task.cancel()
             try:
                 await restore_wallet_balance(wallet_currency, int(payload["amount"]))
             except OSError:
                 logger.exception("Could not restore %s wallet funds after failed order %s send.", wallet_currency, order_id)
-            if confirmation_type:
-                pending_currency_confirmations.pop(int(destination.id), None)
             try:
                 transition_auto_exchange_request(order_id, "release")
             except (OSError, sqlite3.Error):
@@ -3069,6 +3101,26 @@ async def process_pending_currency_confirmation(message: discord.Message) -> Non
             pending_currency_confirmations.pop(channel_id, None)
     except Exception:
         logger.exception("Could not process pending %s currency confirmation.", expected_type)
+
+
+async def process_provider_confirmation(message: discord.Message) -> None:
+    """Resolve a waiting automatic delivery only from the expected provider bot receipt."""
+    channel_id = getattr(message.channel, "id", None)
+    if channel_id is None:
+        return
+    pending = pending_provider_confirmations.get(int(channel_id))
+    if not pending:
+        return
+    provider = str(pending.get("provider", ""))
+    if not is_provider_confirmation(
+        getattr(message, "content", ""),
+        getattr(getattr(message, "author", None), "id", None),
+        provider,
+    ):
+        return
+    event = pending.get("event")
+    if isinstance(event, asyncio.Event):
+        event.set()
 
 
 def publish_current_second_bot_state() -> None:
@@ -3143,6 +3195,7 @@ async def on_message(message: discord.Message) -> None:
             content,
         )
     await process_auto_delivery_handoff(message)
+    await process_provider_confirmation(message)
     await process_pending_currency_confirmation(message)
     await bot.process_commands(message)
 

@@ -966,7 +966,13 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
         })
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
+        self.confirmation_patch = patch.object(
+            main, "wait_for_provider_confirmation", new=AsyncMock(return_value=True)
+        )
+        self.confirmation_patch.start()
+        self.addCleanup(self.confirmation_patch.stop)
         main.pending_currency_confirmations.clear()
+        main.pending_provider_confirmations.clear()
         main.save_wallet_balances({"credit": 1_000, "adamc": 1_000, "rob": 1_000})
         self.owner = SimpleNamespace(send=AsyncMock())
         self.destination = SimpleNamespace(
@@ -990,13 +996,11 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    async def test_signed_handoff_posts_one_command_and_arms_confirmation(self):
+    async def test_signed_handoff_posts_one_command_and_marks_success_after_provider_confirmation(self):
         with patch.object(main.bot, "get_channel", return_value=self.destination), patch.object(
             main, "transition_auto_exchange_request", return_value=True
         ) as transition:
             await main.process_auto_delivery_handoff(self.message)
-            self.assertEqual(main.pending_currency_confirmations[456], "type1")
-            main.pending_currency_confirmations.clear()
             await main.process_auto_delivery_handoff(self.message)
 
         self.destination.send.assert_awaited_once()
@@ -1006,48 +1010,41 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
             self.destination.send.await_args.kwargs["allowed_mentions"].to_dict(),
             discord.AllowedMentions.none().to_dict(),
         )
-        self.assertNotIn(456, main.pending_currency_confirmations)
+        self.assertNotIn(456, main.pending_provider_confirmations)
         self.assertEqual(main.auto_delivery_state()["processed_orders"], [81])
         self.assertEqual(
             [call.args[1] for call in transition.call_args_list],
             ["claim", "complete"],
         )
 
-    async def test_probot_auto_delivery_confirmation_uses_shared_type1_pipeline(self):
-        with patch.object(main.bot, "get_channel", return_value=self.destination), patch.object(
-            main, "transition_auto_exchange_request", return_value=True
+    async def test_provider_message_resolves_waiting_confirmation(self):
+        event = asyncio.Event()
+        main.pending_provider_confirmations[456] = {"provider": "ProBot", "event": event}
+        response_message = SimpleNamespace(
+            channel=self.destination,
+            author=SimpleNamespace(id=282859044593598464),
+            content="**ـ zeko2019., قام بتحويل `$14250000` لـ <@!1319281662533697606> ** |:moneybag:",
+        )
+        await main.process_provider_confirmation(response_message)
+        self.assertTrue(event.is_set())
+
+    async def test_provider_delivery_retries_after_30_seconds_until_confirmation(self):
+        self.confirmation_patch.stop()
+        confirmation = patch.object(
+            main, "wait_for_provider_confirmation", new=AsyncMock(side_effect=[False, True])
+        )
+        confirmation.start()
+        self.addCleanup(confirmation.stop)
+        with (
+            patch.object(main.bot, "get_channel", return_value=self.destination),
+            patch.object(main, "transition_auto_exchange_request", return_value=True) as transition,
+            patch.object(main.asyncio, "sleep", new=AsyncMock()) as sleep,
         ):
             await main.process_auto_delivery_handoff(self.message)
 
-        self.assertEqual(main.pending_currency_confirmations[456], "type1")
-        attachment = SimpleNamespace(
-            content_type="image/png",
-            filename="probot-confirmation.png",
-            size=4,
-            read=AsyncMock(return_value=b"automatic-probot-confirmation"),
-        )
-        response_message = SimpleNamespace(channel=self.destination, attachments=[attachment])
-        with (
-            patch.dict(os.environ, {"OCR_SPACE_API_KEY": "ocr-test-key"}),
-            patch.object(main, "detect_image_style", return_value="type1"),
-            patch.object(main, "extract_type1_hybrid", new=AsyncMock(return_value={
-                "result": "19384", "source": "Gemini (gemini-3.5-flash-lite)",
-            })) as type1_pipeline,
-        ):
-            await main.process_pending_currency_confirmation(response_message)
-
-        type1_pipeline.assert_awaited_once_with(
-            b"automatic-probot-confirmation",
-            "image/png",
-            ocr_space_key="ocr-test-key",
-        )
-        self.destination.send.assert_awaited()
-        self.assertEqual(self.destination.send.await_args.args[0], "19384")
-        self.assertEqual(
-            self.destination.send.await_args.kwargs["allowed_mentions"].to_dict(),
-            discord.AllowedMentions.none().to_dict(),
-        )
-        self.assertNotIn(456, main.pending_currency_confirmations)
+        self.assertEqual(self.destination.send.await_count, 2)
+        sleep.assert_awaited_once_with(30.0)
+        self.assertEqual([call.args[1] for call in transition.call_args_list], ["claim", "fail", "complete"])
 
     async def test_disabled_auto_delivery_leaves_order_for_manual_handling(self):
         main.write_runtime_json(self.state_path, {"enabled": False, "processed_orders": []})
@@ -1225,7 +1222,7 @@ class AutoDeliveryFlowTests(unittest.IsolatedAsyncioTestCase):
         with main.sqlite3.connect(database_path) as conn:
             self.assertEqual(
                 conn.execute("SELECT status, delivery_status FROM exchange_logs WHERE id = 81").fetchone(),
-                ("تم القبول", "تسليم تلقائي"),
+                ("تم القبول", "نجح التسليم التلقائي"),
             )
 
 

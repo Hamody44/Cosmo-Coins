@@ -17,6 +17,14 @@ DELIVERY_RESULT_PREFIX = "COSMO_DELIVERY_RESULT_V1:"
 DELIVERY_RESULT_PATTERN = re.compile(
     r"\|\|COSMO_DELIVERY_RESULT_V1:([A-Za-z0-9_-]+)\.([0-9a-f]{64})\|\|"
 )
+PROVIDER_CONFIRMATION_BOT_IDS = {
+    "ProBot": 282859044593598464,
+    "AdamC": 1505622388975468684,
+}
+PROVIDER_CONFIRMATION_PATTERNS = {
+    "ProBot": re.compile(r"(?=.*قام\s+بتحويل)(?=.*(?:💰|:moneybag:))(?=.*<@!?\d+>)", re.IGNORECASE | re.DOTALL),
+    "AdamC": re.compile(r"(?:💰|:moneybag:)\s*\|.*?has\s+transferred.*?to\s+<@!?\d+>", re.IGNORECASE | re.DOTALL),
+}
 MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
 
@@ -29,6 +37,18 @@ def _provider_for_currency(currency_name: str) -> str | None:
     if any(token in normalized for token in ("robux", "rob", "روبوكس")):
         return "Rob"
     return None
+
+
+def is_provider_confirmation(message_content: str, author_id: int, provider: str) -> bool:
+    """Accept only the provider's recognizable transfer receipt; amount and recipient are ignored."""
+    try:
+        expected_author = PROVIDER_CONFIRMATION_BOT_IDS.get(str(provider))
+        if expected_author is None or int(author_id) != expected_author:
+            return False
+    except (TypeError, ValueError):
+        return False
+    pattern = PROVIDER_CONFIRMATION_PATTERNS.get(str(provider))
+    return bool(pattern and pattern.search(str(message_content or "")))
 
 
 def transfer_details(currency_name: str, user_id: int, amount: int) -> tuple[str, str | None] | None:
@@ -151,7 +171,7 @@ def verify_handoff_message(content: str, secret: str) -> dict[str, Any] | None:
 def build_delivery_result_message(*, secret: str, issuer_id: int, order_id: int, outcome: str) -> str | None:
     """Create a signed status callback from the delivery bot to the primary bot."""
     signing_key = _valid_secret(secret)
-    if signing_key is None or outcome not in {"processing", "automatic", "pending", "rejected"}:
+    if signing_key is None or outcome not in {"processing", "automatic", "failed", "pending", "rejected"}:
         return None
     try:
         issuer_id = int(issuer_id)
@@ -187,7 +207,7 @@ def verify_delivery_result_message(content: str, secret: str) -> dict[str, Any] 
     if not isinstance(payload, dict) or set(payload) != {"v", "issuer_id", "order_id", "outcome"}:
         return None
     if payload.get("v") != HANDOFF_VERSION or payload.get("outcome") not in {
-        "processing", "automatic", "pending", "rejected",
+        "processing", "automatic", "failed", "pending", "rejected",
     }:
         return None
     for key in ("issuer_id", "order_id"):

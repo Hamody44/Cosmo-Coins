@@ -5,6 +5,7 @@ import unittest
 from second_bot.auto_delivery import (
     build_delivery_result_message,
     build_handoff_message,
+    is_provider_confirmation,
     verify_delivery_result_message,
     verify_handoff_message,
 )
@@ -46,6 +47,19 @@ class SignedHandoffTests(unittest.TestCase):
         self.assertEqual(rob["command"], "!transfer 789 250")
         self.assertIsNone(rob["confirmation_type"])
 
+    def test_provider_confirmation_ignores_amount_and_recipient(self):
+        self.assertTrue(is_provider_confirmation(
+            "**ـ zeko2019., قام بتحويل `$14250000` لـ <@!1319281662533697606> ** |:moneybag:",
+            282859044593598464,
+            "ProBot",
+        ))
+        self.assertTrue(is_provider_confirmation(
+            "💰 | **zeko2019.**, has transferred **$500,000** to <@1459901905898831878>.",
+            1505622388975468684,
+            "AdamC",
+        ))
+        self.assertFalse(is_provider_confirmation("has transferred $500 to <@1>", 123, "AdamC"))
+
     def test_invalid_signature_or_secret_is_rejected(self):
         handoff = self.build()
         altered_signature = handoff[:-3] + ("0" if handoff[-3] != "0" else "1") + handoff[-2:]
@@ -62,7 +76,7 @@ class SignedHandoffTests(unittest.TestCase):
         self.assertIsNone(self.build(user_id=-1))
 
     def test_signed_delivery_result_round_trips_all_supported_outcomes(self):
-        for outcome in ("processing", "automatic", "pending", "rejected"):
+        for outcome in ("processing", "automatic", "failed", "pending", "rejected"):
             with self.subTest(outcome=outcome):
                 message = build_delivery_result_message(
                     secret=SECRET, issuer_id=444, order_id=81, outcome=outcome

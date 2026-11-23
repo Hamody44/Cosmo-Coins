@@ -1962,6 +1962,19 @@ def complete_auto_exchange_delivery(request_id: int) -> bool:
         return cur.rowcount == 1
 
 
+def mark_auto_exchange_delivery_failed(request_id: int) -> bool:
+    """Show a failed provider attempt while keeping the request eligible for retry."""
+    with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        _ensure_exchange_delivery_columns(conn)
+        cur = conn.execute(
+            "UPDATE exchange_logs SET delivery_status = 'فشل التسليم التلقائي' "
+            "WHERE id = ? AND status = 'قيد التسليم التلقائي'",
+            (int(request_id),),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
 def release_auto_exchange_delivery(request_id: int) -> bool:
     """Return an unposted auto payout to pending so admins can process it manually."""
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:

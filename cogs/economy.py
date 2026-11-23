@@ -19,7 +19,7 @@ from database import (
     is_global_exchange_enabled, ExchangeSystemClosed, ExchangeCurrencyUnavailable,
     get_exchange_room_id, EXCHANGE_BASE_COSMO, format_exchange_amount,
     complete_auto_exchange_delivery, release_auto_exchange_delivery,
-    reject_auto_exchange_delivery, get_exchange_request_delivery_data,
+    mark_auto_exchange_delivery_failed, reject_auto_exchange_delivery, get_exchange_request_delivery_data,
     get_exchange_requests_for_ui, set_exchange_request_message,
 )
 
@@ -305,7 +305,10 @@ class Economy(commands.Cog):
     def _delivery_status_label(status: str) -> str:
         return {
             "قيد الانتظار": "⏳ قيد الانتظار",
-            "تسليم تلقائي": "🤖 تسليم تلقائي",
+            "قيد التسليم التلقائي": "🤖 قيد التسليم التلقائي",
+            "تسليم تلقائي": "✅ نجح التسليم التلقائي",
+            "نجح التسليم التلقائي": "✅ نجح التسليم التلقائي",
+            "فشل التسليم التلقائي": "❌ فشل التسليم التلقائي",
             "تسليم يدوي": "🧑‍💼 تسليم يدوي",
             "مرفوض": "❌ مرفوض",
         }.get(status, "⏳ قيد الانتظار")
@@ -450,6 +453,8 @@ class Economy(commands.Cog):
                     )
                 except (discord.Forbidden, discord.HTTPException) as exc:
                     print(f"Could not send automatic exchange success log for request {request_id}: {exc}")
+        elif outcome == "failed":
+            mark_auto_exchange_delivery_failed(request_id)
         elif outcome == "pending":
             release_auto_exchange_delivery(request_id)
         elif outcome == "rejected":
