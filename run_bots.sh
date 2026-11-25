@@ -6,6 +6,13 @@ PYTHON_FALLBACK="${PYTHON:-python3}"
 STATE_DIR="$ROOT_DIR/second_bot/.runtime/process_control"
 SUPERVISOR_PID_FILE="$STATE_DIR/supervisor.pid"
 REQUEST_FILE="$STATE_DIR/request"
+SECOND_BOT_ACTIVITY_FILE="$STATE_DIR/second_bot.activity"
+SECOND_BOT_IDLE_SECONDS="${SECOND_BOT_IDLE_SECONDS:-90}"
+
+if ! [[ "$SECOND_BOT_IDLE_SECONDS" =~ ^[0-9]+$ ]] || (( SECOND_BOT_IDLE_SECONDS < 1 )); then
+    printf 'خطأ: SECOND_BOT_IDLE_SECONDS يجب أن يكون عدداً صحيحاً أكبر من صفر.\n' >&2
+    exit 2
+fi
 
 mkdir -p "$STATE_DIR"
 
@@ -39,6 +46,27 @@ status_bot() {
         printf '%s: running (PID %s)\n' "$name" "$pid"
     else
         printf '%s: stopped\n' "$name"
+    fi
+}
+
+mark_second_bot_activity() {
+    touch "$SECOND_BOT_ACTIVITY_FILE"
+}
+
+second_bot_idle() {
+    local last_activity now
+    [[ -f "$SECOND_BOT_ACTIVITY_FILE" ]] || return 0
+    last_activity="$(stat -c '%Y' "$SECOND_BOT_ACTIVITY_FILE" 2>/dev/null || printf '0')"
+    now="$(date +%s)"
+    [[ "$last_activity" =~ ^[0-9]+$ ]] || return 0
+    (( now - last_activity >= SECOND_BOT_IDLE_SECONDS ))
+}
+
+stop_idle_second_bot() {
+    if bot_is_running "second_bot" && second_bot_idle; then
+        printf 'إيقاف second_bot بعد %s ثانية من الخمول.\n' "$SECOND_BOT_IDLE_SECONDS"
+        stop_bot "second_bot"
+        rm -f "$SECOND_BOT_ACTIVITY_FILE"
     fi
 }
 
@@ -76,6 +104,9 @@ if [[ "${1:-}" == "control" ]]; then
     request_tmp="$REQUEST_FILE.$$"
     printf '%s %s\n' "$action" "$target" > "$request_tmp"
     mv -f "$request_tmp" "$REQUEST_FILE"
+    if [[ "$target" == "second_bot" ]]; then
+        mark_second_bot_activity
+    fi
     printf 'queued: %s %s\n' "$action" "$target"
     exit 0
 fi
@@ -181,6 +212,7 @@ start_target() {
             launch_bot "primary" "$ROOT_DIR" "$ROOT_DIR/cosmo_requirements.lock"
             ;;
         second_bot)
+            mark_second_bot_activity
             launch_bot "second_bot" "$ROOT_DIR/second_bot" "$ROOT_DIR/second_bot/cosmo_second_requirements.lock"
             ;;
     esac
@@ -204,6 +236,7 @@ handle_request() {
             ;;
         shutdown)
             stop_bot "$target"
+            [[ "$target" == "second_bot" ]] && rm -f "$SECOND_BOT_ACTIVITY_FILE"
             ;;
     esac
 }
@@ -212,19 +245,18 @@ cleanup() {
     trap - INT TERM EXIT
     stop_bot "primary"
     stop_bot "second_bot"
-    rm -f "$SUPERVISOR_PID_FILE" "$REQUEST_FILE"
+    rm -f "$SUPERVISOR_PID_FILE" "$REQUEST_FILE" "$SECOND_BOT_ACTIVITY_FILE"
 }
 
 trap cleanup INT TERM EXIT
 
+# The primary bot remains available. The self-bot is started only after a
+# queued "start second_bot" request and is stopped automatically after idle.
 launch_bot "primary" "$ROOT_DIR" "$ROOT_DIR/cosmo_requirements.lock" || exit 1
-launch_bot "second_bot" "$ROOT_DIR/second_bot" "$ROOT_DIR/second_bot/cosmo_second_requirements.lock" || {
-    stop_bot "primary"
-    exit 1
-}
 
-printf 'تم تشغيل البوتين؛ التحكم المنفصل متاح عبر أوامر Discord.\n'
+printf 'تم تشغيل البوت الأساسي فقط؛ سيعمل second_bot عند وجود طلب، وسيُوقف بعد %s ثانية من الخمول.\n' "$SECOND_BOT_IDLE_SECONDS"
 while :; do
     handle_request
+    stop_idle_second_bot
     sleep 0.5
 done

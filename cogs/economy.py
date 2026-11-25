@@ -23,6 +23,67 @@ from database import (
     get_exchange_requests_for_ui, set_exchange_request_message,
 )
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RUN_BOTS_SCRIPT = os.path.join(ROOT_DIR, "run_bots.sh")
+SECOND_BOT_PID_FILE = os.path.join(ROOT_DIR, "second_bot", ".runtime", "process_control", "second_bot.pid")
+SECOND_BOT_STATE_FILE = os.path.join(ROOT_DIR, "second_bot", ".runtime", "shared_guilds.json")
+
+def second_bot_process_is_running() -> bool:
+    try:
+        with open(SECOND_BOT_PID_FILE, "r", encoding="utf-8") as pid_file:
+            pid = int(pid_file.read().strip())
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+async def start_second_bot_for_delivery() -> bool:
+    """Start the second bot and wait until it has published a ready state."""
+    already_running = second_bot_process_is_running()
+    requested_at = datetime.now().timestamp()
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "bash",
+            RUN_BOTS_SCRIPT,
+            "control",
+            "start",
+            "second_bot",
+            cwd=ROOT_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            print("⚠️ انتهت مهلة إرسال طلب تشغيل self-bot.")
+            return False
+    except (OSError, asyncio.SubprocessError) as exc:
+        print(f"⚠️ تعذر تشغيل self-bot تلقائياً: {exc}")
+        return False
+
+    if process.returncode != 0:
+        message = output.decode("utf-8", errors="replace").strip()
+        print(f"⚠️ رفض مشرف التشغيل بدء self-bot: {message or process.returncode}")
+        return False
+
+    if already_running:
+        return True
+
+    ready_deadline = asyncio.get_running_loop().time() + 20
+    while asyncio.get_running_loop().time() < ready_deadline:
+        try:
+            state_updated_at = os.path.getmtime(SECOND_BOT_STATE_FILE)
+        except OSError:
+            state_updated_at = 0
+        if state_updated_at >= requested_at and second_bot_process_is_running():
+            return True
+        await asyncio.sleep(0.25)
+
+    print("⚠️ بدأ تشغيل self-bot لكن لم تصل إشارة الجاهزية خلال المهلة.")
+    return False
+
 def can_manage_exchange_request(ctx: commands.Context, origin_guild_id: int) -> bool:
     """مالك البوت أو مدير السيرفر صاحب الطلب يستطيع معالجة الطلب؛ لا يلزم Premium."""
     if ctx.author.id == PRIMARY_OWNER_ID:
@@ -806,6 +867,13 @@ class Economy(commands.Cog):
                 embed.add_field(
                     name="ℹ️ التسليم التلقائي",
                     value="لم يُجهّز إشعار آمن للبوت الثاني؛ سيبقى زر التسليم اليدوي متاحًا. تحقّق من إعداد المفتاح المشترك في ملفي البيئة.",
+                    inline=False,
+                )
+            elif not await start_second_bot_for_delivery():
+                auto_delivery_handoff = None
+                embed.add_field(
+                    name="ℹ️ التسليم التلقائي",
+                    value="تعذر تشغيل البوت الثاني تلقائياً؛ سيبقى زر التسليم اليدوي متاحاً.",
                     inline=False,
                 )
 

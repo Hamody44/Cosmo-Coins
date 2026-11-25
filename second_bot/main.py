@@ -22,7 +22,7 @@ from email.utils import parsedate_to_datetime
 from io import BytesIO, StringIO
 from pathlib import Path
 from functools import lru_cache
-
+from types import SimpleNamespace
 import aiohttp
 import discord
 from discord.ext import commands, tasks
@@ -52,6 +52,10 @@ try:
     )
 except ImportError:  # direct execution from second_bot/
     from auto_delivery import HANDOFF_PREFIX, build_delivery_result_message, is_provider_confirmation, verify_handoff_message
+try:
+    from second_bot.command_queue import claim_next_command, finish_command
+except ImportError:  # direct execution from second_bot/
+    from command_queue import claim_next_command, finish_command
 
 BASE_DIR = Path(__file__).resolve().parent
 GLOBAL_DB_PATH = BASE_DIR.parent / "global_cosmo.db"
@@ -84,6 +88,7 @@ WALLET_CURRENCY_LABELS = {"credit": "Credit", "adamc": "AdamC", "rob": "Rob"}
 AUTO_DELIVERY_STATE_PATH = BASE_DIR / ".runtime" / "auto_delivery_state.json"
 user_command_cooldowns: dict[tuple[int, int], float] = {}
 pending_currency_confirmations: dict[int, str] = {}
+pending_currency_confirmation_events: dict[int, asyncio.Event] = {}
 pending_provider_confirmations: dict[int, dict[str, object]] = {}
 AUTO_DELIVERY_LOCK = asyncio.Lock()
 AUTO_DELIVERY_INTERVAL_SECONDS = 120.0
@@ -362,6 +367,29 @@ async def wait_for_provider_confirmation(channel_id: int, provider: str) -> bool
         current = pending_provider_confirmations.get(key)
         if current is not None and current.get("event") is event:
             pending_provider_confirmations.pop(key, None)
+
+
+async def wait_for_currency_confirmation_answer(channel_id: int, expected_type: str) -> bool:
+    """Wait until OCR extracts and sends the five-digit provider CAPTCHA answer."""
+    key = int(channel_id)
+    event = asyncio.Event()
+    previous_type = pending_currency_confirmations.get(key)
+    pending_currency_confirmations[key] = str(expected_type)
+    pending_currency_confirmation_events[key] = event
+    try:
+        await asyncio.wait_for(event.wait(), timeout=AUTO_DELIVERY_CONFIRMATION_TIMEOUT_SECONDS)
+        return True
+    except asyncio.TimeoutError:
+        return False
+    finally:
+        current_event = pending_currency_confirmation_events.get(key)
+        if current_event is event:
+            pending_currency_confirmation_events.pop(key, None)
+        if pending_currency_confirmations.get(key) == str(expected_type):
+            if previous_type is None:
+                pending_currency_confirmations.pop(key, None)
+            else:
+                pending_currency_confirmations[key] = previous_type
 
 
 async def notify_wallet_owner(message: str) -> None:
@@ -1864,6 +1892,7 @@ def create_bot() -> commands.Bot:
 
 
 bot = create_bot()
+command_queue_task: asyncio.Task | None = None
 
 class NotInSharedGuild(commands.CheckFailure):
     """Raised when a command is outside the primary bot's active guilds."""
@@ -2996,26 +3025,35 @@ async def process_auto_delivery_handoff(message: discord.Message) -> None:
         await report_auto_delivery_result(message, order_id, "processing")
 
         confirmation_type = payload["confirmation_type"]
+        confirmation_task = None
+        captcha_task = None
         try:
             while True:
+                confirmation_task = None
                 if confirmation_type:
-                    confirmation_task = asyncio.create_task(
-                        wait_for_provider_confirmation(int(destination.id), payload["provider"])
+                    captcha_task = asyncio.create_task(
+                        wait_for_currency_confirmation_answer(
+                            int(destination.id), str(confirmation_type)
+                        )
                     )
-                else:
-                    confirmation_task = None
                 await destination.send(
                     payload["command"],
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+                captcha_sent = True if captcha_task is None else await captcha_task
+                if captcha_sent and confirmation_type:
+                    confirmation_task = asyncio.create_task(
+                        wait_for_provider_confirmation(int(destination.id), payload["provider"])
+                    )
                 confirmed = True if confirmation_task is None else await confirmation_task
                 if confirmed:
                     break
                 transition_auto_exchange_request(order_id, "fail")
                 await report_auto_delivery_result(message, order_id, "failed")
                 logger.warning(
-                    "No %s confirmation received for order %s; retrying in 30 seconds.",
-                    payload["provider"], order_id,
+                    "No CAPTCHA answer or %s confirmation received for order %s; retrying in 30 seconds.",
+                    payload["provider"],
+                    order_id,
                 )
                 await asyncio.sleep(30.0)
 
@@ -3036,6 +3074,8 @@ async def process_auto_delivery_handoff(message: discord.Message) -> None:
                 logger.exception("Provider command was sent but database completion failed for order %s.", order_id)
             await report_auto_delivery_result(message, order_id, "automatic")
         except discord.HTTPException:
+            if captcha_task is not None and not captcha_task.done():
+                captcha_task.cancel()
             if confirmation_task is not None and not confirmation_task.done():
                 confirmation_task.cancel()
             try:
@@ -3099,6 +3139,9 @@ async def process_pending_currency_confirmation(message: discord.Message) -> Non
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             pending_currency_confirmations.pop(channel_id, None)
+            captcha_event = pending_currency_confirmation_events.pop(channel_id, None)
+            if isinstance(captcha_event, asyncio.Event):
+                captcha_event.set()
     except Exception:
         logger.exception("Could not process pending %s currency confirmation.", expected_type)
 
@@ -3121,6 +3164,71 @@ async def process_provider_confirmation(message: discord.Message) -> None:
     event = pending.get("event")
     if isinstance(event, asyncio.Event):
         event.set()
+
+
+async def process_command_queue() -> None:
+    """Execute durable !self requests after this temporary worker connects."""
+    while True:
+        item = claim_next_command()
+        if item is None:
+            return
+        request_id = str(item.get("id", ""))
+        try:
+            guild = bot.get_guild(int(item["guild_id"]))
+            if guild is None:
+                raise RuntimeError("السيرفر المطلوب غير متاح للـ self-bot")
+            channel = bot.get_channel(int(item["channel_id"]))
+            if channel is None:
+                channel = await bot.fetch_channel(int(item["channel_id"]))
+            operation = str(item.get("operation", ""))
+            if operation == "say":
+                text = str(item.get("text", "")).strip()
+                if not text or len(text) > 2000:
+                    raise RuntimeError("نص say فارغ أو أطول من 2000 حرف")
+                await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+            elif operation in {"tc", "ta", "tr"}:
+                target = guild.get_member(int(item["target_id"]))
+                if target is None:
+                    target = await guild.fetch_member(int(item["target_id"]))
+                command_data = {
+                    "tc": ("#credit", "type1", "credit"),
+                    "ta": ("T", "type2", "adamc"),
+                    "tr": ("!transfer", None, "rob"),
+                }[operation]
+                proxy_context = SimpleNamespace(
+                    channel=channel,
+                    guild=guild,
+                    author=getattr(guild, "me", None),
+                    send=channel.send,
+                )
+                await send_currency_command(
+                    proxy_context,
+                    target,
+                    str(item.get("amount", "")),
+                    command_data[0],
+                    command_data[1],
+                    wallet_currency=command_data[2],
+                    extra=str(item.get("extra", "")),
+                )
+                if command_data[1]:
+                    confirmation_deadline = asyncio.get_running_loop().time() + 35
+                    while (
+                        int(channel.id) in pending_currency_confirmations
+                        and asyncio.get_running_loop().time() < confirmation_deadline
+                    ):
+                        await asyncio.sleep(0.5)
+            else:
+                raise RuntimeError("أمر self-bot غير مدعوم")
+            finish_command(request_id, status="completed")
+        except Exception as exc:
+            logger.exception("Queued self-bot command %s failed.", request_id)
+            finish_command(request_id, status="failed", error=str(exc))
+
+
+def start_command_queue_task() -> None:
+    global command_queue_task
+    if command_queue_task is None or command_queue_task.done():
+        command_queue_task = asyncio.create_task(process_command_queue())
 
 
 def publish_current_second_bot_state() -> None:
@@ -3204,6 +3312,7 @@ async def on_message(message: discord.Message) -> None:
 async def on_ready() -> None:
     logger.info("Logged in as %s (%s)", bot.user, bot.user.id if bot.user else "unknown")
     publish_current_second_bot_state()
+    start_command_queue_task()
     if not process_auto_join_queue_task.is_running():
         process_auto_join_queue_task.start()
 

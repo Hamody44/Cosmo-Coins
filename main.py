@@ -18,6 +18,7 @@ from second_bot.auto_join import (
     load_auto_join_suppressions,
     load_second_bot_state,
 )
+from second_bot.command_queue import enqueue_command
 import time
 import re
 from datetime import datetime
@@ -424,6 +425,55 @@ async def shutdown_second_bot(ctx):
 @commands.is_owner()
 async def status_second_bot(ctx):
     await ctx.send(f"ℹ️ {await control_second_bot('status')}")
+
+
+@bot.command(name="self", aliases=["selfbot"])
+@commands.is_owner()
+async def queue_self_command(ctx, action: str = "", *, payload: str = ""):
+    """Queue a self-bot operation before waking the temporary worker."""
+    action = (action or "").strip().lower().lstrip("!/$")
+    payload = (payload or "").strip()
+    if action == "say":
+        if not ctx.guild:
+            return await ctx.send("❌ أوامر self متاحة داخل السيرفرات فقط.")
+        if not payload or len(payload) > 2000:
+            return await ctx.send("❌ الاستخدام: `!self say النص` (حتى 2000 حرف).")
+        request = {
+            "operation": "say",
+            "guild_id": ctx.guild.id,
+            "channel_id": ctx.channel.id,
+            "author_id": ctx.author.id,
+            "text": payload,
+        }
+    elif action in {"tc", "ta", "tr", "t"}:
+        parts = payload.split(maxsplit=2)
+        if len(parts) < 2 or not ctx.guild:
+            return await ctx.send(f"❌ الاستخدام: `!self {action} @العضو المبلغ [نص إضافي]`.")
+        try:
+            target = await commands.MemberConverter().convert(ctx, parts[0])
+        except commands.BadArgument:
+            return await ctx.send("❌ لم أستطع العثور على العضو المستهدف.")
+        operation = "ta" if action == "t" else action
+        request = {
+            "operation": operation,
+            "guild_id": ctx.guild.id,
+            "channel_id": ctx.channel.id,
+            "author_id": ctx.author.id,
+            "target_id": target.id,
+            "amount": parts[1],
+            "extra": parts[2] if len(parts) == 3 else "",
+        }
+    else:
+        return await ctx.send("❌ الأوامر المدعومة: `say` و`tc` و`ta` و`tr`.")
+
+    request_id = enqueue_command(request)
+    start_result = await control_second_bot("start")
+    if not start_result.startswith("queued:"):
+        return await ctx.send(
+            f"⚠️ حُفظ الطلب `{request_id}`، لكن تعذر تشغيل self-bot تلقائياً. "
+            "يمكن إعادة تشغيل المشرف ثم إعادة المحاولة."
+        )
+    await ctx.send(f"✅ تم وضع الأمر `{action}` في الطابور برقم `{request_id}`.")
 
 
 @bot.event
