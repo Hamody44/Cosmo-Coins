@@ -381,7 +381,10 @@ class TicketCreateView(discord.ui.View):
         
         # إرسال الرسالة مع أزرار التحكم
         await ticket_channel.send(f"{user.mention}", embed=embed, view=TicketControlView())
-        await ticket_channel.send("🤖 كيف يمكنني مساعدتك؟ اكتب مشكلتك هنا وسأحاول مساعدتك مباشرة.")
+        await ticket_channel.send(
+            "🤖 كيف يمكنني مساعدتك؟ اكتب مشكلتك هنا وسأحاول مساعدتك مباشرة.\n\n"
+            "⛔ إذا كنت تريد إيقاف الذكاء الاصطناعي في هذه التذكرة، اكتب **توقف**."
+        )
 
         await interaction.followup.send(f"✅ تم إنشاء تذكرتك بنجاح: {ticket_channel.mention}", ephemeral=True)
 
