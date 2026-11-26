@@ -433,7 +433,34 @@ async def queue_self_command(ctx, action: str = "", *, payload: str = ""):
     """Queue a self-bot operation before waking the temporary worker."""
     action = (action or "").strip().lower().lstrip("!/$")
     payload = (payload or "").strip()
-    if action == "say":
+    if action == "wallet":
+        if not ctx.guild:
+            return await ctx.send("❌ أوامر self متاحة داخل السيرفرات فقط.")
+        request = {
+            "operation": "wallet",
+            "guild_id": ctx.guild.id,
+            "channel_id": ctx.channel.id,
+            "author_id": ctx.author.id,
+        }
+    elif action in {"set_wallet", "setwallet"}:
+        if not ctx.guild:
+            return await ctx.send("❌ أوامر self متاحة داخل السيرفرات فقط.")
+        values = payload.split()
+        if len(values) != 3 or any(
+            not re.fullmatch(r"\d+(?:\.\d+)?[kmb]?", value, re.IGNORECASE)
+            for value in values
+        ):
+            return await ctx.send("❌ الاستخدام: `!self set_wallet <credit> <adamc> <rob>`.")
+        request = {
+            "operation": "set_wallet",
+            "guild_id": ctx.guild.id,
+            "channel_id": ctx.channel.id,
+            "author_id": ctx.author.id,
+            "credit": values[0],
+            "adamc": values[1],
+            "rob": values[2],
+        }
+    elif action == "say":
         if not ctx.guild:
             return await ctx.send("❌ أوامر self متاحة داخل السيرفرات فقط.")
         if not payload or len(payload) > 2000:
@@ -464,7 +491,7 @@ async def queue_self_command(ctx, action: str = "", *, payload: str = ""):
             "extra": parts[2] if len(parts) == 3 else "",
         }
     else:
-        return await ctx.send("❌ الأوامر المدعومة: `say` و`tc` و`ta` و`tr`.")
+        return await ctx.send("❌ الأوامر المدعومة: `wallet` و`set_wallet` و`say` و`tc` و`ta` و`tr`.")
 
     request_id = enqueue_command(request)
     start_result = await control_second_bot("start")

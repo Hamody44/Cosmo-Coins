@@ -3186,6 +3186,30 @@ async def process_command_queue() -> None:
                 if not text or len(text) > 2000:
                     raise RuntimeError("نص say فارغ أو أطول من 2000 حرف")
                 await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+            elif operation == "wallet":
+                values = load_wallet_balances()
+                await channel.send(
+                    "💰 أرصدة self-bot المحفوظة:\n"
+                    f"• Credit: `{values['credit']:,}`\n"
+                    f"• AdamC: `{values['adamc']:,}`\n"
+                    f"• Rob: `{values['rob']:,}`",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            elif operation == "set_wallet":
+                values = {
+                    "credit": parse_wallet_amount(str(item.get("credit", ""))),
+                    "adamc": parse_wallet_amount(str(item.get("adamc", ""))),
+                    "rob": parse_wallet_amount(str(item.get("rob", ""))),
+                }
+                async with WALLET_LOCK:
+                    save_wallet_balances(values, reset_baseline=True)
+                await channel.send(
+                    "✅ تم حفظ أرصدة self-bot:\n"
+                    f"• Credit: `{values['credit']:,}`\n"
+                    f"• AdamC: `{values['adamc']:,}`\n"
+                    f"• Rob: `{values['rob']:,}`",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
             elif operation in {"tc", "ta", "tr"}:
                 target = guild.get_member(int(item["target_id"]))
                 if target is None:

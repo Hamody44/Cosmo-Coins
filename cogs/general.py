@@ -125,51 +125,77 @@ class HelpView(discord.ui.View):
         await self.show_page(
             interaction,
             "⚙️ إدارة السيرفر",
-            "أوامر إدارة السيرفر:",
+            "جميع أوامر الإدارة والإعدادات الموجودة في البوت:",
             discord.Color.red(),
             [
-                ("💬 الردود والاختصارات", (
-                    "• `!add_alias <command> <alias>` و`!list_aliases` — إدارة الاختصارات.\n"
+                ("🧭 الإعدادات الأساسية والصلاحيات", (
+                    "• `/setup` (`/إعداد`) — معالج إعداد قنوات السيرفر.\n"
+                    "• `/set_owner_role` — تعيين رتبة تعامل كمالك السيرفر داخل البوت.\n"
+                    "• `/set_staff_role` — تعيين رتبة staff للتذاكر والراتب.\n"
+                    "• `/set_blacklist_role` — تعيين رتبة البلاك ليست.\n"
+                    "• `/set_currency_name` — تخصيص اسم عرض الرصيد (Premium).\n"
+                    "• `/set_bot_name` و`/set_bot_avatar` و`/set_bot_banner` — تخصيص مظهر البوت (Premium)."
+                )),
+                ("💬 الردود والاختصارات والذكاء الاصطناعي", (
                     "• `!add_reply <trigger> <reply>` — إضافة رد تلقائي.\n"
                     "• `!delete_reply <trigger>` و`!list_replies` — حذف الردود وعرضها.\n"
-                    "• `/ai_toggle` — تشغيل أو إيقاف ميزات الذكاء الاصطناعي."
+                    "• `!add_alias <command> <alias>` و`!list_aliases` — إضافة وعرض اختصارات الأوامر.\n"
+                    "• `/ai_toggle` — تشغيل أو إيقاف الذكاء الاصطناعي في السيرفر.\n"
+                    "• `/toggle_ticket_ai` — تشغيل أو تعطيل مساعد الذكاء الاصطناعي في التذاكر."
                 )),
-                ("💱 التبديل والبوست", (
-                    "• `/accept_exchange <id>` و`/deny_exchange <id>` — معالجة طلبات التبديل.\n"
-                    "• `/add_exchange_currency` و`/delete_exchange_currency` و`/toggle_currency_status` — إدارة الكتالوج العام من سيرفر Cosmo فقط.\n"
-                    "• `/toggle_exchange_system <true|false>` — فتح أو قفل التبديل عالميًا من سيرفر Cosmo فقط.\n"
-                    "• الإغلاق يمنع الطلبات الجديدة؛ الطلبات المعلقة تبقى في قائمة الإدارة للقبول أو الرفض.\n"
-                    "• `/setup_boost_rewards` و`/toggle_boost_system` — إعداد مكافآت البوست.\n"
-                    "• `/fake_boost <1|2>` — اختبار مكافآت البوست."
+                ("💰 الرصيد والميزانية والمدفوعات", (
+                    "• `/add_balance @member <amount>` و`/remove_balance @member <amount>` — شحن أو خصم رصيد عضو.\n"
+                    "• `/server_budget` و`!server_budget_history` — عرض الميزانية وسجل حركتها.\n"
+                    "• `/buy_budget <amount>` — بدء طلب شحن ميزانية السيرفر.\n"
+                    "• `/set_delivery_log` و`!set_transfer_log` و`!set_success_log` و`!set_balance_log` — إعداد سجلات العمليات.\n"
+                    "• `/payment_status <order_id>` — عرض حالة طلب دفع.\n"
+                    "• `/audit_log [limit]` — عرض سجل التدقيق الموحد."
                 )),
-                ("📋 الرتب والسجلات", (
-                    "• `/setup` — فتح معالج إعداد قنوات السيرفر خطوة بخطوة.\n"
-                    "• `!server_budget_history` — سجل حركة ميزانية الجوائز.\n"
-                    "• `/set_owner_role` — رتبة بمعاملة مالك السيرفر داخل البوت (لا تتجاوز أوامر مالك البوت).\n"
-                    "• `/set_staff_role` — تعيين رتبة محدودة للتذاكر والراتب اليومي فقط.\n"
-                    "• `/set_blacklist_role` — تعيين رتبة البلاك ليست.\n"
-                    "• `!set_balance_log` و`/set_boost_log` — قنوات سجلات الرصيد والبوست.\n"
-                    "• `!set_delivery_log` و`!set_success_log` — قنوات التسليم والنجاح.\n"
-                    "• `!set_transfer_log` — قناة سجل التحويلات.\n"
-                    "• `!set_invite_log #channel` — تحديد روم سجل الدخول والخروج وتصنيف الدعوات.\n"
-                    "• `!disable_invite_log` — إيقاف سجل الدعوات.\n"
-                    "• `/invite_event_start <amount>` — بدء فعالية الدعوات في روم الأمر.\n"
-                    "• `/invite_event_end` — إنهاء فعالية الدعوات وإيقاف المكافآت.\n"
-                    "• `/check_fake @member` — فحص العضو وعرض نسبة الاشتباه والأسباب."
+                ("💱 التبديل والعملات", (
+                    "• `/accept_exchange <id>` و`/deny_exchange <id> [reason]` — قبول أو رفض طلب تبديل.\n"
+                    "• `/exchange_history` و`/exchange_stats` — سجل وإحصائيات التبديل.\n"
+                    "• `/add_exchange_currency` و`/delete_exchange_currency` — إدارة كتالوج العملات.\n"
+                    "• `/toggle_currency_status` — فتح أو قفل عملة عامة.\n"
+                    "• `/toggle_exchange_system` — فتح أو قفل نظام التبديل عالميًا من سيرفر Cosmo.\n"
+                    "• `/set_exchange_room` و`/disable_exchange_room` — تحديد أو إلغاء روم طلبات التبديل."
                 )),
-                ("📈 النقاط واللفلات والرواتب", (
-                    "• `/add_level_channel` و`/remove_level_channel` و`/list_level_channels` — تحديد رومات احتساب الرسائل.\n"
-                    "• `/toggle_level_system <true|false>` — فتح النظام أو إغلاقه لهذا السيرفر فقط.\n"
-                    "• `/toggle_voice_level_system <true|false>` — فتح نظام الفويس أو إغلاقه بشكل مستقل؛ يرصد تلقائياً الرومات الصوتية المؤقتة والعادية عدا AFK.\n"
-                    "• `/set_level_reward <amount>` — مكافأة المستوى.\n"
-                    "• `/level_points` و`/top` — عرض النقاط والترتيب.\n"
-                    "• `/set_level_announcement_channel` — روم إعلانات اللفلات.\n"
-                    "• `/set_level_salary` و`/level_salary_history` — إعداد ومراجعة الرواتب."
+                ("🎫 التذاكر وسجلاتها", (
+                    "• `/setup_ticket` — نشر لوحة فتح التذاكر.\n"
+                    "• `/set_ticket_log` — تحديد روم أرشيف التذاكر.\n"
+                    "• `/add_person` — إضافة عضو إلى التذكرة الحالية.\n"
+                    "• `/rename` و`/close` و`/delete` — إعادة تسمية التذكرة أو إغلاقها أو حذفها مع حفظ السجل."
                 )),
-                ("🏦 شحن ميزانية السيرفر", (
-                    "• `/buy_budget <amount>` — لمالك السيرفر أو مسؤوليه؛ اختر وسيلة دفع مفعلة.\n"
-                    "• تأكيد ProBot أو AdamC يُطابق آليًا خلال 5 دقائق؛ ميزانية AdamC يجب أن تكون من مضاعفات القاسم المحدد في `!set_adamc_ratio`.\n"
-                    "• خيار LTC ينشئ فاتورة دفع عبر LTCPay؛ تُضاف الميزانية بعد تحقق الفاتورة."
+                ("📈 اللفلات والرواتب والفويس", (
+                    "• `/toggle_level_system` و`/toggle_voice_level_system` — فتح أو إغلاق أنظمة الرسائل والفويس.\n"
+                    "• `/add_level_channel` و`/remove_level_channel` و`/list_level_channels` — إدارة رومات احتساب اللفلات.\n"
+                    "• `/set_level_reward` — تحديد مكافأة المستوى.\n"
+                    "• `/set_level_announcement_channel` — روم إعلانات اللفلات والرواتب.\n"
+                    "• `/toggle_salary_system` و`/set_level_salary` — إدارة نظام الرواتب وقيمتها.\n"
+                    "• `/level_config` و`/level_adjust` و`/level_reset` و`/admin_summary` — فحص وإدارة وتقارير اللفلات."
+                )),
+                ("🎁 الفعاليات والبوست والدعوات", (
+                    "• `/setup_boost_rewards` و`/toggle_boost_system` و`!set_boost_log` — إعداد نظام البوست.\n"
+                    "• `!fake_boost <1|2>` — اختبار مكافآت البوست.\n"
+                    "• `/invite_event_start` و`/invite_event_end` — بدء أو إنهاء فعالية الدعوات.\n"
+                    "• `!set_invite_log` و`!disable_invite_log` — إعداد أو إيقاف سجل الدعوات.\n"
+                    "• `/check_fake @member` — فحص العضو ونسبة الاشتباه.\n"
+                    "• `/set_double_event <duration>` — تفعيل حدث مضاعفة جوائز العجلة."
+                )),
+                ("📢 الإعلانات والمسابقات والألعاب", (
+                    "• `/setup_ad_panel` و`/set_ad_channel` و`/remove_ad_channel` و`/ad_channels` — إعداد نظام الإعلانات.\n"
+                    "• `/set_ad_price` و`/set_ad_daily_limit` و`/set_everyone_fee` — إعداد أسعار وحدود الإعلانات.\n"
+                    "• `/set_ad_buyer_role` و`/ad_stats` — رتبة مشتري الإعلان وإحصائياته.\n"
+                    "• `/ad_approve` و`/ad_reject` و`/ad_publish` و`/ad_cleanup` — إدارة تسليم ونشر الإعلانات.\n"
+                    "• `/photo_setup` و`/photo_prizes` و`/photo_conditions` و`/photo_start` و`/photo_end` و`/photo_cancel` — إدارة مسابقة الصور.\n"
+                    "• `/8ball_guess_reward` و`/8ball_stop` و`/8ball_stop_all` و`/8ball_claim` — إدارة بطولات 8Ball.\n"
+                    "• `/stop_giveaway` و`/end_giveaway` و`/reroll_giveaway` — التحكم بالسحوبات."
+                )),
+                ("💾 النسخ الاحتياطية والتقارير", (
+                    "• `/backup_create` و`!backup_list` و`!backup_verify` — إنشاء النسخ الاحتياطية وفحصها.\n"
+                    "• `!set_global_log` و`!disable_global_log` — إعداد أو تعطيل سجل العمليات العام.\n"
+                    "• `!set_global_request_log` — تحديد روم الطلبات العامة.\n"
+                    "• `!set_delivery_log` — تحديد روم التسليم والإثباتات.\n"
+                    "• `!admin_summary [daily|weekly]` — إرسال ملخص إداري فوري."
                 )),
             ],
             "Cosmo System • إدارة السيرفر",
