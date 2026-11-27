@@ -87,7 +87,10 @@ validate_bot_name() {
 if [[ "${1:-}" == "control" ]]; then
     action="${2:-}"
     target="${3:-}"
-    requester_id="${4:-${PRIMARY_OWNER_ID:-988840428591808584}}"
+    requester_id="${4:-${PRIMARY_OWNER_ID:-}}"
+    if [[ -z "$requester_id" ]]; then
+        requester_id="$(PYTHONPATH="$ROOT_DIR" "$PYTHON_FALLBACK" -c 'from brain_bot.__main__ import owner_id; print(owner_id() or "")')"
+    fi
     if [[ "$action" != "status" && "$action" != "start" && "$action" != "restart" && "$action" != "shutdown" ]]; then
         printf 'usage: %s control {status|start|restart|shutdown} {primary|second_bot} [requester_id]\n' "$0" >&2
         exit 2
@@ -182,7 +185,7 @@ launch_bot() {
     (
         cd -- "$directory" || exit 1
         exec "$interpreter" main.py
-    ) &
+    ) >>"$STATE_DIR/$name.log" 2>&1 &
     printf '%s\n' "$!" > "$(pid_file "$name")"
 }
 
@@ -224,30 +227,35 @@ start_target() {
 }
 
 handle_request() {
-    local request_file request_id action target
+    local request_file request_id action target requester_id expected_owner
     request_file="$(find "$REQUEST_INBOX" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null || true)"
     [[ -n "$request_file" ]] || return 0
     request_id="$(basename "$request_file" .json)"
     local processing_file="$REQUEST_PROCESSING/$request_id.json"
     mv -f "$request_file" "$processing_file" 2>/dev/null || return 0
-    if ! IFS=$'\t' read -r action target < <(python3 - "$processing_file" <<'PY'
+    if ! IFS=$'\t' read -r action target requester_id < <(python3 - "$processing_file" <<'PY'
 import json, sys
 try:
     payload = json.load(open(sys.argv[1], encoding="utf-8"))
-    print(f"{payload.get('action','')}\t{payload.get('target','')}")
+    print(f"{payload.get('action','')}\t{payload.get('target','')}\t{payload.get('requester_id','')}")
 except Exception:
-    print("\t")
+    print("\t\t")
 PY
     ); then
         action=""
         target=""
+        requester_id=""
     fi
     local result=0
+    expected_owner="$(PYTHONPATH="$ROOT_DIR" "$PYTHON_FALLBACK" -c 'from brain_bot.__main__ import owner_id; print(owner_id() or "")')"
+    if [[ ! "$requester_id" =~ ^[0-9]+$ ]] || [[ "$requester_id" != "$expected_owner" ]] || ! validate_bot_name "$target"; then
+        result=1
+    fi
     case "$action" in
-        start) start_target "$target" || result=$? ;;
-        restart) stop_bot "$target"; start_target "$target" || result=$? ;;
+        start) if (( result == 0 )); then start_target "$target" || result=$?; fi ;;
+        restart) if (( result == 0 )); then stop_bot "$target"; start_target "$target" || result=$?; fi ;;
         shutdown)
-            stop_bot "$target"
+            if (( result == 0 )); then stop_bot "$target"; fi
             [[ "$target" == "second_bot" ]] && rm -f "$SECOND_BOT_ACTIVITY_FILE"
             ;;
         *) result=1 ;;
@@ -267,6 +275,7 @@ PY
 
 cleanup() {
     trap - INT TERM EXIT
+    stop_bot "brain_bot"
     stop_bot "primary"
     stop_bot "second_bot"
     rm -f "$SUPERVISOR_PID_FILE" "$SECOND_BOT_ACTIVITY_FILE"
@@ -274,14 +283,14 @@ cleanup() {
 
 trap cleanup INT TERM EXIT
 
-# The primary bot remains available. The self-bot is started only after a
-# queued "start second_bot" request and is stopped automatically after idle.
+# The original process manager starts all three independent clients at boot.
 launch_bot "primary" "$ROOT_DIR" "$ROOT_DIR/cosmo_requirements.lock" || exit 1
+launch_bot "second_bot" "$ROOT_DIR/second_bot" "$ROOT_DIR/second_bot/cosmo_second_requirements.lock" || exit 1
+launch_bot "brain_bot" "$ROOT_DIR/brain_bot" "$ROOT_DIR/brain_bot/requirements.txt" || exit 1
 
-printf 'تم تشغيل البوت الأساسي فقط؛ سيعمل second_bot عند وجود طلب، وسيُوقف بعد %s ثانية من الخمول.\n' "$SECOND_BOT_IDLE_SECONDS"
+printf 'تم تشغيل العمليات الثلاث: primary وsecond_bot وbrain_bot.\n'
 while :; do
     handle_request
-    stop_idle_second_bot
     PYTHONPATH="$ROOT_DIR" "$PYTHON_FALLBACK" -m brain_bot heartbeat >/dev/null 2>&1 || true
     sleep 0.5
 done

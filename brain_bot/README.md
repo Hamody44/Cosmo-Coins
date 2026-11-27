@@ -1,28 +1,23 @@
-# Brain Bot
+# Brain Bot مستقل
 
-Brain Bot هو مستوى التحكم المستقل في Cosmo-Coins. لا يحمل أي Discord token ولا ينفذ أوامر المستخدمين؛ وظيفته إدارة دورة حياة البوت الأساسي و`second_bot` عبر طلبات JSON محلية آمنة.
+Brain Bot عميل Discord Bot حقيقي مستقل يعمل باستخدام `discord.py` العادي. يستخدم `BRAIN_BOT_TOKEN` الخاص به، ولا يستعير توكن primary أو second_bot. لا يعمل كـself-bot ولا كطبقة CLI فقط: `run_bots.sh` يبدأ `python -m brain_bot.main` كعملية ثالثة مستقلة ببيئة Python خاصة.
 
-## البروتوكول
+## الإعداد
 
-- `requests/inbox/`: طلبات pending، ملف JSON واحد لكل طلب.
-- `requests/processing/`: الطلب الذي أخذه المشرف حاليًا.
-- `requests/done/` و`requests/failed/`: سجل قصير للنتيجة.
-- `second_bot/.runtime/process_control/status.json`: PID/heartbeat وحالة اتصال كل بوت.
+اضبط في ملف `.env` الجذري:
 
-تتم الكتابة إلى ملف مؤقت ثم `os.replace`، ويُستخدم قفل ملف على Linux. لذلك لا يؤدي طلبان متزامنان إلى الكتابة فوق بعضهما كما كان يحدث مع ملف request واحد.
-
-## الصلاحيات
-
-كل طلب يحتوي `requester_id`. تقبل الطبقة فقط `start`, `restart`, `shutdown` للهدفين `primary` و`second_bot`، وتطابق `requester_id` مع `PRIMARY_OWNER_ID` قبل إدخاله إلى الطابور. أوامر Discord نفسها محمية أيضًا بـ`commands.is_owner()`؛ التحقق المزدوج مقصود حتى لا تكون حماية Discord هي الحاجز الوحيد.
-
-## الحالة
-
-يسجل كل بوت `connected` و`disconnected` عند أحداث Gateway، ويسجل المشرف heartbeat مستقلًا. أمر `!status` يعرض حالة العملية والحالة المركزية دون عرض أي سر أو token.
-
-## الاختبار اليدوي
-
-```bash
-PYTHONPATH=. python3 -m brain_bot request start second_bot 988840428591808584
-PYTHONPATH=. python3 -m brain_bot status
-bash run_bots.sh control status second_bot
+```dotenv
+BRAIN_BOT_TOKEN=
+PRIMARY_OWNER_ID=
+BRAIN_BOT_PREFIX=#
 ```
+
+أنشئ تطبيقًا وبوتًا منفصلين في Discord Developer Portal وأضف البوت للسيرفر مع Message Content Intent. لا تُخزّن التوكن الحقيقي في الملفات أو Git. يتطلب التشغيل تثبيت `brain_bot/requirements.txt` (discord.py). يظل `second_bot` على `discord.py-self` وبيئته المنفصلة.
+
+## الصلاحيات والأوامر
+
+كل الأوامر تفحص `ctx.author.id == PRIMARY_OWNER_ID`، كما يتحقق البروتوكول من requester ID مرة أخرى. الأوامر: `#start primary|second_bot`، `#restart primary|second_bot`، `#shutdown primary|second_bot`، و`#status`. بادئة الأوامر قابلة للضبط.
+
+## الطلبات والحالة
+
+لكل عملية JSON UUID مستقل في `requests/inbox/`. تُكتب إلى ملف مؤقت ثم تُنشر بـ`os.replace` تحت قفل؛ يسحب المشرف كل ملف ذريًا إلى `processing/` ثم ينقله إلى `done/` أو `failed/`. لا يمكن لطلب أن يستبدل طلبًا آخر. الحالة وheartbeat واتصال Gateway تحفظ في `second_bot/.runtime/process_control/status.json`، مع PID وسجلات منفصلة لكل عملية في المجلد نفسه.

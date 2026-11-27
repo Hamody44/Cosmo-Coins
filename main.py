@@ -18,7 +18,6 @@ from second_bot.auto_join import (
     load_auto_join_suppressions,
     load_second_bot_state,
 )
-from second_bot.command_queue import enqueue_command
 import time
 import re
 from datetime import datetime
@@ -42,33 +41,6 @@ bot = commands.Bot(
 )
 bot.owner_id = PRIMARY_OWNER_ID
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-RUN_BOTS_SCRIPT = os.path.join(ROOT_DIR, "run_bots.sh")
-
-
-async def control_second_bot(action: str, requester_id: int | None = None) -> str:
-    """Send a control request through Brain Bot's authenticated request queue."""
-    requester_id = int(requester_id or PRIMARY_OWNER_ID)
-    process = await asyncio.create_subprocess_exec(
-        "bash",
-        RUN_BOTS_SCRIPT,
-        "control",
-        action,
-        "second_bot",
-        str(requester_id),
-        cwd=ROOT_DIR,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    try:
-        output, _ = await asyncio.wait_for(process.communicate(), timeout=5)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        return "انتهت مهلة إرسال الطلب إلى مشرف التشغيل."
-    message = output.decode("utf-8", errors="replace").strip()
-    return message or f"تم إرسال طلب {action} إلى البوت الثاني."
-
-
 SHARED_GUILD_STATE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "second_bot",
@@ -409,106 +381,6 @@ async def publish_shared_guild_state_on_remove(guild):
 @bot.listen("on_disconnect")
 async def brain_bot_primary_disconnect():
     write_connection("primary", "disconnected")
-
-
-@bot.command(name="start")
-@commands.is_owner()
-async def start_second_bot(ctx):
-    await ctx.send(f"🟢 {await control_second_bot('start', ctx.author.id)}")
-
-
-@bot.command(name="restart")
-@commands.is_owner()
-async def restart_second_bot(ctx):
-    await ctx.send(f"🔄 {await control_second_bot('restart', ctx.author.id)}")
-
-
-@bot.command(name="shutdown")
-@commands.is_owner()
-async def shutdown_second_bot(ctx):
-    await ctx.send(f"🔴 {await control_second_bot('shutdown', ctx.author.id)}")
-
-
-@bot.command(name="status")
-@commands.is_owner()
-async def status_second_bot(ctx):
-    await ctx.send(f"ℹ️ {await control_second_bot('status', ctx.author.id)}")
-
-
-@bot.command(name="self", aliases=["selfbot"])
-@commands.is_owner()
-async def queue_self_command(ctx, action: str = "", *, payload: str = ""):
-    """Queue a self-bot operation before waking the temporary worker."""
-    action = (action or "").strip().lower().lstrip("!/$")
-    payload = (payload or "").strip()
-    if action == "wallet":
-        if not ctx.guild:
-            return await ctx.send("❌ أوامر self متاحة داخل السيرفرات فقط.")
-        request = {
-            "operation": "wallet",
-            "guild_id": ctx.guild.id,
-            "channel_id": ctx.channel.id,
-            "author_id": ctx.author.id,
-        }
-    elif action in {"set_wallet", "setwallet"}:
-        if not ctx.guild:
-            return await ctx.send("❌ أوامر self متاحة داخل السيرفرات فقط.")
-        values = payload.split()
-        if len(values) != 3 or any(
-            not re.fullmatch(r"\d+(?:\.\d+)?[kmb]?", value, re.IGNORECASE)
-            for value in values
-        ):
-            return await ctx.send("❌ الاستخدام: `!self set_wallet <credit> <adamc> <rob>`.")
-        request = {
-            "operation": "set_wallet",
-            "guild_id": ctx.guild.id,
-            "channel_id": ctx.channel.id,
-            "author_id": ctx.author.id,
-            "credit": values[0],
-            "adamc": values[1],
-            "rob": values[2],
-        }
-    elif action == "say":
-        if not ctx.guild:
-            return await ctx.send("❌ أوامر self متاحة داخل السيرفرات فقط.")
-        if not payload or len(payload) > 2000:
-            return await ctx.send("❌ الاستخدام: `!self say النص` (حتى 2000 حرف).")
-        request = {
-            "operation": "say",
-            "guild_id": ctx.guild.id,
-            "channel_id": ctx.channel.id,
-            "author_id": ctx.author.id,
-            "text": payload,
-        }
-    elif action in {"tc", "ta", "tr", "t"}:
-        parts = payload.split(maxsplit=2)
-        if len(parts) < 2 or not ctx.guild:
-            return await ctx.send(f"❌ الاستخدام: `!self {action} @العضو المبلغ [نص إضافي]`.")
-        try:
-            target = await commands.MemberConverter().convert(ctx, parts[0])
-        except commands.BadArgument:
-            return await ctx.send("❌ لم أستطع العثور على العضو المستهدف.")
-        operation = "ta" if action == "t" else action
-        request = {
-            "operation": operation,
-            "guild_id": ctx.guild.id,
-            "channel_id": ctx.channel.id,
-            "author_id": ctx.author.id,
-            "target_id": target.id,
-            "amount": parts[1],
-            "extra": parts[2] if len(parts) == 3 else "",
-        }
-    else:
-        return await ctx.send("❌ الأوامر المدعومة: `wallet` و`set_wallet` و`say` و`tc` و`ta` و`tr`.")
-
-    request_id = enqueue_command(request)
-    start_result = await control_second_bot("start", ctx.author.id)
-    if not start_result.startswith("queued:"):
-        return await ctx.send(
-            f"⚠️ حُفظ الطلب `{request_id}`، لكن تعذر تشغيل self-bot تلقائياً. "
-            "يمكن إعادة تشغيل المشرف ثم إعادة المحاولة."
-        )
-    await ctx.send(f"✅ تم وضع الأمر `{action}` في الطابور برقم `{request_id}`.")
 
 
 @bot.event

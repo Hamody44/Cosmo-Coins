@@ -1,7 +1,7 @@
 """Python entry point for hosts that only allow Python startup files.
 
 This wrapper starts the existing Bash supervisor from the repository root so
-both bots keep their separate virtual environments and shared runtime path.
+all three bots keep separate virtual environments, PIDs, logs, and the shared runtime path.
 """
 from __future__ import annotations
 
