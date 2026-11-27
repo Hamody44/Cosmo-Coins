@@ -197,6 +197,30 @@ class FinancialTransactionTests(unittest.TestCase):
             database.update_balance(14, -6)
         self.assertEqual(self.balance(14), 5)
 
+    def test_financial_operations_reject_invalid_user_ids(self):
+        with self.assertRaises(ValueError):
+            database.get_balance(0)
+        with self.assertRaises(ValueError):
+            database.update_balance(0, 1)
+        with self.assertRaises(ValueError):
+            database.debit_balance(-1, 1)
+        with self.assertRaises(ValueError):
+            database.transfer_balance(1, 0, 1, "now")
+
+    def test_transfer_rolls_back_when_receiver_would_overflow(self):
+        database.update_balance(141, 100)
+        with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO balances (user_id, balance) VALUES (?, ?)",
+                (142, database.MAX_SQLITE_INTEGER),
+            )
+
+        self.assertFalse(database.transfer_balance(141, 142, 10, "overflow"))
+        self.assertEqual(self.balance(141), 100)
+        self.assertEqual(self.balance(142), database.MAX_SQLITE_INTEGER)
+        with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM transfer_logs").fetchone()[0], 0)
+
     def test_balance_credit_rejects_sqlite_integer_overflow(self):
         with database.sqlite3.connect(database.GLOBAL_DB_PATH) as conn:
             conn.execute(

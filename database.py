@@ -134,6 +134,31 @@ global_cursor.execute('''CREATE TABLE IF NOT EXISTS giveaway_prize_payouts (
 )''')
 global_conn.commit()
 
+
+def _validate_user_id(user_id, field_name: str = "معرّف المستخدم") -> int:
+    if isinstance(user_id, bool):
+        raise ValueError(f"{field_name} غير صالح.")
+    try:
+        value = int(user_id)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field_name} غير صالح.") from exc
+    if value <= 0:
+        raise ValueError(f"{field_name} غير صالح.")
+    return value
+
+
+def _validate_positive_amount(amount, field_name: str = "المبلغ") -> int:
+    if isinstance(amount, bool):
+        raise ValueError(f"{field_name} غير صالح.")
+    try:
+        value = int(amount)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field_name} غير صالح.") from exc
+    if value <= 0 or value > MAX_SQLITE_INTEGER:
+        raise ValueError(f"{field_name} غير صالح.")
+    return value
+
+
 # قواعد بيانات السيرفرات الفردية
 def get_guild_db(guild_id: int):
     db_path = f"guilds_data/guild_{guild_id}.db"
@@ -1556,11 +1581,15 @@ def is_blacklisted(member: discord.Member) -> bool:
     return False
 
 def get_balance(user_id):
+    user_id = _validate_user_id(user_id)
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
         row = conn.execute("SELECT balance FROM balances WHERE user_id = ?", (user_id,)).fetchone()
         return row[0] if row else 0
 
 def update_balance(user_id, amount):
+    user_id = _validate_user_id(user_id)
+    if isinstance(amount, bool):
+        raise ValueError("المبلغ غير صالح.")
     amount = int(amount)
     if amount > MAX_SQLITE_INTEGER or amount < -MAX_SQLITE_INTEGER:
         raise ValueError("المبلغ يتجاوز الحد الصحيح المدعوم للرصيد.")
@@ -1703,9 +1732,8 @@ def giveaway_has_any_payout(guild_id: int, giveaway_message_id: int) -> bool:
         return bool(row)
 
 def debit_balance(user_id, amount: int) -> bool:
-    amount = int(amount)
-    if amount <= 0:
-        raise ValueError("يجب أن يكون مبلغ الخصم موجباً.")
+    user_id = _validate_user_id(user_id)
+    amount = _validate_positive_amount(amount, "مبلغ الخصم")
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
@@ -1716,8 +1744,17 @@ def debit_balance(user_id, amount: int) -> bool:
         return cur.rowcount == 1
 
 def transfer_balance(sender_id: int, receiver_id: int, amount: int, timestamp: str) -> bool:
-    amount = int(amount)
+    sender_id = _validate_user_id(sender_id, "معرّف المرسل")
+    receiver_id = _validate_user_id(receiver_id, "معرّف المستلم")
+    if isinstance(amount, bool):
+        return False
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError, OverflowError):
+        return False
     if amount <= 0 or sender_id == receiver_id:
+        return False
+    if amount > MAX_SQLITE_INTEGER:
         return False
     with _balance_lock, closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
         conn.execute("BEGIN IMMEDIATE")
