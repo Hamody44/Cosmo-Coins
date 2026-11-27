@@ -9,6 +9,11 @@ global_cosmo.db
 global_cosmo_backup.db
 guilds_data/
 second_bot/.runtime/
+requests/inbox/*
+requests/processing/*
+requests/done/*
+requests/failed/*
+requests/.lock
 second_bot/models/candidates/
 *.db
 *.log

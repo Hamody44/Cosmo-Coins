@@ -23,6 +23,11 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from functools import lru_cache
 from types import SimpleNamespace
+try:
+    from brain_bot.protocol import write_connection
+except ImportError:  # direct execution from second_bot/
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from brain_bot.protocol import write_connection
 import aiohttp
 import discord
 from discord.ext import commands, tasks
@@ -3335,10 +3340,16 @@ async def on_message(message: discord.Message) -> None:
 @bot.event
 async def on_ready() -> None:
     logger.info("Logged in as %s (%s)", bot.user, bot.user.id if bot.user else "unknown")
+    write_connection("second_bot", "connected", user_id=getattr(bot.user, "id", None))
     publish_current_second_bot_state()
     start_command_queue_task()
     if not process_auto_join_queue_task.is_running():
         process_auto_join_queue_task.start()
+
+
+@bot.listen("on_disconnect")
+async def brain_bot_second_disconnect() -> None:
+    write_connection("second_bot", "disconnected")
 
 
 @bot.event

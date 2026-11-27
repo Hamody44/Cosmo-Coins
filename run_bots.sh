@@ -5,7 +5,9 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_FALLBACK="${PYTHON:-python3}"
 STATE_DIR="$ROOT_DIR/second_bot/.runtime/process_control"
 SUPERVISOR_PID_FILE="$STATE_DIR/supervisor.pid"
-REQUEST_FILE="$STATE_DIR/request"
+REQUESTS_DIR="$ROOT_DIR/requests"
+REQUEST_INBOX="$REQUESTS_DIR/inbox"
+REQUEST_PROCESSING="$REQUESTS_DIR/processing"
 SECOND_BOT_ACTIVITY_FILE="$STATE_DIR/second_bot.activity"
 SECOND_BOT_IDLE_SECONDS="${SECOND_BOT_IDLE_SECONDS:-90}"
 
@@ -14,7 +16,7 @@ if ! [[ "$SECOND_BOT_IDLE_SECONDS" =~ ^[0-9]+$ ]] || (( SECOND_BOT_IDLE_SECONDS 
     exit 2
 fi
 
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$REQUEST_INBOX" "$REQUEST_PROCESSING" "$REQUESTS_DIR/done" "$REQUESTS_DIR/failed"
 
 pid_file() {
     printf '%s/%s.pid' "$STATE_DIR" "$1"
@@ -85,8 +87,9 @@ validate_bot_name() {
 if [[ "${1:-}" == "control" ]]; then
     action="${2:-}"
     target="${3:-}"
+    requester_id="${4:-${PRIMARY_OWNER_ID:-988840428591808584}}"
     if [[ "$action" != "status" && "$action" != "start" && "$action" != "restart" && "$action" != "shutdown" ]]; then
-        printf 'usage: %s control {status|start|restart|shutdown} {primary|second_bot}\n' "$0" >&2
+        printf 'usage: %s control {status|start|restart|shutdown} {primary|second_bot} [requester_id]\n' "$0" >&2
         exit 2
     fi
     if ! validate_bot_name "$target"; then
@@ -95,19 +98,21 @@ if [[ "${1:-}" == "control" ]]; then
     fi
     if [[ "$action" == "status" ]]; then
         status_bot "$target"
+        printf '%s\n' "brain: $(PYTHONPATH="$ROOT_DIR" "$PYTHON_FALLBACK" -m brain_bot status 2>/dev/null || printf 'unavailable')"
         exit 0
     fi
-    if ! supervisor_is_running; then
-        printf 'supervisor: stopped; cannot queue %s for %s\n' "$action" "$target" >&2
+    if ! [[ "$requester_id" =~ ^[0-9]+$ ]]; then
+        printf 'rejected: requester_id must be numeric\n' >&2
         exit 1
     fi
-    request_tmp="$REQUEST_FILE.$$"
-    printf '%s %s\n' "$action" "$target" > "$request_tmp"
-    mv -f "$request_tmp" "$REQUEST_FILE"
+    if ! queued_output=$(cd "$ROOT_DIR" && PYTHONPATH="$ROOT_DIR" "$PYTHON_FALLBACK" -m brain_bot request "$action" "$target" "$requester_id" --source "run_bots.sh" 2>&1); then
+        printf '%s\n' "$queued_output" >&2
+        exit 1
+    fi
     if [[ "$target" == "second_bot" ]]; then
         mark_second_bot_activity
     fi
-    printf 'queued: %s %s\n' "$action" "$target"
+    printf '%s\n' "$queued_output"
     exit 0
 fi
 
@@ -219,33 +224,52 @@ start_target() {
 }
 
 handle_request() {
-    [[ -f "$REQUEST_FILE" ]] || return 0
-    local request_file="$REQUEST_FILE.processing.$$"
-    mv -f "$REQUEST_FILE" "$request_file" 2>/dev/null || return 0
-
-    local action target
-    read -r action target < "$request_file"
-    rm -f "$request_file"
+    local request_file request_id action target
+    request_file="$(find "$REQUEST_INBOX" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null || true)"
+    [[ -n "$request_file" ]] || return 0
+    request_id="$(basename "$request_file" .json)"
+    local processing_file="$REQUEST_PROCESSING/$request_id.json"
+    mv -f "$request_file" "$processing_file" 2>/dev/null || return 0
+    if ! IFS=$'\t' read -r action target < <(python3 - "$processing_file" <<'PY'
+import json, sys
+try:
+    payload = json.load(open(sys.argv[1], encoding="utf-8"))
+    print(f"{payload.get('action','')}\t{payload.get('target','')}")
+except Exception:
+    print("\t")
+PY
+    ); then
+        action=""
+        target=""
+    fi
+    local result=0
     case "$action" in
-        start)
-            start_target "$target"
-            ;;
-        restart)
-            stop_bot "$target"
-            start_target "$target"
-            ;;
+        start) start_target "$target" || result=$? ;;
+        restart) stop_bot "$target"; start_target "$target" || result=$? ;;
         shutdown)
             stop_bot "$target"
             [[ "$target" == "second_bot" ]] && rm -f "$SECOND_BOT_ACTIVITY_FILE"
             ;;
+        *) result=1 ;;
     esac
+    if (( result == 0 )); then
+        PYTHONPATH="$ROOT_DIR" "$PYTHON_FALLBACK" - <<PY
+from brain_bot.protocol import finish
+finish("$request_id", status="done")
+PY
+    else
+        PYTHONPATH="$ROOT_DIR" "$PYTHON_FALLBACK" - <<PY
+from brain_bot.protocol import finish
+finish("$request_id", status="failed", error="process operation failed")
+PY
+    fi
 }
 
 cleanup() {
     trap - INT TERM EXIT
     stop_bot "primary"
     stop_bot "second_bot"
-    rm -f "$SUPERVISOR_PID_FILE" "$REQUEST_FILE" "$SECOND_BOT_ACTIVITY_FILE"
+    rm -f "$SUPERVISOR_PID_FILE" "$SECOND_BOT_ACTIVITY_FILE"
 }
 
 trap cleanup INT TERM EXIT
@@ -258,5 +282,6 @@ printf 'تم تشغيل البوت الأساسي فقط؛ سيعمل second_bot
 while :; do
     handle_request
     stop_idle_second_bot
+    PYTHONPATH="$ROOT_DIR" "$PYTHON_FALLBACK" -m brain_bot heartbeat >/dev/null 2>&1 || true
     sleep 0.5
 done

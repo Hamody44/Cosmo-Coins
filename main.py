@@ -25,6 +25,7 @@ from datetime import datetime
 
 # استيراد دالة تشغيل لوحة التحكم
 from dashboard.app import run_dashboard, set_discord_bot_context
+from brain_bot.protocol import write_connection
 
 load_dotenv()
 
@@ -44,14 +45,16 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 RUN_BOTS_SCRIPT = os.path.join(ROOT_DIR, "run_bots.sh")
 
 
-async def control_second_bot(action: str) -> str:
-    """Queue a control action for second_bot through the shared supervisor."""
+async def control_second_bot(action: str, requester_id: int | None = None) -> str:
+    """Send a control request through Brain Bot's authenticated request queue."""
+    requester_id = int(requester_id or PRIMARY_OWNER_ID)
     process = await asyncio.create_subprocess_exec(
         "bash",
         RUN_BOTS_SCRIPT,
         "control",
         action,
         "second_bot",
+        str(requester_id),
         cwd=ROOT_DIR,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -403,28 +406,33 @@ async def publish_shared_guild_state_on_remove(guild):
         print(f"⚠️ تعذر نشر قائمة سيرفرات البوت الثاني: {exc}")
 
 
+@bot.listen("on_disconnect")
+async def brain_bot_primary_disconnect():
+    write_connection("primary", "disconnected")
+
+
 @bot.command(name="start")
 @commands.is_owner()
 async def start_second_bot(ctx):
-    await ctx.send(f"🟢 {await control_second_bot('start')}")
+    await ctx.send(f"🟢 {await control_second_bot('start', ctx.author.id)}")
 
 
 @bot.command(name="restart")
 @commands.is_owner()
 async def restart_second_bot(ctx):
-    await ctx.send(f"🔄 {await control_second_bot('restart')}")
+    await ctx.send(f"🔄 {await control_second_bot('restart', ctx.author.id)}")
 
 
 @bot.command(name="shutdown")
 @commands.is_owner()
 async def shutdown_second_bot(ctx):
-    await ctx.send(f"🔴 {await control_second_bot('shutdown')}")
+    await ctx.send(f"🔴 {await control_second_bot('shutdown', ctx.author.id)}")
 
 
 @bot.command(name="status")
 @commands.is_owner()
 async def status_second_bot(ctx):
-    await ctx.send(f"ℹ️ {await control_second_bot('status')}")
+    await ctx.send(f"ℹ️ {await control_second_bot('status', ctx.author.id)}")
 
 
 @bot.command(name="self", aliases=["selfbot"])
@@ -494,7 +502,7 @@ async def queue_self_command(ctx, action: str = "", *, payload: str = ""):
         return await ctx.send("❌ الأوامر المدعومة: `wallet` و`set_wallet` و`say` و`tc` و`ta` و`tr`.")
 
     request_id = enqueue_command(request)
-    start_result = await control_second_bot("start")
+    start_result = await control_second_bot("start", ctx.author.id)
     if not start_result.startswith("queued:"):
         return await ctx.send(
             f"⚠️ حُفظ الطلب `{request_id}`، لكن تعذر تشغيل self-bot تلقائياً. "
@@ -506,6 +514,7 @@ async def queue_self_command(ctx, action: str = "", *, payload: str = ""):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
+    write_connection("primary", "connected", user_id=bot.user.id)
     try:
         publish_shared_guild_state()
     except OSError as exc:
