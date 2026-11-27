@@ -96,5 +96,7 @@ class BrainBotProtocolTests(unittest.TestCase):
         for folder in ("inbox","processing","done","failed"):
             self.assertIn(folder,script)
         self.assertIn("mv -f \"$request_file\" \"$processing_file\"",script)
+        self.assertIn("flock -n 9",script)
+        self.assertIn("exec 9>&-",script)
 
 if __name__ == "__main__": unittest.main()

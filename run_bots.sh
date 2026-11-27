@@ -119,6 +119,14 @@ if [[ "${1:-}" == "control" ]]; then
     exit 0
 fi
 
+# The PID check is useful for diagnostics but is not atomic by itself.
+# Hold an OS-level lock for the supervisor lifetime so simultaneous panel
+# starts cannot each launch another copy of primary/second_bot.
+exec 9>"$STATE_DIR/supervisor.lock"
+if ! flock -n 9; then
+    printf 'خطأ: يوجد مشرف run_bots.sh آخر يعمل بالفعل.\n' >&2
+    exit 1
+fi
 if supervisor_is_running; then
     printf 'خطأ: run_bots.sh يعمل بالفعل.\n' >&2
     exit 1
@@ -183,6 +191,7 @@ launch_bot() {
 
     printf 'تشغيل %s من %s باستخدام %s\n' "$name" "$directory" "$interpreter"
     (
+        exec 9>&-
         cd -- "$directory" || exit 1
         exec "$interpreter" main.py
     ) >>"$STATE_DIR/$name.log" 2>&1 &
