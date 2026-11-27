@@ -73,6 +73,13 @@ class BrainBotProtocolTests(unittest.TestCase):
         self.assertIn("process_pending_currency_confirmation(message)",source)
         self.assertIn("process_auto_delivery_handoff(message)",source)
 
+    def test_auto_delivery_does_not_requeue_start_for_running_second_bot(self):
+        source=(Path(__file__).resolve().parent.parent/"cogs"/"economy.py").read_text(encoding="utf-8")
+        function=source.split("async def start_second_bot_for_delivery() -> bool:",1)[1].split("def can_manage_exchange_request",1)[0]
+        early_return=function.index("if already_running:")
+        self.assertLess(early_return,function.index("create_subprocess_exec"))
+        self.assertIn("if already_running:\n        return True",function)
+
     def test_brain_bot_uses_standard_discord_py_and_separate_token_setting(self):
         root=Path(__file__).resolve().parent.parent
         requirements=(root/"brain_bot"/"requirements.txt").read_text(encoding="utf-8").lower()

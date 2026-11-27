@@ -38,8 +38,12 @@ def second_bot_process_is_running() -> bool:
         return False
 
 async def start_second_bot_for_delivery() -> bool:
-    """Start the second bot and wait until it has published a ready state."""
+    """Ensure the second bot is available before publishing a delivery handoff."""
     already_running = second_bot_process_is_running()
+    # Do not enqueue a redundant control request for a live managed process:
+    # an unrelated owner/configuration rejection must not block auto-delivery.
+    if already_running:
+        return True
     requested_at = datetime.now().timestamp()
     try:
         process = await asyncio.create_subprocess_exec(
