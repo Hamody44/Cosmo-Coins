@@ -290,7 +290,8 @@ cleanup() {
     rm -f "$SUPERVISOR_PID_FILE" "$SECOND_BOT_ACTIVITY_FILE"
 }
 
-trap cleanup INT TERM EXIT
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 
 # The original process manager starts all three independent clients at boot.
 launch_bot "primary" "$ROOT_DIR" "$ROOT_DIR/cosmo_requirements.lock" || exit 1

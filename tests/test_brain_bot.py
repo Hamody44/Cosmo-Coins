@@ -98,5 +98,7 @@ class BrainBotProtocolTests(unittest.TestCase):
         self.assertIn("mv -f \"$request_file\" \"$processing_file\"",script)
         self.assertIn("flock -n 9",script)
         self.assertIn("exec 9>&-",script)
+        self.assertIn("trap cleanup EXIT",script)
+        self.assertIn("trap 'exit 0' INT TERM",script)
 
 if __name__ == "__main__": unittest.main()
