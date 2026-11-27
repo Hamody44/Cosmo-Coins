@@ -10,11 +10,13 @@ import json
 import os
 import re
 import secrets
+import sys
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 try:
     import fcntl
@@ -29,6 +31,7 @@ DONE_DIR = REQUESTS_DIR / "done"
 FAILED_DIR = REQUESTS_DIR / "failed"
 STATE_DIR = ROOT_DIR / "second_bot" / ".runtime" / "process_control"
 STATUS_PATH = STATE_DIR / "status.json"
+STATUS_LOCK_PATH = STATE_DIR / ".status.lock"
 LOCK_PATH = REQUESTS_DIR / ".lock"
 VALID_TARGETS = {"primary", "second_bot"}
 VALID_ACTIONS = {"start", "restart", "shutdown"}
@@ -55,9 +58,72 @@ def _lock() -> Iterator[None]:
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=f".{os.getpid()}.{secrets.token_hex(4)}.tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        if sys.platform.startswith("linux"):
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+@contextmanager
+def _status_lock() -> Iterator[None]:
+    """Serialize the complete status read/merge/write transaction."""
+    ensure_layout()
+    try:
+        handle = STATUS_LOCK_PATH.open("a+b")
+    except OSError as error:
+        raise RuntimeError(f"cannot create status lock at {STATUS_LOCK_PATH}: {error}") from error
+    with handle:
+        if fcntl is None:
+            raise RuntimeError("inter-process status locking requires fcntl on Linux")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError as error:
+            raise RuntimeError(f"cannot acquire status lock at {STATUS_LOCK_PATH}: {error}") from error
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _read_status_unlocked() -> dict[str, Any]:
+    try:
+        payload = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _update_status(mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    with _status_lock():
+        current = _read_status_unlocked()
+        mutator(current)
+        current["updated_at"] = time.time()
+        _atomic_json(STATUS_PATH, current)
+        return current
 
 
 def validate_request(payload: dict[str, Any], *, expected_owner_id: int | None = None) -> tuple[bool, str]:
@@ -141,36 +207,23 @@ def finish(request_id: str, *, status: str, error: str | None = None) -> None:
 
 
 def write_status(**updates: Any) -> dict[str, Any]:
-    ensure_layout()
-    current: dict[str, Any] = {}
-    try:
-        current = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
-        if not isinstance(current, dict):
-            current = {}
-    except (OSError, json.JSONDecodeError):
-        pass
-    current.update(updates)
-    current["updated_at"] = time.time()
-    _atomic_json(STATUS_PATH, current)
-    return current
+    return _update_status(lambda current: current.update(updates))
 
 
 def read_status() -> dict[str, Any]:
-    try:
-        payload = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return _read_status_unlocked()
 
 
 def write_connection(bot_name: str, state: str, *, user_id: int | None = None) -> dict[str, Any]:
     """Publish gateway state without exposing tokens or message content."""
-    status = read_status()
-    connections = status.get("connections")
-    if not isinstance(connections, dict):
-        connections = {}
-    entry: dict[str, Any] = {"state": state, "updated_at": time.time()}
-    if user_id:
-        entry["user_id"] = int(user_id)
-    connections[bot_name] = entry
-    return write_status(connections=connections)
+    def update(current: dict[str, Any]) -> None:
+        connections = current.get("connections")
+        if not isinstance(connections, dict):
+            connections = {}
+        entry: dict[str, Any] = {"state": state, "updated_at": time.time()}
+        if user_id:
+            entry["user_id"] = int(user_id)
+        connections[bot_name] = entry
+        current["connections"] = connections
+
+    return _update_status(update)

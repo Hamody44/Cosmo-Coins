@@ -1,10 +1,23 @@
 import json
+import multiprocessing
 import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
+
+
+def _write_status_from_process(state_dir, status_path, status_lock_path, bot_name, barrier):
+    import brain_bot.protocol as protocol
+
+    protocol.STATE_DIR = Path(state_dir)
+    protocol.STATUS_PATH = Path(status_path)
+    protocol.STATUS_LOCK_PATH = Path(status_lock_path)
+    barrier.wait()
+    protocol.write_connection(bot_name, "connected", user_id=10)
+    protocol.write_status(**{f"field_{bot_name}": bot_name})
+
 
 class BrainBotProtocolTests(unittest.TestCase):
     def test_validation_rejects_non_owner(self):
@@ -48,12 +61,65 @@ class BrainBotProtocolTests(unittest.TestCase):
         import brain_bot.protocol as protocol
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)
-            with patch.object(protocol,"REQUESTS_DIR",root/"requests"),patch.object(protocol,"STATE_DIR",root/"state"),patch.object(protocol,"STATUS_PATH",root/"state"/"status.json"),patch.object(protocol,"LOCK_PATH",root/"requests"/".lock"):
+            with patch.object(protocol,"REQUESTS_DIR",root/"requests"),patch.object(protocol,"STATE_DIR",root/"state"),patch.object(protocol,"STATUS_PATH",root/"state"/"status.json"),patch.object(protocol,"STATUS_LOCK_PATH",root/"state"/".status.lock"),patch.object(protocol,"LOCK_PATH",root/"requests"/".lock"):
                 protocol.write_connection("primary","connected",user_id=10)
                 status=protocol.read_status()
                 self.assertEqual(status["connections"]["primary"]["state"],"connected")
                 self.assertEqual(status["connections"]["primary"]["user_id"],10)
                 self.assertIsInstance(json.loads((root/"state"/"status.json").read_text()),dict)
+
+    def test_status_updates_from_processes_preserve_connections_and_other_fields(self):
+        import brain_bot.protocol as protocol
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_dir = root / "state"
+            status_path = state_dir / "status.json"
+            status_lock_path = state_dir / ".status.lock"
+            context = multiprocessing.get_context("fork")
+            barrier = context.Barrier(3)
+            processes = [
+                context.Process(
+                    target=_write_status_from_process,
+                    args=(state_dir, status_path, status_lock_path, bot_name, barrier),
+                )
+                for bot_name in ("primary", "second_bot", "brain_bot")
+            ]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(10)
+                self.assertFalse(process.is_alive())
+                self.assertEqual(process.exitcode, 0)
+
+            with patch.object(protocol, "STATE_DIR", state_dir), patch.object(protocol, "STATUS_PATH", status_path), patch.object(protocol, "STATUS_LOCK_PATH", status_lock_path):
+                status = protocol.read_status()
+            self.assertEqual(
+                set(status["connections"]), {"primary", "second_bot", "brain_bot"}
+            )
+            self.assertEqual(
+                {status[f"field_{name}"] for name in ("primary", "second_bot", "brain_bot")},
+                {"primary", "second_bot", "brain_bot"},
+            )
+            self.assertIsInstance(json.loads(status_path.read_text(encoding="utf-8")), dict)
+
+    def test_status_write_failure_releases_lock_and_cleans_temporary_file(self):
+        import brain_bot.protocol as protocol
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_dir = root / "state"
+            status_path = state_dir / "status.json"
+            status_lock_path = state_dir / ".status.lock"
+            with patch.object(protocol, "STATE_DIR", state_dir), patch.object(protocol, "STATUS_PATH", status_path), patch.object(protocol, "STATUS_LOCK_PATH", status_lock_path):
+                with patch.object(protocol.os, "replace", side_effect=OSError("simulated replace failure")):
+                    with self.assertRaises(OSError):
+                        protocol.write_status(first="failed")
+                self.assertFalse(list(state_dir.glob(".status.json.*.tmp")))
+                written = protocol.write_status(second="succeeds")
+
+            self.assertEqual(written["second"], "succeeds")
+            self.assertEqual(json.loads(status_path.read_text(encoding="utf-8"))["second"], "succeeds")
 
     def test_primary_manual_self_controls_removed_but_auto_delivery_retained(self):
         root=Path(__file__).resolve().parent.parent
