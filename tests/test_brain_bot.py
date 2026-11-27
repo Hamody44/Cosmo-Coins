@@ -133,9 +133,11 @@ class BrainBotProtocolTests(unittest.TestCase):
 
     def test_second_bot_required_dollar_commands_remain_registered(self):
         source=(Path(__file__).resolve().parent.parent/"second_bot"/"main.py").read_text(encoding="utf-8")
-        for name in ("say","ping","numbers","tc","ta","tr","wallet","set_wallet","guilds","invite_link","join_guild","leave_guild","auto_delivery","change_model"):
+        for name in ("say","ping","numbers","tc","ta","tr","wallet","set_wallet","guilds","invite_link","join_guild","leave_guild","deliver","auto_delivery","change_model"):
             self.assertIn(f'name="{name}"',source)
         self.assertIn('COMMAND_PREFIX = "$"',source)
+        self.assertIn("جاري تسليم الطلب", source)
+        self.assertIn("تم تسليم الطلب", source)
         self.assertIn("process_pending_currency_confirmation(message)",source)
         self.assertIn("process_auto_delivery_handoff(message)",source)
 

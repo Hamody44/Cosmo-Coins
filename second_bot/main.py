@@ -2244,7 +2244,7 @@ async def send_currency_command(
     confirmation_type: str | None,
     wallet_currency: str | None = None,
     extra: str = "",
-) -> None:
+) -> bool:
     """Send an external-currency command and optionally debit its local wallet."""
     amount = amount.strip()
     extra = extra.strip()
@@ -2252,11 +2252,11 @@ async def send_currency_command(
         parsed_amount = parse_wallet_amount(amount)
     except (AttributeError, TypeError, ValueError):
         await send_notice(ctx, "❌ المبلغ غير صحيح. استخدم رقمًا مثل `500` أو `50m` أو `1.5b`.")
-        return
+        return False
 
     if parsed_amount < 0:
         await send_notice(ctx, "❌ لا يمكن أن يكون المبلغ سالبًا.")
-        return
+        return False
 
     channel_id = getattr(ctx.channel, "id", None)
     previous_confirmation = pending_currency_confirmations.get(channel_id) if channel_id is not None else None
@@ -2271,7 +2271,7 @@ async def send_currency_command(
             transfer_message,
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        return
+        return True
 
     reserved, available = await reserve_wallet_balance(wallet_currency, parsed_amount)
     if not reserved:
@@ -2284,7 +2284,7 @@ async def send_currency_command(
             ctx,
             f"❌ رصيد {wallet_currency.upper()} غير كافٍ. المتاح `{available:,}` والمطلوب `{parsed_amount:,}`.",
         )
-        return
+        return False
     try:
         await ctx.send(
             transfer_message,
@@ -2298,6 +2298,7 @@ async def send_currency_command(
             else:
                 pending_currency_confirmations[channel_id] = previous_confirmation
         raise
+    return True
 
 
 @bot.command(name="tc")
@@ -2343,6 +2344,124 @@ async def transfer_rob(
     await send_currency_command(
         ctx, target, amount, "!transfer", None, wallet_currency="rob", extra=extra
     )
+
+
+def get_manual_delivery_order(order_id: int) -> tuple | None:
+    """Read the minimum exchange-order data needed by the manual delivery command."""
+    with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        return conn.execute(
+            "SELECT guild_id, user_id, target_currency, received_amount, status, delivery_status "
+            "FROM exchange_logs WHERE id = ?",
+            (int(order_id),),
+        ).fetchone()
+
+
+def transition_manual_exchange_request(order_id: int, operation: str) -> bool:
+    """Claim or complete a manual delivery without confusing it with auto delivery."""
+    transitions = {
+        "claim": ("قيد التسليم اليدوي", "قيد الانتظار", "قيد التسليم اليدوي"),
+        "complete": ("تم القبول", "قيد التسليم اليدوي", "تسليم يدوي"),
+        "release": ("قيد الانتظار", "قيد التسليم اليدوي", "فشل التسليم اليدوي"),
+    }
+    if operation not in transitions:
+        raise ValueError(f"Unsupported manual exchange transition: {operation}")
+    next_status, expected_status, delivery_status = transitions[operation]
+    with closing(sqlite3.connect(GLOBAL_DB_PATH, timeout=10)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            "UPDATE exchange_logs SET status = ?, delivery_status = ? "
+            "WHERE id = ? AND status = ?",
+            (next_status, delivery_status, int(order_id), expected_status),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+
+
+def manual_delivery_details(currency_name: str) -> tuple[str, str, str | None] | None:
+    """Map a stored currency name to provider command and local wallet."""
+    normalized_name = (currency_name or "").strip().casefold()
+    if any(token in normalized_name for token in ("probot", "credit", "كريديت")):
+        return "ProBot", "#credit", "credit"
+    if any(token in normalized_name for token in ("adamc", "adam c", "ادم سي", "آدم سي")):
+        return "AdamC", "T", "adamc"
+    if any(token in normalized_name for token in ("robux", "rob", "روبوكس")):
+        return "Rob", "!transfer", "rob"
+    return None
+
+
+@bot.command(name="deliver", aliases=["تسليم"])
+@commands.check(check_control_owner)
+async def deliver(ctx: commands.Context, order_id: str) -> None:
+    """Deliver one pending exchange order manually, even when auto delivery is off."""
+    try:
+        parsed_order_id = int(order_id)
+        if parsed_order_id <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        await ctx.send("❌ رقم الطلب غير صحيح. الاستخدام: `$deliver <رقم الطلب>`." )
+        return
+
+    progress = await ctx.send(f"جاري تسليم الطلب {parsed_order_id}")
+    try:
+        order = get_manual_delivery_order(parsed_order_id)
+        if order is None:
+            raise ValueError("الطلب غير موجود.")
+        guild_id, user_id, currency_name, received_amount, status, delivery_status = order
+        if ctx.guild is None or int(ctx.guild.id) != int(guild_id):
+            raise ValueError("يجب تنفيذ الأمر داخل سيرفر الطلب.")
+        if status != "قيد الانتظار" or delivery_status not in {"قيد الانتظار", "فشل التسليم اليدوي", "فشل التسليم التلقائي"}:
+            raise ValueError("الطلب ليس قيد الانتظار للتسليم.")
+        try:
+            amount = int(float(received_amount))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("مبلغ الطلب غير صالح.") from exc
+        if amount <= 0 or float(received_amount) != amount:
+            raise ValueError("مبلغ الطلب غير صالح.")
+        details = manual_delivery_details(str(currency_name))
+        if details is None:
+            raise ValueError("عملة الطلب غير مدعومة للتسليم اليدوي.")
+        provider, provider_command, wallet_currency = details
+        target = ctx.guild.get_member(int(user_id))
+        if target is None:
+            target = await ctx.guild.fetch_member(int(user_id))
+        if not transition_manual_exchange_request(parsed_order_id, "claim"):
+            raise ValueError("الطلب قيد المعالجة أو تم تسليمه بالفعل.")
+
+        sent = await send_currency_command(
+            ctx,
+            target,
+            str(amount),
+            provider_command,
+            None if wallet_currency == "rob" else ("type1" if wallet_currency == "credit" else "type2"),
+            wallet_currency=wallet_currency,
+        )
+        if not sent:
+            transition_manual_exchange_request(parsed_order_id, "release")
+            await progress.edit(content=f"تعذر تسليم الطلب {parsed_order_id}.")
+            return
+        if wallet_currency != "rob":
+            confirmation_type = "type1" if wallet_currency == "credit" else "type2"
+            captcha_confirmed = await wait_for_currency_confirmation_answer(
+                int(ctx.channel.id), confirmation_type
+            )
+            provider_confirmed = captcha_confirmed and await wait_for_provider_confirmation(
+                int(ctx.channel.id), provider
+            )
+            if not provider_confirmed:
+                await restore_wallet_balance(wallet_currency, amount)
+                transition_manual_exchange_request(parsed_order_id, "release")
+                await progress.edit(content=f"تعذر تأكيد تسليم الطلب {parsed_order_id}.")
+                return
+        transition_manual_exchange_request(parsed_order_id, "complete")
+        await progress.edit(content=f"تم تسليم الطلب {parsed_order_id} بنجاح")
+    except Exception as exc:
+        logger.exception("Manual delivery failed for order %s.", parsed_order_id)
+        try:
+            if "transition_manual_exchange_request" in locals():
+                transition_manual_exchange_request(parsed_order_id, "release")
+        except (OSError, sqlite3.Error, ValueError):
+            logger.exception("Could not release manual delivery claim for order %s.", parsed_order_id)
+        await progress.edit(content=f"تعذر تسليم الطلب {parsed_order_id}: {exc}")
 
 
 @bot.command(name="auto_delivery", aliases=["التسليم_التلقائي"])
