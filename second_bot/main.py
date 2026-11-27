@@ -31,7 +31,6 @@ except ImportError:  # direct execution from second_bot/
 import aiohttp
 import discord
 from discord.ext import commands, tasks
-from dotenv import load_dotenv
 from google.genai import types
 from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 from auto_join import (
@@ -41,13 +40,6 @@ from auto_join import (
 )
 
 from local_ocr import detect_style, load_image, load_model, recognize
-from evaluate_type1_rgb import channel_variants, mask_variants
-from type1_local_ocr import _feature, segment_candidates
-from type1 import load_template_bank, recognize_bmp
-try:
-    from second_bot.type1_ocr.api import recognize_type1
-except ImportError:  # direct execution from second_bot/
-    from type1_ocr.api import recognize_type1
 try:
     from second_bot.auto_delivery import (
         HANDOFF_PREFIX,
@@ -70,7 +62,24 @@ SHARED_GUILD_STATE_PATH = BASE_DIR / ".runtime" / "shared_guilds.json"
 SHARED_GUILD_STATE_MAX_AGE_SECONDS = 90
 # The panel may expose Cosmo-Coins' DISCORD_BOT_TOKEN to every process.
 # The second bot deliberately accepts only its dedicated token variable.
-load_dotenv(BASE_DIR / ".env", override=True)
+def load_local_env(path: Path) -> None:
+    """Load simple KEY=VALUE settings without a third-party dotenv package."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ[key] = value
+
+
+load_local_env(BASE_DIR / ".env")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1490,100 +1499,6 @@ async def extract_numbers_with_veryfi(image_bytes: bytes, mime_type: str) -> str
     return result
 
 
-async def extract_type1_with_fallback(
-    image_bytes: bytes,
-    mime_type: str,
-    *,
-    ocr_space_key: str,
-) -> tuple[dict[tuple[str, str], str | None], str | None, str | None]:
-    """Use OCR.Space consensus, Veryfi on disagreement, then vision fallbacks."""
-    ocr_results: dict[tuple[str, str], str | None] = {}
-    failure_details: list[str] = []
-    if ocr_space_key:
-        try:
-            ocr_results = await extract_numbers_with_ocr_space_variants(
-                image_bytes,
-                api_key=ocr_space_key,
-            )
-            if select_ocr_consensus(ocr_results):
-                return ocr_results, None, None
-            if any(ocr_results.values()):
-                failure_details.append("OCR.Space returned conflicting five-digit results")
-        except RuntimeError as exc:
-            logger.warning("OCR.Space failed for type1; trying vision fallbacks: %s", exc)
-            failure_details.append(f"OCR.Space: {exc}")
-    else:
-        logger.warning("OCR_SPACE_API_KEY is missing; skipping OCR.Space for type1 fallback path.")
-        failure_details.append("OCR_SPACE_API_KEY is missing")
-
-    veryfi_credentials = all(
-        os.getenv(name, "").strip()
-        for name in ("VERYFI_CLIENT_ID", "VERYFI_USERNAME", "VERYFI_API_KEY")
-    )
-    if veryfi_credentials:
-        try:
-            # Send one enhanced PNG only; Veryfi is deliberately reserved for
-            # disagreement/no-consensus cases to protect its monthly quota.
-            enhanced_png = prepare_ocr_space_variants(image_bytes)[1]
-            veryfi_result = await extract_numbers_with_veryfi(enhanced_png, "image/png")
-            ocr_results[("Veryfi", "api")] = veryfi_result
-            space_candidates = {
-                value for (variant, _engine), value in ocr_results.items()
-                if variant != "Veryfi" and value
-            }
-            if veryfi_result and (not space_candidates or veryfi_result in space_candidates):
-                logger.info("Using Veryfi type1 result: %s", veryfi_result)
-                return ocr_results, None, None
-            if veryfi_result:
-                failure_details.append("Veryfi returned a result conflicting with OCR.Space")
-        except RuntimeError as exc:
-            logger.warning("Veryfi type1 fallback failed: %s", exc)
-            failure_details.append(f"Veryfi: {exc}")
-    else:
-        logger.info("Veryfi credentials are not configured; skipping Veryfi type1 fallback.")
-
-    gemini_key, gemini_model = load_vision_config()
-    if gemini_key:
-        try:
-            gemini_result = first_five_digit_result(
-                await extract_numbers_from_image(image_bytes, mime_type, model=gemini_model)
-            )
-            if gemini_result:
-                logger.info("Using Gemini fallback for type1 image: %s", gemini_result)
-                return ocr_results, gemini_result, None
-        except RuntimeError as exc:
-            logger.warning("Gemini type1 fallback failed: %s", exc)
-            failure_details.append(f"Gemini: {exc}")
-    else:
-        logger.info("GEMINI_API_KEY is not configured; skipping Gemini type1 fallback.")
-
-    openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    if openrouter_key:
-        try:
-            openrouter_result = first_five_digit_result(
-                await extract_numbers_with_openrouter(image_bytes, mime_type, api_key=openrouter_key)
-            )
-            if openrouter_result:
-                logger.info("Using OpenRouter fallback for type1 image: %s", openrouter_result)
-                return ocr_results, None, openrouter_result
-        except RuntimeError as exc:
-            logger.warning("OpenRouter type1 fallback failed: %s", exc)
-            failure_details.append(f"OpenRouter: {exc}")
-    else:
-        logger.info("OPENROUTER_API_KEY is not configured; skipping OpenRouter type1 fallback.")
-
-    # If no vision fallback is configured, preserve provider output for
-    # diagnostics instead of hiding usable readings behind an exception.
-    if ocr_results and any(ocr_results.values()):
-        return ocr_results, None, None
-
-    details = "; ".join(failure_details)
-    suffix = f" Details: {details}" if details else ""
-    raise RuntimeError(
-        "OCR.Space and all configured vision fallbacks failed to return five digits." + suffix
-    )
-
-
 def _type1_ai_timeout() -> float:
     try:
         return max(1.0, float(os.getenv("TYPE1_AI_TIMEOUT_SECONDS", str(TYPE1_AI_TIMEOUT_SECONDS))))
@@ -1595,175 +1510,42 @@ async def extract_type1_hybrid(
     image_bytes: bytes,
     mime_type: str,
     *,
-    ocr_space_key: str,
+    ocr_space_key: str = "",
 ) -> dict[str, object]:
-    """Try Type1 providers in order: Gemini 3.5, Gemini 3.8, OCR.Space, local OCR."""
-    failures: list[str] = []
+    """Read type1 with Gemini only; type1 never falls back to local OCR providers."""
+    del ocr_space_key  # Kept for compatibility with older callers.
     gemini_key, _configured_model = load_vision_config()
-    model_order = get_type1_gemini_model_order()
-    logger.info(
-        "Starting Type1 OCR chain: Gemini primary=%s fallback=%s, then OCR.Space and local OCR.",
-        model_order[0],
-        model_order[1],
-    )
-    if gemini_key:
-        for model_name in model_order:
-            logger.info("Type1 OCR attempt started: source=Gemini model=%s", model_name)
-            try:
-                ai_values = await asyncio.wait_for(
-                    extract_numbers_from_image(
-                        image_bytes,
-                        mime_type,
-                        model=model_name,
-                        allow_provider_fallbacks=False,
-                    ),
-                    timeout=_type1_ai_timeout(),
-                )
-                ai_result = first_five_digit_result(ai_values)
-                if ai_result and re.fullmatch(r"[0-9]{5}", ai_result):
-                    logger.info(
-                        "Type1 OCR attempt succeeded: source=Gemini model=%s text=%s",
-                        model_name,
-                        ai_result,
-                    )
-                    return {
-                        "result": ai_result,
-                        "source": f"Gemini ({model_name})",
-                        "local": {"red": None, "blue": None},
-                        "ocr": {},
-                    }
-                failure = "provider returned no valid ASCII five-digit result"
-                failures.append(f"{model_name}: {failure}")
-                logger.warning(
-                    "Type1 OCR attempt failed: source=Gemini model=%s reason=%s",
-                    model_name,
-                    failure,
-                )
-            except asyncio.TimeoutError:
-                failure = f"timed out after {_type1_ai_timeout():g} seconds"
-                failures.append(f"{model_name}: {failure}")
-                logger.warning(
-                    "Type1 OCR attempt failed: source=Gemini model=%s reason=%s",
-                    model_name,
-                    failure,
-                )
-            except Exception as exc:
-                failures.append(f"{model_name}: {exc}")
-                logger.warning(
-                    "Type1 OCR attempt failed: source=Gemini model=%s reason=%s",
-                    model_name,
-                    exc,
-                )
-    else:
-        failures.append("GEMINI_API_KEY is missing")
-        logger.info("Type1 OCR provider skipped: source=Gemini reason=GEMINI_API_KEY is missing.")
+    if not gemini_key:
+        raise RuntimeError("GEMINI_API_KEY is missing")
 
-    ocr_results: dict[tuple[str, str], str | None] = {}
-    if ocr_space_key:
-        logger.info("Type1 OCR attempt started: source=OCR.Space variants=%s", len(TYPE1_TEST_VARIANTS))
+    failures: list[str] = []
+    for model_name in get_type1_gemini_model_order():
         try:
-            ocr_results = await extract_numbers_with_ocr_space_variants(
-                image_bytes,
-                api_key=ocr_space_key,
+            values = await asyncio.wait_for(
+                extract_numbers_from_image(
+                    image_bytes,
+                    mime_type,
+                    model=model_name,
+                    allow_provider_fallbacks=False,
+                ),
+                timeout=_type1_ai_timeout(),
             )
-            consensus = select_ocr_consensus(ocr_results)
-            if consensus:
-                logger.info(
-                    "Type1 OCR attempt succeeded: source=OCR.Space consensus text=%s results=%s",
-                    consensus,
-                    ocr_results,
-                )
+            result = first_five_digit_result(values)
+            if result and re.fullmatch(r"[0-9]{5}", result):
                 return {
-                    "result": consensus,
-                    "source": "OCR.Space consensus",
-                    "local": {"red": None, "blue": None},
-                    "ocr": ocr_results,
+                    "result": result,
+                    "source": f"Gemini ({model_name})",
+                    "local": {},
+                    "ocr": {},
                 }
-            failure = "OCR.Space did not produce a two-variant consensus"
-            failures.append(failure)
-            logger.warning(
-                "Type1 OCR attempt failed: source=OCR.Space reason=%s results=%s",
-                failure,
-                ocr_results,
-            )
+            failures.append(f"{model_name}: no valid five-digit result")
+        except asyncio.TimeoutError:
+            failures.append(f"{model_name}: timed out")
         except Exception as exc:
-            failures.append(f"OCR.Space: {exc}")
-            logger.warning("Type1 OCR attempt failed: source=OCR.Space reason=%s", exc)
-    else:
-        failures.append("OCR_SPACE_API_KEY is missing")
-        logger.info("Type1 OCR provider skipped: source=OCR.Space reason=OCR_SPACE_API_KEY is missing.")
+            failures.append(f"{model_name}: {exc}")
 
-    # Local OCR is deliberately last: the trained classifier, then template bank,
-    # followed by the older red/blue local candidate recognizer.
-    logger.info("Type1 OCR attempt started: source=NumPy Type1 OCR model")
-    try:
-        model_result = recognize_type1(image_bytes)
-    except Exception as exc:
-        logger.warning("Type1 OCR attempt failed: source=NumPy Type1 OCR model reason=%s", exc)
-        model_result = None
-    if model_result is not None and model_result.text and model_result.reliable:
-        logger.info(
-            "Type1 OCR attempt succeeded: source=NumPy Type1 OCR model text=%s",
-            model_result.text,
-        )
-        return {
-            "result": model_result.text,
-            "source": "NumPy Type1 OCR model",
-            "local": {"new_model": model_result.as_dict(), "red": None, "blue": None},
-            "ocr": ocr_results,
-        }
+    raise RuntimeError("Gemini type1 reading failed: " + "; ".join(failures))
 
-    logger.info(
-        "Type1 OCR attempt produced no reliable result: source=NumPy Type1 OCR model reason=%s",
-        getattr(model_result, "reason", "no candidate"),
-    )
-    logger.info("Type1 OCR attempt started: source=NumPy Type1 template library")
-    template_result = extract_type1_template_candidate(image_bytes)
-    if template_result:
-        logger.info(
-            "Type1 OCR attempt succeeded: source=NumPy Type1 template library text=%s",
-            template_result,
-        )
-        return {
-            "result": template_result,
-            "source": "NumPy Type1 template library",
-            "local": {"template": template_result, "red": None, "blue": None},
-            "ocr": ocr_results,
-        }
-
-    logger.info("Type1 OCR attempt produced no result: source=NumPy Type1 template library")
-    logger.info("Type1 OCR attempt started: source=local red/blue recognizer")
-    local = extract_type1_local_candidates(image_bytes)
-    red, blue = local.get("red"), local.get("blue")
-    if red and blue and red == blue:
-        logger.info("Type1 OCR attempt succeeded: source=local red/blue consensus text=%s", red)
-        return {
-            "result": red,
-            "source": "local consensus",
-            "local": local,
-            "ocr": ocr_results,
-        }
-    fallback = next((value for value in (red, blue) if value and re.fullmatch(r"[0-9]{5}", value)), None)
-    if fallback:
-        logger.warning(
-            "Type1 OCR attempt succeeded with an unverified candidate: source=local red/blue recognizer text=%s red=%s blue=%s",
-            fallback,
-            red,
-            blue,
-        )
-    else:
-        logger.error(
-            "Type1 OCR chain exhausted: no provider returned five ASCII digits; failures=%s local=%s",
-            failures,
-            local,
-        )
-    return {
-        "result": fallback,
-        "source": "local unverified" if fallback else "none",
-        "local": local,
-        "ocr": ocr_results,
-        "failure": "; ".join(failures),
-    }
 
 async def extract_numbers_from_image(
     image_bytes: bytes,
@@ -1860,19 +1642,6 @@ async def extract_numbers_from_image(
                     logger.warning("%s", last_failure)
 
         if response_data is None or last_failure is not None and response_data.get("candidates") is None:
-            openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip() if allow_provider_fallbacks else ""
-            if openrouter_key:
-                try:
-                    logger.warning("Gemini was unavailable; trying OpenRouter free vision fallback.")
-                    return await extract_numbers_with_openrouter(
-                        image_bytes,
-                        mime_type,
-                        api_key=openrouter_key,
-                        model=os.getenv("OPENROUTER_VISION_MODEL", DEFAULT_OPENROUTER_MODEL).strip()
-                        or DEFAULT_OPENROUTER_MODEL,
-                    )
-                except RuntimeError as openrouter_failure:
-                    logger.warning("OpenRouter fallback failed: %s", openrouter_failure)
             raise last_failure or RuntimeError("Gemini returned no response")
 
         try:
@@ -2669,12 +2438,7 @@ async def numbers(ctx: commands.Context) -> None:
                 await send_notice(ctx, "لم أجد أرقامًا واضحة في الصورة.")
             return
         else:
-            ocr_space_key = os.getenv("OCR_SPACE_API_KEY", "").strip()
-            hybrid = await extract_type1_hybrid(
-                image_bytes,
-                mime_type,
-                ocr_space_key=ocr_space_key,
-            )
+            hybrid = await extract_type1_hybrid(image_bytes, mime_type)
             result = hybrid.get("result")
             if result:
                 local = hybrid.get("local", {})
@@ -2693,28 +2457,12 @@ async def numbers(ctx: commands.Context) -> None:
     except RuntimeError as exc:
         logger.warning("Image number extraction failed: %s", exc)
         error_text = str(exc).lower()
-        if isinstance(exc, OCRSpaceDailyBudgetError):
-            await send_notice(
-                ctx,
-                "بلغ البوت سقف الطلبات المحلي الآمن لـOCR.Space لهذا اليوم؛ لم يُرسل طلب جديد. "
-                "انتظر تجدد الحصة ثم حاول مرة أخرى.",
-            )
-        elif isinstance(exc, OCRSpaceCooldownError):
-            await send_notice(ctx, f"OCR.Space في فترة تهدئة بعد 429؛ لم يُرسل طلب جديد. {exc}")
-        elif "ocr.space api error 429" in error_text:
-            await send_notice(
-                ctx,
-                "رفض OCR.Space الطلبات مؤقتًا (HTTP 429)، لذلك أوقف البوت بقية محاولات OCR. "
-                "قد تكون الحصة أو سرعة الطلبات قد تجاوزت الحد؛ هذا لا يعني أن الصورة غير مقروءة. "
-                "انتظر تجدد الحصة أو تحقق من لوحة OCR.Space ثم أعد المحاولة.",
-            )
-        elif "timed out" in error_text or "api error" in error_text:
-            await send_notice(ctx, "خدمة OCR الخارجية تأخرت أو غير متاحة مؤقتًا. حاول مرة أخرى بعد قليل.")
+        if "timed out" in error_text:
+            await send_notice(ctx, "انتهت مهلة Gemini أثناء قراءة النوع الأول. حاول مرة أخرى بعد قليل.")
+        elif "gemini" in error_text or "api error" in error_text:
+            await send_notice(ctx, "تعذر الوصول إلى Gemini لقراءة النوع الأول. تحقق من GEMINI_API_KEY ثم حاول مرة أخرى.")
         else:
-            await send_notice(
-                ctx,
-                "تعذر قراءة الأرقام من الصورة. تأكد من إعداد OCR_SPACE_API_KEY أو GEMINI_API_KEY أو OPENROUTER_API_KEY.",
-            )
+            await send_notice(ctx, "تعذر قراءة الأرقام من الصورة. تحقق من إعداد GEMINI_API_KEY.")
         return
     except Exception:
         logger.exception("Unexpected failure while extracting numbers from an image.")
@@ -2732,170 +2480,12 @@ async def numbers(ctx: commands.Context) -> None:
 @bot.command(name="testall")
 @commands.check(check_control_owner)
 async def testall(ctx: commands.Context) -> None:
-    """Evaluate OCR.Space Engine 3, resuming from a saved per-variant checkpoint."""
-    api_key = os.getenv("OCR_SPACE_API_KEY", "").strip()
-    if not api_key:
-        await send_notice(ctx, "لم يُضبط OCR_SPACE_API_KEY في ملف إعدادات البوت.")
-        return
-    if TYPE1_TEST_LOCK.locked():
-        await send_notice(ctx, "يوجد اختبار شامل قيد التشغيل بالفعل.")
-        return
-
-    async with TYPE1_TEST_LOCK:
-        samples_dir = BASE_DIR.parent / "samples"
-        try:
-            samples = load_type1_test_samples(samples_dir)
-            dataset_fingerprint = fingerprint_type1_dataset(samples_dir, samples)
-        except (OSError, ValueError, csv.Error) as exc:
-            await send_notice(ctx, f"تعذر تحميل عينات النوع الأول: {exc}")
-            return
-
-        checkpoint_path = runtime_state_path("testall_engine3_checkpoint.json")
-        checkpoint, resumed = load_testall_checkpoint(checkpoint_path, dataset_fingerprint)
-        checkpoint_records = checkpoint.get("records")
-        if not isinstance(checkpoint_records, dict):
-            checkpoint_records = {}
-            checkpoint["records"] = checkpoint_records
-        write_runtime_json(checkpoint_path, checkpoint)
-
-        resume_position = testall_resume_position(samples, checkpoint)
-        remaining_requests = testall_remaining_request_count(samples, checkpoint)
-        if resumed and resume_position:
-            start_description = (
-                f"استئناف من {resume_position[0]} / {resume_position[1]}؛ "
-                "النتائج المكتملة محفوظة ولن تُرسل إلى OCR.Space مرة أخرى."
-            )
-        elif resumed:
-            start_description = "كل المعالجات مكتملة في نقطة الحفظ؛ سأعيد إرسال التقرير دون طلبات OCR جديدة."
-        else:
-            start_description = "لا توجد نقطة حفظ مطابقة لهذه المجموعة؛ يبدأ الاختبار من أول صورة."
-        progress_message = await ctx.send(
-            f"اختبار {len(samples)} صورة من النوع الأول باستخدام OCR.Space Engine 3. {start_description} "
-            f"المعالجات المتبقية: {remaining_requests} طلبًا كحد أقصى؛ "
-            f"الفاصل {OCR_SPACE_MIN_INTERVAL_SECONDS:g} ثانية، والسقف المحلي "
-            f"{OCR_SPACE_DAILY_REQUEST_BUDGET} طلب/يوم UTC."
-        )
-        request_count = 0
-        stop_reason: str | None = None
-        current_failure: dict[str, str] | None = None
-
-        for image_index, sample in enumerate(samples, start=1):
-            stored_record = checkpoint_records.get(sample["filename"])
-            if not isinstance(stored_record, dict):
-                stored_record = {"expected": sample["answer"], "predictions": {}}
-                checkpoint_records[sample["filename"]] = stored_record
-            predictions = stored_record.get("predictions")
-            if not isinstance(predictions, dict):
-                predictions = {}
-                stored_record["predictions"] = predictions
-
-            if all(variant in predictions for variant, _ in TYPE1_TEST_VARIANTS):
-                continue
-
-            image_path = samples_dir / sample["filename"]
-            try:
-                image_bytes = image_path.read_bytes()
-                prepared_variants = prepare_ocr_space_variants(image_bytes)
-            except (OSError, ValueError) as exc:
-                logger.warning("Could not prepare test image %s: %s", image_path.name, exc)
-                for variant, _ in TYPE1_TEST_VARIANTS:
-                    predictions.setdefault(variant, None)
-                write_runtime_json(checkpoint_path, checkpoint)
-                continue
-
-            for (variant, _), payload in zip(TYPE1_TEST_VARIANTS, prepared_variants):
-                if variant in predictions:
-                    continue
-                checkpoint["in_progress"] = {
-                    "filename": sample["filename"],
-                    "variant": variant,
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                }
-                write_runtime_json(checkpoint_path, checkpoint)
-                request_count += 1
-                try:
-                    result = await extract_numbers_with_ocr_space(
-                        payload,
-                        "image/png",
-                        api_key=api_key,
-                        engine="3",
-                    )
-                    predictions[variant] = result[0] if result else None
-                    checkpoint["in_progress"] = None
-                    checkpoint["last_stop"] = None
-                    write_runtime_json(checkpoint_path, checkpoint)
-                except RuntimeError as exc:
-                    logger.warning("Engine 3 test failed for %s/%s: %s", image_path.name, variant, exc)
-                    error_text = str(exc).lower()
-                    is_provider_failure = (
-                        isinstance(exc, (OCRSpaceRateLimitError, OCRSpaceCooldownError, OCRSpaceDailyBudgetError))
-                        or "api error" in error_text
-                        or "request timed out" in error_text
-                        or "request failed" in error_text
-                    )
-                    if is_provider_failure:
-                        current_failure = {
-                            "filename": sample["filename"],
-                            "variant": variant,
-                            "reason": str(exc),
-                        }
-                        checkpoint["in_progress"] = None
-                        checkpoint["last_stop"] = {
-                            **current_failure,
-                            "stopped_at": datetime.now(timezone.utc).isoformat(),
-                        }
-                        write_runtime_json(checkpoint_path, checkpoint)
-                        if isinstance(exc, OCRSpaceCooldownError):
-                            stop_reason = "لا يزال OCR.Space في فترة التهدئة؛ لم يُرسل طلب جديد وستُعاد المعالجة لاحقًا."
-                        elif isinstance(exc, OCRSpaceRateLimitError) or "429" in error_text or "quota" in error_text or "limit reached" in error_text:
-                            stop_reason = "أوقف الاختبار طلبات OCR بسبب 429/الحصة؛ ستُعاد هذه المعالجة عند الاستئناف."
-                        elif isinstance(exc, OCRSpaceDailyBudgetError):
-                            stop_reason = "بلغ البوت السقف اليومي المحلي؛ لم يُرسل هذا الطلب وستُعاد المحاولة لاحقًا."
-                        else:
-                            stop_reason = "تعطل طلب OCR.Space؛ حُفظت نقطة الاستئناف ولن تُعاد النتائج السابقة."
-                        break
-
-                    predictions[variant] = None
-                    checkpoint["in_progress"] = None
-                    write_runtime_json(checkpoint_path, checkpoint)
-
-            if stop_reason:
-                break
-            if image_index % 10 == 0 or image_index == len(samples):
-                try:
-                    await progress_message.edit(
-                        content=f"اختبار Engine 3 جارٍ: اكتملت {image_index}/{len(samples)} صورة "
-                        f"({request_count} محاولة طلب في هذه الجلسة)."
-                    )
-                except discord.HTTPException:
-                    logger.info("Could not update testall progress message.")
-
-        records = testall_report_records(samples, checkpoint, current_failure)
-        summary, report_csv = build_type1_test_report(records)
-        summary += f"\nمحاولات الطلب في هذه الجلسة: {request_count} من {remaining_requests} المتبقية عند بدايتها."
-        if stop_reason:
-            summary += (
-                f"\n{stop_reason} نقطة الحفظ: {current_failure['filename']} / {current_failure['variant']}. "
-                "شغّل $testall لاحقًا للمتابعة من هذه المعالجة."
-            )
-
-        try:
-            final_status = (
-                f"توقف testall؛ حُفظت نقطة الاستئناف عند {current_failure['filename']} / "
-                f"{current_failure['variant']}."
-                if stop_reason and current_failure
-                else "اكتمل اختبار الصور؛ أرفقت التقرير التفصيلي."
-            )
-            await progress_message.edit(content=final_status)
-        except discord.HTTPException:
-            logger.info("Could not update final testall progress message.")
-        await ctx.send(
-            summary,
-            file=discord.File(BytesIO(report_csv), filename="testall_engine3_report.csv"),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        if not stop_reason:
-            checkpoint_path.unlink(missing_ok=True)
+    """Explain that the former OCR.Space benchmark is no longer part of production."""
+    await send_notice(
+        ctx,
+        "تم إيقاف `$testall` لأنه كان يختبر OCR.Space. مسار type1 الإنتاجي يستخدم Gemini فقط؛ "
+        "استخدم `$numbers` لاختبار صورة واحدة.",
+    )
 
 
 async def process_auto_delivery_handoff(message: discord.Message) -> None:
@@ -3131,11 +2721,7 @@ async def process_pending_currency_confirmation(message: discord.Message) -> Non
             numbers_found = extract_numbers_locally(image_bytes)
             answer = "\n".join(numbers_found) if numbers_found else None
         else:
-            hybrid = await extract_type1_hybrid(
-                image_bytes,
-                mime_type,
-                ocr_space_key=os.getenv("OCR_SPACE_API_KEY", "").strip(),
-            )
+            hybrid = await extract_type1_hybrid(image_bytes, mime_type)
             answer = hybrid.get("result")
 
         if answer:

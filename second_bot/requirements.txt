@@ -1,4 +1,4 @@
 discord.py-self
 Pillow
-numpy
-python-dotenv
+aiohttp
+google-genai
